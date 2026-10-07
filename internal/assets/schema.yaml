@@ -1,0 +1,153 @@
+config_version: 2
+central:
+  name: 网站监控中心
+  # 子服务器直接连接此 IP 的 HTTPS 接口，不经过 Nginx。
+  public_url: https://192.0.2.10:19443
+  install_dir: /opt/webscan-central
+  data_dir: /var/lib/webscan-central
+  log_dir: /var/log/webscan
+  backup_dir: /var/backups/webscan
+  # 默认部署本项目的 Grafana 和 Loki；按需明确配置复用。
+  reuse_existing: {grafana: false, loki: false}
+  new_components_memory_budget_mib: 384
+  event_service:
+    bind_address: 127.0.0.1
+    port: 18081
+    https_bind_address: 0.0.0.0
+    https_port: 19443
+    # 留空时仅允许启用节点、主服务器 IP 和本机来源。
+    allowed_source_cidrs: []
+    max_request_mib: 2
+    max_batch_events: 100
+  grafana:
+    # 浏览器通过主服务器 IP:映射端口访问，无需配置域名。
+    bind_address: 0.0.0.0
+    # 容器内仍是 3000，此项自定义宿主机映射端口。
+    host_port: 3000
+    timezone: Asia/Shanghai
+    anonymous_access: false
+    admin_username: admin
+    # 新安装时留空，由部署脚本首次生成并保存到 root 专属凭据文件。
+    admin_password: ''
+    create_viewer: true
+    viewer_username: webscan-viewer
+    viewer_password: ''
+feishu:
+  enabled: true
+  mode: inline
+  existing_env_file: ''
+  # 填写飞书 Webhook，实际配置保持 root 0600。
+  webhook_url: ''
+  signing_enabled: true
+  signing_secret: ''
+  message_prefix: '【网站监控】'
+  timeout_seconds: 10
+  rate_limit: {max_per_second: 1, max_per_minute: 30}
+  retry: {initial_delay_seconds: 5, max_delay_seconds: 600, jitter: true}
+  notifications:
+    file_changes: true
+    important_config_changes: true
+    scan_matches: true
+    scan_errors: true
+    health_failures: true
+    health_recoveries: true
+  daily_test: {enabled: false, time: '09:00', timezone: Asia/Shanghai}
+optional_components:
+  clamav: {enabled: false, min_available_memory_mib: 1536}
+  auditd: {enabled: false}
+node_defaults:
+  resources: {agent_memory_mib: 256, go_memory_mib: 64, cpus: 1.0, gomaxprocs: 2}
+  ssh:
+    username: root
+    connect_timeout_seconds: 10
+    # password：密码认证；key：SSH 私钥认证。各节点可以分别覆盖。
+    auth_method: key
+    password: ''
+    # 必须是执行脚本的主服务器上的绝对路径，不是 Mac 路径。
+    # key 模式必填；私钥只供 SSH 使用，不上传节点或进入备份。
+    private_key_path: ''
+    # 留空时首次成功连接自动记录主机密钥，之后持续校验；兼容旧版手动固定值。
+    host_key_sha256: ''
+  monitor:
+    roots: [/www/wwwroot]
+    site_name_mode: first_directory
+    extensions: [.php, .phtml, .php3, .php4, .php5, .php7, .php8, .phar, .pht, .inc]
+    important_filenames: [.user.ini, .htaccess]
+    critical_paths: []
+    exclude_paths: []
+    reconciliation: {interval_hours: 6, start_jitter_minutes: 30, max_read_mib_per_second: 5, nice: 15, ionice_class: 3}
+  scan:
+    yara: {enabled: true, workers: 1, timeout_seconds: 15, max_file_mib: 20}
+    clamav: {enabled: false, workers: 1, timeout_seconds: 30, max_file_mib: 100}
+    auditd: {enabled: false, watched_paths: []}
+  transport: {vector_buffer_mib: 512, request_timeout_seconds: 10, local_event_queue_max_mib: 1024, local_log_max_mib: 1024}
+  metrics: {enabled: true, port: 19100, tls_enabled: true, allowed_source_ip: 192.0.2.10}
+nodes:
+  - id: node-202
+    name: 子服务器202
+    host: 198.51.100.20
+    enabled: true
+    ssh:
+      port: 64098
+      auth_method: key
+      private_key_path: /root/.ssh/198.51.100.20_id_ed25519
+      password: ''
+  - id: node-28
+    name: 子服务器28
+    host: 198.51.100.21
+    enabled: true
+    ssh:
+      port: 555
+      auth_method: key
+      private_key_path: /root/.ssh/198.51.100.21_id_ed25519
+      password: ''
+health:
+  metrics_scrape_seconds: 30
+  filesystem_probe_seconds: 60
+  probe_directory: /var/lib/webscan/probe
+  alerts:
+    node_unreachable_seconds: 120
+    agent_stopped_seconds: 60
+    local_probe_stale_seconds: 180
+    central_probe_stale_seconds: 180
+    loki_probe_stale_seconds: 180
+    oldest_pending_task_seconds: 300
+    disk_warning_percent: 80
+    disk_critical_percent: 90
+    inode_warning_percent: 80
+    inode_critical_percent: 90
+    clock_offset_warning_seconds: 30
+    clock_failure_duration_seconds: 300
+  alert_on_inotify_overflow: true
+  alert_on_dropped_events: true
+  alertmanager: {group_wait_seconds: 30, group_interval_seconds: 300, repeat_interval_hours: 4}
+retention: {prometheus_days: 15, loki_days: 30, sqlite_events_days: 30, delivery_records_days: 30, local_logs_days: 7}
+backup:
+  enabled: true
+  time: '02:30'
+  timezone: Asia/Shanghai
+  keep_days: 7
+  include_sqlite: true
+  include_runtime_config: true
+  include_node_passwords: false
+deployment:
+  # 一次执行依次部署全部启用节点；不再等待 24 小时观察。
+  mode: batch
+  max_parallel_nodes: 1
+  node_order: [node-202, node-28]
+  stop_on_node_failure: true
+  run_acceptance_tests: true
+  send_labeled_feishu_test: true
+  retire_legacy_after_acceptance: true
+  upgrade_existing_components: false
+
+registry:
+  prefix: docker.io/gzdzh
+  auth_required: false
+  username: ''
+  password: ''
+  # 仅加速 Docker Hub；空列表直接访问官方仓库。
+  mirrors: []
+images:
+  central: webscan-central:v2.0.0
+  agent: webscan-agent:v2.0.0

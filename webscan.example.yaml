@@ -1,0 +1,426 @@
+# GoFrame 版配置示例。复制为 webscan.yaml 后，填写真实 IP、SSH 密钥和飞书凭据。
+# 含凭据的实际配置放在主服务器，归 root 所有，权限 0600；IP 是保留的示例地址。
+# 相比 Python 版：config_version 改为 2；新增 resources、registry、images。
+# 标有“兼容保留”的参数仍可读取，但当前 Go 实现不会按这些开关改变行为。
+# 修改过滤规则用 --reload-rules；资源、根目录、端口和镜像变更用 --upgrade。
+
+# 配置格式版本：Go 版必须为 2，旧版的 1 不再接受。
+config_version: 2
+
+# 主服务器配置：接收节点事件、投递飞书、保存日志和提供监控面板。
+central:
+  # 主服务器显示名称，用于监控面板和服务器标识。
+  name: 网站监控中心
+  # 节点连接的主服务器 IP HTTPS 地址；替换示例地址，端口必须等于 https_port，不填域名。
+  public_url: https://192.0.2.10:19443
+  # 主服务器安装根目录；运行配置和 Compose 文件保存在其 webscan-v1 子目录。
+  install_dir: /opt/webscan-central
+  # 主服务器数据根目录，保存事件 SQLite 和各监控组件数据；升级时保留。
+  data_dir: /var/lib/webscan-central
+  # 主服务器预留日志目录；当前服务日志主要通过 docker logs 查看。
+  log_dir: /var/log/webscan
+  # 主服务器每日备份目录；必须与其他 central 目录互不包含。
+  backup_dir: /var/backups/webscan
+  # 是否复用主服务器已有组件；启用后会检查已有服务的端口、认证及网络。
+  reuse_existing:
+    # true 复用已有 Grafana；false 由本项目创建 Grafana。
+    grafana: false
+    # true 复用已有 Loki；false 由本项目创建 Loki。
+    loki: false
+  # receiver、Prometheus、Alertmanager、主机 exporter 的容器内存预算，单位 MiB。
+  # 不包含新建 Grafana 的 192 MiB 和 Loki 的 256 MiB，也不预先分配内存。
+  new_components_memory_budget_mib: 384
+  # 主服务器事件接收接口设置。
+  event_service:
+    # 宿主机内部 HTTP 监听地址；当前校验要求固定为 127.0.0.1。
+    bind_address: 127.0.0.1
+    # 宿主机内部 HTTP 端口，供就绪检查和本机维护使用。
+    port: 18081
+    # 宿主机 HTTPS 端口映射地址；0.0.0.0 表示全部 IPv4 网卡。
+    https_bind_address: 0.0.0.0
+    # 对外 HTTPS 端口；节点上报和回执走此端口，须放行节点访问。
+    https_port: 19443
+    # 额外配置来源 CIDR 列表，如 ['198.51.100.21/32']。
+    # [] 自动加入全部启用节点；非空时按列表放行，并始终加入主服务器及回环 IP。
+    allowed_source_cidrs: []
+    # 单次 HTTP 请求体最大容量，单位 MiB；不是单个被扫描文件的大小。
+    max_request_mib: 2
+    # 单次事件上报允许的最大事件数；当前 Vector 每批发送 1 条。
+    max_batch_events: 100
+  # 主服务器 Grafana 面板和账号配置。
+  grafana:
+    # Grafana 宿主机监听地址；0.0.0.0 对全部网卡开放。
+    bind_address: 0.0.0.0
+    # 可自定义的宿主机端口；容器内固定 3000，不需要 grafana.public_url。
+    # 已部署端口变更使用 --grafana-only --upgrade。
+    host_port: 3000
+    # 创建监控面板时使用的时区；不控制飞书通知时间，飞书当前固定北京时间。
+    timezone: Asia/Shanghai
+    # 兼容保留：当前生成的 Grafana 配置始终关闭匿名访问，设 true 不会开启。
+    anonymous_access: false
+    # 管理员登录名；与 viewer_username 不同，只允许字母、数字及 _.@-。
+    admin_username: admin
+    # 首次留空随机生成；已有部署留空沿用密码，不重新生成。
+    # 自定义密码须 8～256 字节；改已有账号密码执行 --sync-grafana-credentials。
+    # 凭据保存在 /var/lib/webscan-deploy/credentials.json，部署末尾和 Grafana 日志可查。
+    admin_password: ''
+    # 是否创建、校验 Viewer 只读账号；false 不会删除已经存在的账号。
+    create_viewer: true
+    # 只读账号登录名；现有账号必须已具备 Viewer 权限。
+    viewer_username: webscan-viewer
+    # 只读账号密码；首次留空随机生成，后续修改用 --sync-grafana-credentials。
+    viewer_password: ''
+
+# 飞书机器人设置；通知由主服务器发送，子服务器不保存机器人密钥。
+feishu:
+  # 默认开启飞书；生成或部署前必须填写自己的 Webhook 和签名密钥。
+  # true 时必须配置有效 Webhook，启用签名还必须填写 signing_secret。
+  enabled: true
+  # inline 从此 YAML 读取凭据；existing_env（也接受 existing）从已有 env 文件读取。
+  mode: inline
+  # existing_env 模式的主服务器绝对路径；文件内使用 FEISHU_WEBHOOK_URL 和 FEISHU_SECRET。
+  existing_env_file: ''
+  # inline 模式填写 https://open.feishu.cn/open-apis/bot/v2/hook/... 机器人地址。
+  webhook_url: ''
+  # 是否发送机器人签名；应与飞书机器人的“加签”设置保持一致。
+  signing_enabled: true
+  # 飞书机器人加签密钥；inline 模式且 signing_enabled=true 时必填。
+  signing_secret: ''
+  # 每条飞书通知的文字前缀；可配合机器人关键词校验使用。
+  message_prefix: 【网站监控】
+  # 主服务器调用飞书 API 的单次超时，单位秒。
+  timeout_seconds: 10
+  # 飞书发送限速；超过速率的消息保留在队列中等待。
+  rate_limit:
+    # 每秒发送上限。
+    max_per_second: 1
+    # 每分钟发送上限。
+    max_per_minute: 30
+  # 投递失败后的指数退避重试；未成功任务保持持久化。
+  retry:
+    # 第一次失败后的基础重试等待时间，单位秒。
+    initial_delay_seconds: 5
+    # 指数退避基础等待时间上限，单位秒。
+    max_delay_seconds: 600
+    # true 在等待时间上加入约 ±20% 随机变化，避免同时重试。
+    jitter: true
+  # 各类飞书通知开关；关闭某类通知仍会保存相应事件并投递 Loki。
+  notifications:
+    # 普通受监控文件的新增、修改、删除和移动通知。
+    file_changes: true
+    # important_filenames 或 critical_paths 对应文件的变更通知，独立于 file_changes。
+    important_config_changes: true
+    # YARA／ClamAV 命中特征时发送；未命中的扫描结果不单独发送。
+    scan_matches: true
+    # 扫描未完成、执行错误或超时的通知。
+    scan_errors: true
+    # Agent 异常事件及 Prometheus 健康故障告警。
+    health_failures: true
+    # 健康告警恢复后的通知。
+    health_recoveries: true
+  # 主服务器每天主动检查飞书通知链路，不修改业务文件。
+  daily_test:
+    # 是否启用每日测试；飞书机器人应同时配置并启用。
+    enabled: false
+    # 每日触发时间，24 小时 HH:MM；服务错过时间后可在当天补发一次。
+    time: '09:00'
+    # 每日测试的调度时区。
+    timezone: Asia/Shanghai
+
+# 旧版可选组件参数；Go 镜像内已有 yara 和 clamdscan 客户端。
+optional_components:
+  # 兼容保留：此区块不会自动安装 ClamAV 服务，应使用节点 scan.clamav 设置扫描。
+  clamav:
+    # 兼容保留：当前部署器不按此项安装或启用 ClamAV。
+    enabled: false
+    # 兼容保留：旧版安装内存门槛（MiB）；当前 Go 部署器不执行这项检查。
+    min_available_memory_mib: 1536
+  # 兼容保留：当前 Go 版没有接入 auditd 采集。
+  auditd:
+    # 保持 false；设 true 也不会启动 auditd 采集。
+    enabled: false
+
+# 全部子服务器默认配置；nodes 下的同名字段覆盖这里。
+# 映射字段合并，列表整体替换；单节点自定义忽略列表时需保留所需公共规则。
+node_defaults:
+  # Go 版新增的 Agent 容器资源设置；修改后用 --upgrade 应用。
+  resources:
+    # Agent 容器硬内存上限，单位 MiB，含 Go、YARA 子进程、缓存及监听开销。
+    # 范围 128～8192；不是预先占用的内存量。
+    agent_memory_mib: 256
+    # Go GOMEMLIMIT 软内存目标，单位 MiB；最少 32，须比容器上限至少少 32。
+    # 仅约束 Go 管理的内存，不是容器总内存硬上限。
+    go_memory_mib: 64
+    # Agent 容器 CPU 配额，1.0 表示最多约一个 CPU 核的计算时间；范围 0.1～16。
+    cpus: 1.0
+    # Go GOMAXPROCS：可同时执行 Go 代码的线程数，范围 1～32；不是扫描 worker 数。
+    gomaxprocs: 2
+  # 主服务器连接子服务器的 SSH 默认参数；每台的端口在 nodes 内填写；主机指纹首次认证成功后自动记录。
+  # host_key_sha256 无需填写；记录保存在主服务器 /var/lib/webscan-deploy/ssh_known_hosts。
+  ssh:
+    # 当前部署要求 root 用户，不支持普通用户加 sudo。
+    # 可选：留空自动记录 SSH 主机密钥，之后每次连接校验；无需手动填写。
+    host_key_sha256: ''
+    username: root
+    # SSH 建连、主机密钥协商及认证的超时，单位秒。
+    connect_timeout_seconds: 10
+    # key 使用私钥认证；password 使用密码认证，不自动互相回退。
+    auth_method: key
+    # password 模式必填；key 模式可留空。
+    password: ''
+    # key 模式必填：执行部署脚本的主服务器上的私钥绝对路径，不是 Mac 路径。
+    # 私钥应由 root 持有，权限 0400 或 0600，不支持交互输入私钥口令。
+    private_key_path: ''
+  # 子服务器文件监控规则。
+  monitor:
+    # 网站根目录的绝对路径列表；容器只读挂载，程序不执行被监控 PHP。
+    # 变更根目录需要 --upgrade，不属于规则热加载范围。
+    roots:
+      - /www/wwwroot
+    # 兼容保留：当前固定以根目录下的第一级目录名识别站点，不支持切换其他模式。
+    site_name_mode: first_directory
+    # 受监控文件的扩展名，含前导点，匹配时不区分大小写；支持 --reload-rules。
+    extensions:
+      - .php
+      - .phtml
+      - .php3
+      - .php4
+      - .php5
+      - .php7
+      - .php8
+      - .phar
+      - .pht
+      - .inc
+    # 重要文件名，只写名称不写路径；即使不在 extensions 中也监控，支持热加载。
+    important_filenames:
+      - .user.ini
+      - .htaccess
+    # 必须监控的完整文件绝对路径，可在 roots 外，忽略规则不能排除它们。
+    # 支持热加载；若新增文件的父目录尚未挂载到容器，需要先 --upgrade。
+    critical_paths: []
+    # 忽略路径的绝对路径通配列表；匹配目录后连同全部子目录排除，里面的 PHP 也忽略。
+    # * 匹配一个路径段，** 匹配零个或多个目录；不得排除 roots 本身或 critical_paths。
+    # 示例：['/www/wwwroot/*/**/runtime/**/cache', '/www/wwwroot/*/caches/temp']。
+    # 支持 --reload-rules，无需重启；[] 表示不配置业务路径排除规则。
+    exclude_paths: []
+    # 周期性清单核对：用于补查实时监听可能遗漏的变更。
+    reconciliation:
+      # 完整核对间隔，单位小时，至少为 1；不是实时监听的轮询间隔。
+      interval_hours: 6
+      # 首轮周期核对前额外加入的随机延迟上限，单位分钟，用于错开节点压力。
+      start_jitter_minutes: 30
+      # 核对文件内容时读取速度上限，单位 MiB/秒，至少为 1；不限制所有业务 I/O。
+      max_read_mib_per_second: 5
+      # 清单核对线程的 Linux nice 值；通常 -20～19，越大优先级越低。
+      nice: 15
+      # 清单核对线程 I/O 优先级类别：1 实时、2 尽力、3 空闲；当前默认 3。
+      ionice_class: 3
+  # 子服务器异步扫描设置；只读取文件快照，不运行文件中的业务代码。
+  scan:
+    # YARA 特征扫描；规则文件为 /etc/webscan-v1/php-webshell.yar。
+    yara:
+      # 是否启用 YARA 扫描；规则内容可通过 --reload-rules --yara-rules 下发。
+      enabled: true
+      # YARA 同时扫描上限，范围 1～16。
+      workers: 1
+      # 单次 YARA 扫描超时，单位秒，范围 1～600。
+      timeout_seconds: 15
+      # 可扫描文件的大小上限，单位 MiB；超过则记录跳过扫描。
+      max_file_mib: 20
+    # ClamAV 扫描：节点需预先部署 clamd 服务，Agent 挂载 /run/clamav 并用 clamdscan 调用。
+    clamav:
+      # 是否调用 ClamAV；只设 true 不会自动安装 clamd 服务或病毒库。
+      enabled: false
+      # ClamAV 同时扫描上限，范围 1～16。
+      workers: 1
+      # 单次 ClamAV 扫描超时，单位秒，范围 1～600。
+      timeout_seconds: 30
+      # 可扫描文件的大小上限，单位 MiB。
+      max_file_mib: 100
+    # 兼容保留：当前 Go 版没有实现 auditd 扫描／采集。
+    auditd:
+      # 保持 false；设 true 不会启用 auditd。
+      enabled: false
+      # 兼容保留的审计路径列表；当前未使用。
+      watched_paths: []
+  # 子服务器事件持久化、日志导出与传输设置。
+  transport:
+    # Vector 磁盘缓冲容量，单位 MiB；满后阻塞等待，不主动丢弃。
+    vector_buffer_mib: 512
+    # 节点上报及查询主服务器接收回执的请求超时，单位秒。
+    request_timeout_seconds: 10
+    # Agent 本地 SQLite 已使用页面容量上限，单位 MiB；超限会计数并告警丢失事件。
+    local_event_queue_max_mib: 1024
+    # 节点 JSONL 日志总容量上限，单位 MiB；未确认接收的日志不主动清理。
+    local_log_max_mib: 1024
+  # 子服务器 exporter 指标接口，供主服务器 Prometheus 通过双向 TLS 采集。
+  metrics:
+    # 兼容保留：当前部署始终启用 exporter，设 false 不会关闭采集。
+    enabled: true
+    # 子服务器指标端口，使用非特权端口（建议 1024～65535）；不是 SSH 或事件上报端口。
+    port: 19100
+    # 必须为 true；当前校验不接受无 TLS 的指标接口。
+    tls_enabled: true
+    # 指标端口防火墙允许的主服务器 IP；替换示例地址，并与实际采集来源一致。
+    allowed_source_ip: 192.0.2.10
+
+# 子服务器清单；可在每个条目中覆盖 node_defaults 下的配置。
+nodes:
+  # 节点唯一 ID，只允许字母、数字、下划线和连字符；需出现在 deployment.node_order。
+  - id: node-202
+    # 节点显示名称，用于飞书消息和监控面板。
+    name: 子服务器202
+    # 节点真实 IP；替换示例地址，不填域名和 SSH 端口。
+    host: 198.51.100.20
+    # 是否参与部署、事件接收和监控；false 跳过此节点。
+    enabled: true
+    # 此节点的 SSH 覆盖配置。
+    ssh:
+      # 此节点 SSH 服务端口，与主服务器 HTTPS 端口无关。
+      port: 22
+      # 此节点使用 key 私钥认证，也可按需改为 password。
+      auth_method: key
+      # 主服务器上连接此节点的真实私钥绝对路径，按实际情况填写。
+      private_key_path: /root/.ssh/node-202_id_ed25519
+      # 仅 password 模式填写 SSH 登录密码。
+      password: ''
+  # 第二个节点的唯一 ID；同样必须包含在 node_order 中。
+  - id: node-28
+    # 节点显示名称。
+    name: 子服务器28
+    # 节点真实 IP，替换示例地址。
+    host: 198.51.100.21
+    # true 启用此节点；false 跳过。
+    enabled: true
+    # 此节点的 SSH 覆盖配置。
+    ssh:
+      # 此节点 SSH 服务端口。
+      port: 22
+      # key 为私钥认证，password 为密码认证。
+      auth_method: key
+      # 主服务器上连接此节点的真实私钥绝对路径，按实际情况填写。
+      private_key_path: /root/.ssh/node-28_id_ed25519
+      # 仅 password 模式填写。
+      password: ''
+
+# 监控链路自检、Prometheus 告警阈值和 Alertmanager 通知节奏。
+health:
+  # 指标采集和告警规则评估间隔，单位秒。
+  metrics_scrape_seconds: 30
+  # 每个节点写入独立心跳测试文件的间隔，单位秒。
+  filesystem_probe_seconds: 60
+  # 节点心跳文件目录，独立于业务网站；即使业务扩展名被过滤也继续检测。
+  probe_directory: /var/lib/webscan/probe
+  # 主服务器 Prometheus 的健康告警参数；时间均为秒，percent 均为使用率百分比。
+  alerts:
+    # 节点指标接口不可达持续多久后告警。
+    node_unreachable_seconds: 120
+    # Agent 心跳超过 max(60 秒, 两次指标采集间隔) 后，异常还需持续的告警等待时间。
+    agent_stopped_seconds: 60
+    # 距节点最近一次实际捕获本地心跳事件超过此秒数时告警。
+    local_probe_stale_seconds: 180
+    # 距主服务器最近接收到节点心跳事件超过此秒数时告警。
+    central_probe_stale_seconds: 180
+    # 距最近一次确认心跳事件可在 Loki 查询超过此秒数时告警。
+    loki_probe_stale_seconds: 180
+    # 本地或主服务器最旧待处理／待投递事件等待超过此秒数时告警。
+    oldest_pending_task_seconds: 300
+    # 磁盘已使用率超过此百分比持续 60 秒时发出警告。
+    disk_warning_percent: 80
+    # 磁盘已使用率超过此百分比持续 60 秒时发出严重告警。
+    disk_critical_percent: 90
+    # inode 已使用率警告阈值，持续 60 秒触发；用于发现小文件耗尽 inode。
+    inode_warning_percent: 80
+    # inode 已使用率严重告警阈值，持续 60 秒触发。
+    inode_critical_percent: 90
+    # 系统时钟绝对偏移超过多少秒视为异常；未同步时也算异常。
+    clock_offset_warning_seconds: 30
+    # 时钟未同步或偏移异常持续多少秒后告警。
+    clock_failure_duration_seconds: 300
+  # 是否为最近 5 分钟内发生的 inotify 队列溢出生成健康告警。
+  alert_on_inotify_overflow: true
+  # 是否为 Agent 丢失事件或 Vector 丢弃事件生成健康告警。
+  alert_on_dropped_events: true
+  # 同一告警组按 alertname 和 node_id 分组后的推送时间设置。
+  alertmanager:
+    # 新告警组首次发送前等待时间，单位秒。
+    group_wait_seconds: 30
+    # 已发送组有新告警／恢复变化时，后续批次通知间隔，单位秒。
+    group_interval_seconds: 300
+    # 同一故障一直未恢复时的重复提醒间隔，单位小时。
+    repeat_interval_hours: 4
+
+# 历史数据保留期限；主服务器组件设置与节点日志清理分别生效。
+retention:
+  # 主服务器 Prometheus 时序指标保留天数。
+  prometheus_days: 15
+  # 本项目 Loki 日志保留天数；复用外部 Loki 时由其自身配置控制。
+  loki_days: 30
+  # 主服务器事件 SQLite 历史保留天数；有未完成投递任务的事件不会因此被删除。
+  sqlite_events_days: 30
+  # 主服务器投递尝试记录及已完成投递任务保留天数。
+  delivery_records_days: 30
+  # 子服务器已确认接收的 JSONL 日志保留天数；达到容量阈值时可提前清理。
+  local_logs_days: 7
+
+# 主服务器自动备份设置；备份目录由 central.backup_dir 指定。
+backup:
+  # 是否启用每日备份。
+  enabled: true
+  # 每日备份时间，24 小时 HH:MM；服务启动时已过时间可补做当天一次。
+  time: '02:30'
+  # 备份调度时区；备份目录编号使用 UTC 时间。
+  timezone: Asia/Shanghai
+  # 自动备份保留天数，不影响部署时的独立回退备份。
+  keep_days: 7
+  # 是否保存主服务器事件 SQLite 的一致性备份。
+  include_sqlite: true
+  # 是否备份运行配置和安装目录文件，包含服务运行所需凭据与证书。
+  include_runtime_config: true
+  # 兼容保留：当前备份不按此项额外包含 SSH 登录密码／私钥，建议 false。
+  include_node_passwords: false
+
+# 部署顺序、验收和官方组件更新设置；部署脚本在主服务器执行。
+deployment:
+  # 兼容保留：当前实现固定批量串行部署，不支持切换为其他模式。
+  mode: batch
+  # 当前必须为 1；不支持并行切换多个节点。
+  max_parallel_nodes: 1
+  # 子服务器的逐台准备顺序；列出 nodes 中所有启用节点的 ID，主服务器切换见 README。
+  node_order:
+    - node-202
+    - node-28
+  # 兼容保留：当前节点失败始终停止后续部署，设 false 不会继续。
+  stop_on_node_failure: true
+  # 当前必须保持 true；文件变更、扫描、飞书／Loki 和健康验收是完成切换的前提。
+  run_acceptance_tests: true
+  # 兼容保留：当前验收文件始终标为独立测试；按通知开关投递，不读取此开关。
+  send_labeled_feishu_test: true
+  # 兼容保留：当前全部节点验收完成后自动停用旧 Python 入口，不读取此开关。
+  retire_legacy_after_acceptance: true
+  # --upgrade 时是否重新拉取官方组件镜像并更新中央 Compose 内的组件引用。
+  # false 优先沿用已锁定官方镜像摘要；不阻止自研 central／agent 镜像升级。
+  upgrade_existing_components: false
+
+# Go 版新增的自研镜像仓库和 Docker Hub 拉取加速设置。
+registry:
+  # 自研镜像仓库域名和命名空间，不带 https://；与 images 下的相对镜像名拼接。
+  prefix: docker.io/gzdzh
+  # 私有拉取设 true 并填写 username/password；公开拉取 false 使用独立空认证配置。
+  auth_required: false
+  # auth_required=true 时的仓库用户名；公开拉取可留空，推送仍需要认证。
+  username: ''
+  # 仓库密码／访问令牌；通过 stdin 登录，不写入运行容器配置或普通日志。
+  password: ''
+  # Docker Hub 官方镜像的 HTTPS 加速源列表，最多 8 个，按顺序尝试后回退官方源。
+  # 自研镜像按 registry.prefix 直拉，不修改宿主机 Docker 全局配置；[] 禁用加速。
+  # 示例：['https://mirror.example.com']；不能写空列表项或只有 '-'。
+  mirrors: []
+
+# Go 版新增的自研镜像版本；不带 registry.prefix，必须有固定标签或 sha256 摘要。
+# 可写 webscan-agent@sha256:...；禁止 latest；整套升级应选择同一已发布版本。
+images:
+  # 主服务器接收服务，同时提供 SH 提取的 Go 部署工具；Docker Hub 公开镜像，版本 v2.0.16（标签＋固定摘要）。
+  central: webscan-central:v2.0.16@sha256:de0db9a219fa7ede14fe400839d8f6659e306055b2a632a427e2537ba0b8642c
+  # 子服务器文件监听、清单核对和扫描程序；Docker Hub 公开镜像，版本 v2.0.16（标签＋固定摘要）。
+  agent: webscan-agent:v2.0.16@sha256:7240b74510ca25002e19acf72dbd3786f007625cea7cd5f284cdbc7865f7e58e

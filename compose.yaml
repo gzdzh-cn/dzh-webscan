@@ -1,0 +1,6 @@
+# Docker Compose 2.20.0+。
+# 先在本地执行 go run ./cmd/compose --config webscan.yaml --output compose-deploy。
+# 默认加载主服务器配置；每台生成的部署包也包含本文件及自己的 services.yaml。
+name: ${WEBSCAN_COMPOSE_PROJECT:-webscan-compose-central}
+include:
+  - path: ${WEBSCAN_COMPOSE_FILE:-./compose-deploy/central/services.yaml}

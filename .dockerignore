@@ -1,0 +1,9 @@
+.git
+webscan.yaml
+webscan.compose.yaml
+compose-deploy
+dist
+build
+.cache
+*.sqlite3*
+docs
