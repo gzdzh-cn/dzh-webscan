@@ -58,7 +58,7 @@ func (d *Deploy) singleUninstallPreflight(ctx context.Context) error {
 		return err
 	}
 	for _, service := range []string{"receiver", "prometheus"} {
-		image := common.S(common.M(common.M(compose["services"])[service])["image"])
+		image := lockedServiceImage(common.M(common.M(compose["services"])[service]))
 		if image == "" {
 			return errors.New("uninstall_main_service_missing")
 		}

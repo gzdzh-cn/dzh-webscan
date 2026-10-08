@@ -52,6 +52,17 @@ func explainOperation(err error) (string, bool) {
 }
 
 var operationInstructions = map[string]string{
+	"bootstrap_tool_image_lock_failed":                        "无法记录 latest 部署工具的实际镜像摘要。请检查 Docker 镜像缓存及仓库响应，修复后重试；未开始部署。",
+	"runtime_image_alias_lock_invalid":                        "容器短标签对应的锁定镜像记录无效。请检查 Compose 的 io.webscan.locked-image 记录；不要手动改写摘要，使用部署脚本重新生成。",
+	"runtime_locked_image_unavailable":                        "本次启动或回退所需的锁定镜像在本机不存在。请恢复该镜像缓存或按部署记录中的摘要下载；不会改用仓库当前 latest 代替旧版本。",
+	"runtime_locked_image_identity_invalid":                   "无法识别锁定镜像的实际 ID。请检查 Docker 镜像缓存，修复后重试；本次未启动容器。",
+	"runtime_image_alias_tag_failed":                          "无法为锁定镜像设置简短标签，请检查 Docker 服务和镜像缓存后重试。",
+	"runtime_image_alias_identity_mismatch":                   "简短标签与本次锁定镜像的实际 ID 不一致，已停止启动；请排查其他进程是否同时修改镜像标签。",
+	"reload_rules_only_allows_filter_changes":                 "规则热更新发现监控根目录、资源、端口或其他非规则配置发生变化。仅 exclude_paths、extensions、important_filenames、critical_paths 和指定的 YARA 内容可热更新；其他设置请用 --upgrade 应用，或恢复后重试。本次未下发规则。镜像版本差异不阻止新版工具热更新。",
+	"complete_matching_goframe_deployment_required":           "规则热更新需要一次已完成的 GoFrame 部署。请先完成或恢复当前部署，再执行 --reload-rules；部署工具版本可以高于正在运行的服务版本。",
+	"global_rules_change_requires_all_affected_nodes":         "公共规则影响了其他节点，请移除 --node 对全部受影响节点更新；单节点更新时，请仅修改该节点的规则覆盖。",
+	"node_nonrule_monitor_configuration_mismatch":             "YAML 与该节点实际运行的监控根目录或其他非规则参数不一致。请先通过 --add-node --node 节点ID 或 --upgrade 应用这些设置，再更新过滤规则。本次未替换该节点规则。",
+	"node_docker_cpu_capability_check_failed":                 "无法确认子服务器 Docker 的 CPU 配额能力。请在该节点执行 docker info，检查 Docker 服务及 CPUCfsQuota、CPUCfsPeriod 能力；未确认能力前不会启动监控容器。",
 	"compose_fresh_packages_do_not_reuse_external_components": "Compose 生成仅支持独立的新部署包。请将 central.reuse_existing.grafana 和 loki 设为 false；已有 SH 部署的升级与回退继续使用 SH。",
 	"compose_packages_require_public_registry":                "Compose 入口使用公开镜像。请填写 registry.auth_required: false；私有仓库自动部署请使用 SH。",
 	"compose_requires_enabled_node":                           "没有启用的节点。请在 nodes 中至少配置一台 enabled: true 的子服务器，并将其 id 加入 deployment.node_order。",

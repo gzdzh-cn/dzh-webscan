@@ -87,7 +87,7 @@ func ReceiverService(c *Config, image string) common.Map {
 	center := common.M(c.Raw["central"])
 	event := common.M(center["event_service"])
 	data, backup := common.S(center["data_dir"]), common.S(center["backup_dir"])
-	s := service(image)
+	s := imageService(c, "central", image)
 	s["command"] = []string{"central", "--config", root + "/runtime.json"}
 	s["volumes"] = []string{root + ":" + root + ":ro", root + ":/backup-config:ro", data + ":" + data, backup + ":" + backup}
 	s["ports"] = []string{"127.0.0.1:" + strconv.Itoa(common.I(event["port"])) + ":" + strconv.Itoa(common.I(event["port"])), common.S(event["https_bind_address"]) + ":" + strconv.Itoa(common.I(event["https_port"])) + ":" + strconv.Itoa(common.I(event["https_port"]))}
@@ -116,7 +116,7 @@ func ComposeCentral(c *Config, images common.Map) common.Map {
 		if (name == "grafana" || name == "loki") && common.B(common.M(center["reuse_existing"])[name]) {
 			continue
 		}
-		s := service(common.S(images[key]))
+		s := imageService(c, key, common.S(images[key]))
 		s["networks"] = common.Map{"monitor": common.Map{"aliases": []string{"webscan-v1-" + name}}}
 		for k, v := range values {
 			s[k] = v
@@ -126,7 +126,7 @@ func ComposeCentral(c *Config, images common.Map) common.Map {
 	return common.Map{"name": "webscan-v1", "services": services, "networks": common.Map{"monitor": common.Map{"name": "webscan-v1-monitor"}}}
 }
 func ComposeAgent(c *Config, n common.Map, image string) common.Map {
-	s := service(image)
+	s := imageService(c, "agent", image)
 	s["container_name"] = "webscan-agent-go"
 	// Website files can be owned by www with mode 0600. Read-only bind mounts
 	// protect websites while permitting the collector to read all monitored files.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 	"webscan/internal/common"
+	"webscan/internal/progress"
 )
 
 type ruleUpdate struct {
@@ -21,29 +22,70 @@ type ruleUpdate struct {
 
 func withoutRules(c common.Map) common.Map {
 	out := common.Clone(c)
-	containers := []common.Map{common.M(out["node_defaults"])}
+	// Compare effective nodes: addition snapshots can contain expanded defaults
+	// while YAML uses inheritance. Image publication is independent of rules.
+	nodes := []any{}
 	for _, v := range common.A(out["nodes"]) {
-		containers = append(containers, common.M(v))
-	}
-	for _, container := range containers {
-		m := common.M(container["monitor"])
+		node := common.Merge(common.M(out["node_defaults"]), common.M(v))
+		// Connections still validate the requested fingerprint or persisted trust.
+		delete(common.M(node["ssh"]), "host_key_sha256")
+		m := common.M(node["monitor"])
+		if policy, err := common.NewPolicy(m); err == nil {
+			m = policy.Monitor
+		}
 		for _, key := range common.RuleFields {
 			delete(m, key)
 		}
-		if len(m) == 0 {
-			delete(container, "monitor")
+		node["monitor"] = m
+		nodes = append(nodes, node)
+	}
+	out["nodes"] = nodes
+	delete(out, "node_defaults")
+	delete(out, "images")
+	return out
+}
+
+// Commit only applied filter fields. Preserve images, credentials and other
+// pending settings, including the original inheritance of non-rule fields.
+func configurationWithRules(previous, current common.Map) common.Map {
+	out := common.Clone(previous)
+	copyRules := func(dst, src common.Map) {
+		monitor := common.M(dst["monitor"])
+		for _, key := range common.RuleFields {
+			delete(monitor, key)
+			if value, ok := common.M(src["monitor"])[key]; ok {
+				monitor[key] = value
+			}
 		}
+		dst["monitor"] = monitor
+	}
+	copyRules(common.M(out["node_defaults"]), common.M(current["node_defaults"]))
+	byID := map[string]common.Map{}
+	for _, value := range common.A(current["nodes"]) {
+		node := common.M(value)
+		byID[common.S(node["id"])] = node
+	}
+	for _, value := range common.A(out["nodes"]) {
+		node := common.M(value)
+		copyRules(node, byID[common.S(node["id"])])
 	}
 	return out
 }
+
 func (d *Deploy) ReloadRules(ctx context.Context) error {
-	if common.S(d.State["step"]) != "complete" || common.S(d.State["go_release"]) != Release {
+	// The deployment tool may advance while already-installed GoFrame agents
+	// keep running; the live protocol and runtime are checked before any writes.
+	if common.S(d.State["step"]) != "complete" || common.S(d.State["go_release"]) == "" {
 		return errors.New("complete_matching_goframe_deployment_required")
 	}
 	previous := common.M(d.State["configuration"])
 	current := common.M(Redact(d.C.Raw))
 	if string(common.JSON(withoutRules(previous))) != string(common.JSON(withoutRules(current))) {
 		return errors.New("reload_rules_only_allows_filter_changes")
+	}
+	progress.Info(ctx, "规则热更新：仅下发过滤规则和指定的 YARA 内容；沿用运行中的镜像，不重建任何监控服务")
+	if string(common.JSON(previous["images"])) != string(common.JSON(current["images"])) {
+		progress.Info(ctx, "YAML 镜像与已部署记录不同，本次不升级镜像，也不把这些镜像变更记为已部署")
 	}
 	selected := d.C.Selected(d.O.Node)
 	for _, n := range d.C.Selected("") {
@@ -188,7 +230,8 @@ func (d *Deploy) ReloadRules(ctx context.Context) error {
 		}
 		return e
 	}
-	d.State["configuration"], d.State["config_hash"] = current, common.Hash(common.JSON(current))
+	applied := configurationWithRules(previous, current)
+	d.State["configuration"], d.State["config_hash"] = applied, common.Hash(common.JSON(applied))
 	d.State["last_rules_update"] = common.Map{"id": id, "time": common.Now()}
 	for _, u := range updates {
 		common.M(common.M(d.State["nodes"])[common.S(u.Node["id"])])["rules_update"] = common.Map{"version": u.Version, "id": id}

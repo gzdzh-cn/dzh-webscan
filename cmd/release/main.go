@@ -73,6 +73,11 @@ func run() error {
 				return errors.New("local_image_build_failed_" + role)
 			}
 		}
+		for _, role := range []string{"central", "agent"} {
+			if _, err = d.Exec(ctx, nil, "tag", "webscan-"+role+":"+*version, "webscan-"+role+":latest"); err != nil {
+				return errors.New("local_latest_tag_failed_" + role)
+			}
+		}
 		return nil
 	}
 	if *action != "publish" {
@@ -100,6 +105,23 @@ func run() error {
 		}
 		images[role] = locked
 	}
+	latest := common.Map{}
+	// Move latest only after both versioned images have been published.
+	for _, role := range []string{"central", "agent"} {
+		target := common.S(common.M(c.Raw["registry"])["prefix"]) + "/webscan-" + role + ":latest"
+		fmt.Println("更新 latest 标签: " + role)
+		if _, err = d.Exec(ctx, nil, "tag", "webscan-"+role+":"+*version, target); err != nil {
+			return err
+		}
+		if _, err = d.Exec(ctx, nil, "push", target); err != nil {
+			return errors.New("registry_latest_push_failed_" + role)
+		}
+		locked, err := d.Resolve(ctx, target)
+		if err != nil || locked != common.S(images[role]) {
+			return errors.New("published_latest_digest_mismatch_" + role)
+		}
+		latest[role] = target
+	}
 	binary, err := os.ReadFile(filepath.Join("dist", *version, "webscan"))
 	if err != nil {
 		return err
@@ -108,7 +130,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	report := common.Map{"release": *version, "platform": "linux/amd64", "go": "1.26.3", "goframe": "2.10.3", "binary_sha256": common.Hash(binary), "published_at": common.Stamp(), "images": images, "base_images": string(base)}
+	report := common.Map{"release": *version, "platform": "linux/amd64", "go": "1.26.3", "goframe": "2.10.3", "binary_sha256": common.Hash(binary), "published_at": common.Stamp(), "images": images, "latest": latest, "base_images": string(base)}
 	if err = common.AtomicJSON(filepath.Join("dist", *version, "release.json"), report); err != nil {
 		return err
 	}

@@ -52,7 +52,7 @@ go run ./cmd/compose --config webscan.compose.yaml --check
 | SSH 指纹 | `host_key_sha256` 可留空；首次认证成功后自动记录，后续仍校验 |
 | 公开镜像仓库 | `registry.prefix: docker.io/gzdzh`、`auth_required: false`；账号密码可留空 |
 | 私有镜像仓库 | `auth_required: true` 时用户名和密码／访问令牌必填；Compose 生成入口只支持公开仓库 |
-| 镜像版本 | 相对镜像名加已发布标签及可选摘要；不能使用 `latest` |
+| 镜像版本 | 默认 `webscan-central:latest`、`webscan-agent:latest`；也支持已发布版本或真实摘要 |
 | 忽略规则 | 完整路径通配列表；`*` 匹配一层，`**` 匹配多层；不能排除根目录或关键文件 |
 
 一个 YAML 文件只能有一份文档；使用空格缩进，不能用 Tab，同一层不能重复定义字段。

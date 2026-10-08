@@ -23,15 +23,24 @@ func TestPackagedBootstrapExtractsCentralToolWithTwoImages(t *testing.T) {
 		t.Skip("requires locally built release package")
 	}
 	script, _ := filepath.Abs(filepath.Join("..", "..", "dist", version, "deploy-webscan.sh"))
-	for _, private := range []bool{false, true} {
-		t.Run(map[bool]string{false: "public", true: "private"}[private], func(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		private, latest bool
+	}{{"public", false, false}, {"private", true, false}, {"latest", false, true}} {
+		t.Run(test.name, func(t *testing.T) {
+			private := test.private
+			imageTag := version
+			if test.latest {
+				imageTag = "latest"
+			}
 			raw, _ := assets.Files.ReadFile("schema.yaml")
 			var cfg common.Map
 			yaml.Unmarshal(raw, &cfg)
 			reg := common.M(cfg["registry"])
+			reg["prefix"] = "registry.example.test/team"
 			reg["auth_required"], reg["username"], reg["password"] = private, "test-publisher", "test-only-registry-password"
-			common.M(cfg["images"])["central"] = "webscan-central:" + version
-			common.M(cfg["images"])["agent"] = "webscan-agent:" + version
+			common.M(cfg["images"])["central"] = "webscan-central:" + imageTag
+			common.M(cfg["images"])["agent"] = "webscan-agent:" + imageTag
 			common.M(cfg["feishu"])["enabled"] = false
 			// The packaged bootstrap and extracted deploy tool must both accept
 			// new nodes without manually supplied SSH host fingerprints.
@@ -47,7 +56,7 @@ mkdir -p /tmp/merged/bin /tmp/merged/package /root/.docker
 cp /input/deploy-webscan.sh /tmp/merged/package/deploy-webscan.sh
 cp /input/fixture.yaml /tmp/merged/package/webscan.yaml
 chmod 600 /tmp/merged/package/webscan.yaml
-printf '{"auths":{"registry.cn-heyuan.aliyuncs.com":{"auth":"existing-state-must-not-be-used"}}}' > /root/.docker/config.json
+printf '{"auths":{"registry.example.test":{"auth":"existing-state-must-not-be-used"}}}' > /root/.docker/config.json
 cat > /tmp/merged/bin/docker <<'MOCK'
 #!/bin/sh
 set -eu
@@ -67,13 +76,13 @@ case "$1" in
   printf logged-in > "$task_config/auth-marker"
   ;;
  pull)
-  test "$4" = "registry.cn-heyuan.aliyuncs.com/gzdzh/webscan-central:$TEST_VERSION"
+  test "$4" = "registry.example.test/team/webscan-central:$TEST_IMAGE_TAG"
   test "$task_config" != /root/.docker
   if [ "$TEST_PRIVATE" = true ]; then test -f "$task_config/auth-marker"; else test ! -f "$task_config/auth-marker"; fi
   printf '%s' "$task_config" > /tmp/merged/auth-path
   ;;
  create)
-  test "$8" = "registry.cn-heyuan.aliyuncs.com/gzdzh/webscan-central:$TEST_VERSION"
+  test "$8" = "registry.example.test/team/webscan-central:$TEST_IMAGE_TAG"
   test "$9" = version
   touch /tmp/merged/extraction-container
   ;;
@@ -83,7 +92,7 @@ case "$1" in
 #!/bin/sh
 set -eu
 if [ "$1" = version ]; then
- if [ -n "${TEST_TOOL_VERSION:-}" ]; then printf '%s\n' "$TEST_TOOL_VERSION"; else exec "$0.real" version; fi
+ if [ -n "${TEST_TOOL_VERSION:-}" ]; then printf '%s\n' "$TEST_TOOL_VERSION"; exit 0; else exec "$0.real" version; fi
 fi
 test ! -f /tmp/merged/extraction-container
 test ! -d "$(cat /tmp/merged/auth-path)"
@@ -91,6 +100,7 @@ printf '%s\n' "$@" > /tmp/merged/forwarded-args
 exec "$0.real" deploy --config /tmp/merged/package/webscan.yaml --dry-run --central-only
 TOOL
   ;;
+ image) printf '["registry.example.test/team/webscan-central@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]\n';;
  rm) rm -f /tmp/merged/extraction-container;;
  *) exit 88;;
 esac
@@ -108,6 +118,10 @@ if TEST_TOOL_VERSION=wrong-version bash /tmp/merged/package/deploy-webscan.sh --
 grep bootstrap_tool_release_mismatch /tmp/merged/mismatch.log >/dev/null
 test ! -f /tmp/merged/extraction-container
 test ! -d "$(cat /tmp/merged/auth-path)"
+if [ "$TEST_IMAGE_TAG" = latest ]; then
+ TEST_TOOL_VERSION=v2.0.99 bash /tmp/merged/package/deploy-webscan.sh --upgrade --central-only --non-interactive > /tmp/merged/new-tool.log
+ grep 'actual\|实际版本' /tmp/merged/new-tool.log >/dev/null
+fi
 printf 'MERGED_CENTRAL_BOOTSTRAP_AUTH_FORWARDING_CLEANUP_AND_VERSION_OK\n'
 `
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -116,7 +130,7 @@ printf 'MERGED_CENTRAL_BOOTSTRAP_AUTH_FORWARDING_CLEANUP_AND_VERSION_OK\n'
 			if private {
 				mode = "true"
 			}
-			cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none", "-i", "-e", "TEST_PRIVATE="+mode, "-e", "TEST_VERSION="+version, "-v", script+":/input/deploy-webscan.sh:ro", "-v", path+":/input/fixture.yaml:ro", "--entrypoint", "/bin/bash", "webscan-central:"+version, "-se")
+			cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none", "-i", "-e", "TEST_PRIVATE="+mode, "-e", "TEST_VERSION="+version, "-e", "TEST_IMAGE_TAG="+imageTag, "-v", script+":/input/deploy-webscan.sh:ro", "-v", path+":/input/fixture.yaml:ro", "--entrypoint", "/bin/bash", "webscan-central:"+version, "-se")
 			cmd.Stdin = strings.NewReader(setup)
 			out, err := cmd.CombinedOutput()
 			if err != nil {

@@ -39,7 +39,7 @@ func additionFixture(t *testing.T) *Deploy {
 	common.M(previous["deployment"])["node_order"] = []string{common.S(old["id"])}
 	secrets := common.Map{"alert_token": "test-alert", "nodes": common.Map{common.S(old["id"]): common.Map{"token": "test-old"}, "new-node": common.Map{"token": "test-new"}}}
 	active := []string{common.S(old["id"])}
-	images := common.Map{"central": "test/central@sha256:immutable", "agent": "test/agent@sha256:immutable", "prometheus": "test/prometheus@sha256:immutable"}
+	images := common.Map{"central": "test/central@sha256:" + strings.Repeat("a", 64), "agent": "test/agent@sha256:" + strings.Repeat("b", 64), "prometheus": "test/prometheus@sha256:" + strings.Repeat("c", 64)}
 	d := &Deploy{C: c, O: Options{Node: "new-node", Upgrade: true}, Secrets: secrets, Images: images, HTTP: ready.Client(), Remotes: map[string]*Remote{}, State: common.Map{"nodes": common.Map{}, "active": active, "step": "complete", "central_installed": true, "go_release": "old-version", "configuration": Redact(previous), "config_hash": "previous-hash", "image_lock": images}}
 	root := c.CentralRoot()
 	os.MkdirAll(filepath.Join(root, "pki"), 0700)
@@ -137,6 +137,8 @@ func fakeAdditionDocker(t *testing.T) string {
 set -eu
 task_dir="$WEBSCAN_TEST_DOCKER_DIR"
 printf '%s\n' "$*" >> "$task_dir/commands"
+if [ "$1" = image ] && [ "$2" = inspect ] && [ "$3" = --format ]; then printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'; exit; fi
+if [ "$1" = image ] && [ "$2" = tag ]; then exit; fi
 if [ "$1" = inspect ]; then cat "$task_dir/$4"; exit; fi
 shift 3
 if [ "$1" = ps ]; then printf '%s\n' "$3"; exit; fi

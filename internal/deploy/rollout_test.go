@@ -80,6 +80,16 @@ func TestRolloutCrashConfirmationRequiresFilesAndBothServiceIdentities(t *testin
 	if !d.rolloutMainApplied(context.Background()) {
 		t.Fatal("completed operation would recreate services on resume")
 	}
+	d.State["central_image_services"] = []string{"grafana"}
+	common.M(d.State["rollout"])["grafana_before"] = "grafana-old started true"
+	os.WriteFile(filepath.Join(dir, "grafana"), []byte("grafana-old started true\n"), 0600)
+	if d.rolloutMainApplied(context.Background()) {
+		t.Fatal("unfinished vendor name migration treated as completed upgrade")
+	}
+	os.WriteFile(filepath.Join(dir, "grafana"), []byte("grafana-new started true\n"), 0600)
+	if !d.rolloutMainApplied(context.Background()) {
+		t.Fatal("completed vendor name migration would repeat on resume")
+	}
 	os.WriteFile(filepath.Join(root, "runtime.json"), []byte("changed configuration"), 0600)
 	if d.rolloutMainApplied(context.Background()) {
 		t.Fatal("modified files accepted as original upgrade")

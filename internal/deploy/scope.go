@@ -35,7 +35,7 @@ func (d *Deploy) useInstalledMain() error {
 	if yaml.Unmarshal(b, &compose) != nil {
 		return errors.New("add_node_requires_installed_compatible_main")
 	}
-	image := common.S(common.M(common.M(compose["services"])["receiver"])["image"])
+	image := lockedServiceImage(common.M(common.M(compose["services"])["receiver"]))
 	if image == "" || image != common.S(common.M(d.State["image_lock"])["central"]) {
 		return errors.New("add_node_requires_installed_compatible_main")
 	}

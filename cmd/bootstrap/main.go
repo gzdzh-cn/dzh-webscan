@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -199,7 +200,7 @@ func run() error {
 	} else {
 		progress.Info(ctx, "公用镜像仓库：匿名下载，不使用已有登录状态")
 	}
-	ref := c.Image("central")
+	ref := bootstrapImageForOperation(c.Image("central"), args)
 	if err = progress.Stage(ctx, host, "下载主服务器镜像（包含 Go 部署工具）", func(ctx context.Context) error {
 		progress.Info(ctx, "镜像："+ref)
 		if _, pullErr := docker(ctx, nil, "pull", "--platform", "linux/amd64", ref); pullErr != nil {
@@ -213,8 +214,26 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err = validateToolVersion(ctx, binary); err != nil {
+	if err = validateToolVersionForImage(ctx, binary, c.Image("central")); err != nil {
 		return err
+	}
+	if strings.HasSuffix(c.Image("central"), ":latest") {
+		b, inspectErr := docker(ctx, nil, "image", "inspect", "--format", "{{json .RepoDigests}}", ref)
+		if inspectErr != nil {
+			return errors.New("bootstrap_tool_image_lock_failed")
+		}
+		var digests []string
+		if json.Unmarshal(b, &digests) != nil || len(digests) == 0 {
+			return errors.New("bootstrap_tool_image_lock_failed")
+		}
+		locked := matchingToolDigest(ref, digests)
+		if locked == "" {
+			return errors.New("bootstrap_tool_image_lock_failed")
+		}
+		if err = os.Setenv("WEBSCAN_TOOL_IMAGE_LOCK", locked); err != nil {
+			return err
+		}
+		defer os.Unsetenv("WEBSCAN_TOOL_IMAGE_LOCK")
 	}
 
 	if err = os.RemoveAll(authDir); err != nil {

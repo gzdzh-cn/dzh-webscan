@@ -45,7 +45,7 @@ var instructions = map[string]string{
 	"invalid_registry_prefix":                   "填写仓库域名/命名空间，例如 docker.io/gzdzh；不能带 https://、镜像名或 ..。",
 	"private_registry_credentials_required":     "registry.auth_required 为 true 时，registry.username 和 registry.password 均必填。Docker Hub 密码字段填写访问令牌；公开拉取可设 auth_required: false。",
 	"invalid_registry_credentials":              "仓库账号及密码必须是单行字符串，不能含换行或空字符。",
-	"images_require_explicit_version_or_digest": "填写相对镜像名及已发布版本，例如 webscan-central:v2.0.16；或 @sha256: 加 64 位小写十六进制摘要，也可同时填写标签及摘要。不能使用 latest 或省略版本。",
+	"images_require_explicit_version_or_digest": "填写相对镜像名及标签，默认 webscan-central:latest、webscan-agent:latest；也支持已发布版本及 @sha256: 加 64 位小写十六进制摘要。不要省略标签或填写占位摘要。",
 	"central_requires_ip_https_url":             "填写 https://主服务器IP:HTTPS端口，例如 https://192.0.2.10:19443；不能用域名、HTTP、账号、查询参数或额外路径。",
 	"central_https_port_mismatch":               "central.public_url 中的端口必须与 central.event_service.https_port 相同，并显式填写端口。",
 	"invalid_absolute_path":                     "填写绝对路径，例如 /www/wwwroot 或 /opt/webscan-central；不能包含 ..、换行或空字符。",

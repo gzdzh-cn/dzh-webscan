@@ -194,6 +194,26 @@ func (d *Deploy) InstallNode(ctx context.Context, n common.Map) error {
 	if e = progress.Stage(ctx, progress.Node(n), "保存节点配置、数据库和服务状态", func(ctx context.Context) error { return d.nodeBackup(ctx, n) }); e != nil {
 		return e
 	}
+	var compose common.Map
+	if e = progress.Stage(ctx, progress.Node(n), "检查 Docker CPU 配额能力并适配容器配置", func(ctx context.Context) error {
+		b, err := r.Run(ctx, "docker info --format '{{json .}}'")
+		if err != nil {
+			return errors.New("node_docker_cpu_capability_check_failed")
+		}
+		supported, err := dockerCPUQuotaSupported(b)
+		if err != nil {
+			return err
+		}
+		compose = compatibleAgentCompose(d.C, n, common.S(common.M(common.M(d.State["nodes"])[id])["go_image"]), supported)
+		if !supported && common.F(common.M(n["resources"])["cpus"]) > 0 {
+			progress.Warn(ctx, "Docker 不支持 CPU 配额，已跳过 cpus 硬限制；保留容器内存限制、GOMEMLIMIT 和 GOMAXPROCS。Go 并发限制不等同于 CPU 配额")
+		} else {
+			progress.Info(ctx, "CPU 配额能力检查完成，按节点资源配置生成容器")
+		}
+		return nil
+	}); e != nil {
+		return e
+	}
 	if e = d.prepareInotify(ctx, n); e != nil {
 		return e
 	}
@@ -215,7 +235,7 @@ func (d *Deploy) InstallNode(ctx context.Context, n common.Map) error {
 	} else {
 		yara, _ = assets.Files.ReadFile("php-webshell.yar")
 	}
-	files := map[string][]byte{"/etc/webscan-v1/runtime.json": common.JSON(runtime), "/etc/webscan-v1/php-webshell.yar": yara, "/etc/webscan-v1/compose.yml": YAML(ComposeAgent(d.C, n, common.S(nodeState["go_image"])))}
+	files := map[string][]byte{"/etc/webscan-v1/runtime.json": common.JSON(runtime), "/etc/webscan-v1/php-webshell.yar": yara, "/etc/webscan-v1/compose.yml": YAML(compose)}
 	for source, dest := range map[string]string{"ca.crt": "ca.crt", id + ".crt": "server.crt", id + ".key": "server.key"} {
 		b, e := os.ReadFile(filepath.Join(d.C.CentralRoot(), "pki", source))
 		if e != nil {
@@ -241,7 +261,10 @@ func (d *Deploy) InstallNode(ctx context.Context, n common.Map) error {
 		return e
 	}
 	if e = progress.Stage(ctx, progress.Node(n), "启动 Go 文件监控容器", func(ctx context.Context) error {
-		_, err := r.ExecVisible(ctx, "docker compose -f /etc/webscan-v1/compose.yml up -d --no-deps agent", nil, "容器状态")
+		if _, err := r.Run(ctx, "/opt/webscan-go/bin/webscan tool --action pin-compose-images --output /etc/webscan-v1/compose.yml"); err != nil {
+			return err
+		}
+		_, err := r.ExecVisible(ctx, "docker compose -f /etc/webscan-v1/compose.yml up -d --pull never --no-deps agent", nil, "容器状态")
 		return err
 	}); e != nil {
 		return e
@@ -399,11 +422,12 @@ func (d *Deploy) InstallNodeSidecars(ctx context.Context, n common.Map) error {
 		return e
 	}
 	base := "--network host --read-only --cap-drop ALL --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3"
-	commands := map[string]string{"vector": "/usr/bin/docker run --name webscan-vector-v1 " + base + " -v /etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro -v /etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro -v /var/log/webscan-v1:/var/log/webscan-v1:ro -v /var/lib/webscan-vector-v1:/var/lib/vector " + refs["vector"], "exporter": "/usr/bin/docker run --name webscan-exporter-v1 " + base + " --user 0:0 --pid host -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro,rslave -v /var/lib/webscan-v1/textfile:/textfile:ro -v /etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro -v /etc/webscan-v1/pki:/etc/webscan-v1/pki:ro " + refs["exporter"] + " --web.listen-address=:" + strconv.Itoa(common.I(common.M(n["metrics"])["port"])) + " --web.config.file=/etc/webscan-v1/exporter.yml --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs --collector.textfile.directory=/textfile"}
+	aliases := map[string]string{"vector": "docker.io/" + VendorImages["vector"], "exporter": "docker.io/" + VendorImages["exporter"]}
+	commands := map[string]string{"vector": "/usr/bin/docker run --pull never --name webscan-vector-v1 " + base + " -v /etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro -v /etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro -v /var/log/webscan-v1:/var/log/webscan-v1:ro -v /var/lib/webscan-vector-v1:/var/lib/vector " + aliases["vector"], "exporter": "/usr/bin/docker run --pull never --name webscan-exporter-v1 " + base + " --user 0:0 --pid host -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro,rslave -v /var/lib/webscan-v1/textfile:/textfile:ro -v /etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro -v /etc/webscan-v1/pki:/etc/webscan-v1/pki:ro " + aliases["exporter"] + " --web.listen-address=:" + strconv.Itoa(common.I(common.M(n["metrics"])["port"])) + " --web.config.file=/etc/webscan-v1/exporter.yml --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs --collector.textfile.directory=/textfile"}
 	for name, command := range commands {
 		// Restart=always does not recover a unit stopped through Requires=docker.
 		// PartOf propagates Docker restarts; WantedBy also covers stop/start.
-		unit := "[Unit]\nDescription=Webscan " + name + "\nRequires=docker.service\nPartOf=docker.service\nAfter=docker.service network-online.target\n[Service]\nExecStartPre=-/usr/bin/docker rm -f webscan-" + name + "-v1\nExecStart=" + command + "\nExecStop=/usr/bin/docker stop -t 20 webscan-" + name + "-v1\nRestart=always\nRestartSec=5\nTimeoutStopSec=35\n[Install]\nWantedBy=multi-user.target docker.service\n"
+		unit := "[Unit]\nDescription=Webscan " + name + "\nRequires=docker.service\nPartOf=docker.service\nAfter=docker.service network-online.target\n[Service]\nExecStartPre=/usr/bin/docker image tag " + refs[name] + " " + aliases[name] + "\nExecStartPre=-/usr/bin/docker rm -f webscan-" + name + "-v1\nExecStart=" + command + "\nExecStop=/usr/bin/docker stop -t 20 webscan-" + name + "-v1\nRestart=always\nRestartSec=5\nTimeoutStopSec=35\n[Install]\nWantedBy=multi-user.target docker.service\n"
 		if e = r.Write(ctx, "/etc/systemd/system/webscan-"+name+"-v1.service", []byte(unit), 0644); e != nil {
 			return e
 		}

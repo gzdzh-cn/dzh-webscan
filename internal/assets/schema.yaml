@@ -149,5 +149,5 @@ registry:
   # 仅加速 Docker Hub；空列表直接访问官方仓库。
   mirrors: []
 images:
-  central: webscan-central:v2.0.0
-  agent: webscan-agent:v2.0.0
+  central: webscan-central:latest
+  agent: webscan-agent:latest

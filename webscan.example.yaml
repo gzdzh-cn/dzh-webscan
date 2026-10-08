@@ -152,6 +152,7 @@ node_defaults:
     # 仅约束 Go 管理的内存，不是容器总内存硬上限。
     go_memory_mib: 64
     # Agent 容器 CPU 配额，1.0 表示最多约一个 CPU 核的计算时间；范围 0.1～16。
+    # SH 部署会检测 Docker 能力，不支持 CPU 配额时跳过此项并提示；内存和 Go 并发限制保留。
     cpus: 1.0
     # Go GOMAXPROCS：可同时执行 Go 代码的线程数，范围 1～32；不是扫描 worker 数。
     gomaxprocs: 2
@@ -417,10 +418,10 @@ registry:
   # 示例：['https://mirror.example.com']；不能写空列表项或只有 '-'。
   mirrors: []
 
-# Go 版新增的自研镜像版本；不带 registry.prefix，必须有固定标签或 sha256 摘要。
-# 可写 webscan-agent@sha256:...；禁止 latest；整套升级应选择同一已发布版本。
+# 自研镜像不带 registry.prefix，默认 latest；也支持明确版本或 sha256 摘要。
+# SH 每次部署记录实际摘要用于恢复和回退，容器显示简短标签。
 images:
-  # 主服务器接收服务，同时提供 SH 提取的 Go 部署工具；Docker Hub 公开镜像，版本 v2.0.16（标签＋固定摘要）。
-  central: webscan-central:v2.0.16@sha256:de0db9a219fa7ede14fe400839d8f6659e306055b2a632a427e2537ba0b8642c
-  # 子服务器文件监听、清单核对和扫描程序；Docker Hub 公开镜像，版本 v2.0.16（标签＋固定摘要）。
-  agent: webscan-agent:v2.0.16@sha256:7240b74510ca25002e19acf72dbd3786f007625cea7cd5f284cdbc7865f7e58e
+  # 主服务器接收服务，同时提供 SH 提取的 Go 部署工具；Docker Hub 公开镜像。
+  central: webscan-central:latest
+  # 子服务器文件监听、清单核对和扫描程序；Docker Hub 公开镜像。
+  agent: webscan-agent:latest

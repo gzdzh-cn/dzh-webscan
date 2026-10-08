@@ -92,7 +92,11 @@ func (d *Deploy) canAddNode() bool {
 	if yaml.Unmarshal(composeBytes, &compose) != nil {
 		return false
 	}
-	image := common.S(common.M(common.M(compose["services"])["receiver"])["image"])
+	receiver := common.M(common.M(compose["services"])["receiver"])
+	image := common.S(receiver["image"])
+	if locked := common.S(common.M(receiver["labels"])[imageLockLabel]); locked != "" {
+		image = locked
+	}
 	if image == "" || image != common.S(common.M(d.State["image_lock"])["central"]) {
 		return false
 	}

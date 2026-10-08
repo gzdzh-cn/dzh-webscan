@@ -27,7 +27,11 @@ func (d *Deploy) restoreCentral(ctx context.Context, j *Journal, uninstall bool)
 		return err
 	}
 	if previous && !uninstall {
-		if _, err := d.compose(ctx, "up", "-d", "--no-deps", "receiver"); err != nil {
+		args := []string{"up", "-d", "--no-deps", "receiver"}
+		for _, name := range common.SS(d.State["central_image_services"]) {
+			args = append(args, name)
+		}
+		if _, err := d.compose(ctx, args...); err != nil {
 			return errors.New("central_previous_service_start_failed")
 		}
 	}

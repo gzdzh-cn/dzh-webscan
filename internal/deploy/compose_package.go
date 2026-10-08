@@ -168,6 +168,7 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 		}
 	}
 	centralCompose := ComposeCentral(c, images)
+	standaloneImage(common.M(common.M(centralCompose["services"])["receiver"]), common.S(images["central"]))
 	centralCompose["name"] = "webscan-compose-central"
 	// Avoid colliding with a SH-managed stack on the same host/network.
 	common.M(common.M(centralCompose["networks"])["monitor"])["name"] = "webscan-compose-monitor"
@@ -294,6 +295,7 @@ func prepareNodeCompose(c *Config, n, secrets, images common.Map, write func(str
 	compose["name"] = "webscan-compose-" + id
 	services := common.M(compose["services"])
 	agent := common.M(services["agent"])
+	standaloneImage(agent, common.S(images["agent"]))
 	// All three services use the host network, as the existing deployment does.
 	vector := service(common.S(images["vector"]))
 	vector["container_name"] = "webscan-vector-v1"
@@ -318,4 +320,12 @@ func prepareNodeCompose(c *Config, n, secrets, images common.Map, write func(str
 		return err
 	}
 	return writeLauncher(write, id, launcher)
+}
+
+// Offline packages have not pulled or pinned images on the destination host.
+// Let Compose fetch the configured reference; explicit digests stay explicit.
+func standaloneImage(service common.Map, image string) {
+	service["image"] = image
+	delete(service, "pull_policy")
+	delete(common.M(service["labels"]), imageLockLabel)
 }

@@ -320,8 +320,14 @@ func (d *Deploy) initialize() error {
 			return errors.New("changed_release_or_configuration_requires_upgrade")
 		}
 		d.RunID = "go-" + time.Now().UTC().Format("20060102T150405Z") + "-" + common.ID()[:8]
+		if locked := os.Getenv("WEBSCAN_TOOL_IMAGE_LOCK"); locked != "" {
+			d.State["target_tool_image"] = locked
+		} else {
+			delete(d.State, "target_tool_image")
+		}
 		delete(d.State, "node_addition")
 		delete(d.State, "rollout")
+		delete(d.State, "central_image_services")
 		if d.canAddNode() {
 			d.State["node_addition"] = common.Map{"previous_active": common.SS(d.State["active"]), "previous_configuration": common.Clone(common.M(d.State["configuration"])), "previous_config_hash": d.State["config_hash"]}
 		}
@@ -595,6 +601,12 @@ func (d *Deploy) finishDeployment(ctx context.Context) (err error) {
 	return nil
 }
 func (d *Deploy) compose(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) > 0 && args[0] == "up" {
+		if err := EnsureComposeImages(ctx, filepath.Join(d.C.CentralRoot(), "compose.yml")); err != nil {
+			return nil, err
+		}
+		args = append([]string{"up", "--pull", "never"}, args[1:]...)
+	}
 	return RunCommand(ctx, nil, append([]string{"docker", "compose", "-f", filepath.Join(d.C.CentralRoot(), "compose.yml")}, args...)...)
 }
 func (d *Deploy) Central(ctx context.Context) error {
@@ -684,15 +696,24 @@ func (d *Deploy) Central(ctx context.Context) error {
 				files["prometheus.yml"] = YAML(prom)
 			}
 		}
-		if d.O.Upgrade && common.B(common.M(d.C.Raw["deployment"])["upgrade_existing_components"]) {
-			for role, service := range services {
-				imageRole := role
-				if role == "host-exporter" {
-					imageRole = "exporter"
+		if (d.O.Upgrade || d.O.Resume) && !d.addingNode() {
+			changed := common.SS(d.State["central_image_services"])
+			for _, name := range updateVendorImageAliases(d.C, services, d.Images, common.B(common.M(d.C.Raw["deployment"])["upgrade_existing_components"])) {
+				if !common.Contains(changed, name) {
+					changed = append(changed, name)
 				}
-				if imageRole != "receiver" && common.S(d.Images[imageRole]) != "" {
-					common.M(service)["image"] = d.Images[imageRole]
+			}
+			d.State["central_image_services"] = changed
+			if rollout := common.M(d.State["rollout"]); len(rollout) > 0 {
+				for _, name := range changed {
+					if _, exists := rollout[name+"_before"]; !exists {
+						identity, _ := d.serviceIdentity(ctx, name)
+						rollout[name+"_before"] = identity
+					}
 				}
+			}
+			if e = d.save(); e != nil {
+				return e
 			}
 		}
 	}
@@ -756,6 +777,11 @@ func (d *Deploy) Central(ctx context.Context) error {
 		args := []string{"up", "-d", "--no-deps", "receiver"}
 		if promChanged {
 			args = []string{"up", "-d", "--no-deps", "--force-recreate", "receiver", "prometheus"}
+		}
+		for _, name := range common.SS(d.State["central_image_services"]) {
+			if !common.Contains(args, name) {
+				args = append(args, name)
+			}
 		}
 		if _, e = d.compose(ctx, args...); e != nil {
 			return e

@@ -102,7 +102,7 @@ func Load(path string) (_ *Config, err error) {
 	for _, role := range []string{"central", "agent"} {
 		field = "images." + role
 		ref := common.S(common.M(m["images"])[role])
-		if !regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[a-zA-Z0-9._-]+|(?::[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64})$`).MatchString(ref) || strings.HasSuffix(strings.Split(ref, "@")[0], ":latest") {
+		if !regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[a-zA-Z0-9._-]+|(?::[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64})$`).MatchString(ref) {
 			return nil, errors.New("images_require_explicit_version_or_digest")
 		}
 	}

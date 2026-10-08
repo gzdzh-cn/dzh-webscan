@@ -176,8 +176,15 @@ func (d *Deploy) rolloutMainApplied(ctx context.Context) bool {
 			return false
 		}
 	}
-	for _, service := range []string{"receiver", "prometheus"} {
-		if service == "prometheus" && !common.B(s["prom_changed"]) && common.S(s["prometheus_before"]) != "" {
+	services := []string{"receiver", "prometheus"}
+	changedImages := common.SS(d.State["central_image_services"])
+	for _, name := range changedImages {
+		if !common.Contains(services, name) {
+			services = append(services, name)
+		}
+	}
+	for _, service := range services {
+		if service == "prometheus" && !common.B(s["prom_changed"]) && !common.Contains(changedImages, service) && common.S(s["prometheus_before"]) != "" {
 			continue
 		}
 		identity, err := d.serviceIdentity(ctx, service)

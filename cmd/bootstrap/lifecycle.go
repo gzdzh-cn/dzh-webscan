@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 	"webscan/internal/common"
+	"webscan/internal/deploy"
 	"webscan/internal/progress"
 )
 
@@ -86,6 +88,58 @@ func validateToolVersion(ctx context.Context, binary string) error {
 		return errors.New("bootstrap_tool_release_mismatch")
 	}
 	return nil
+}
+
+func validateToolVersionForImage(ctx context.Context, binary, image string) error {
+	if !strings.HasSuffix(image, ":latest") {
+		return validateToolVersion(ctx, binary)
+	}
+	b, err := command(ctx, nil, binary, "version")
+	version := strings.TrimSpace(string(b))
+	if err != nil || !regexp.MustCompile(`^v2\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9_.-]+)?$`).MatchString(version) {
+		return errors.New("bootstrap_tool_release_mismatch")
+	}
+	progress.Info(ctx, "latest 镜像中部署工具的实际版本："+version)
+	return nil
+}
+
+func bootstrapImageForOperation(image string, args []string) string {
+	if !strings.HasSuffix(image, ":latest") {
+		return image
+	}
+	for _, arg := range args {
+		flag := strings.Split(arg, "=")[0]
+		if flag != "--resume" && flag != "--rollback" {
+			continue
+		}
+		state, err := common.ReadJSON(filepath.Join(deploy.StateRoot, "state.json"))
+		if err == nil {
+			if locked := common.S(state["target_tool_image"]); regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`).MatchString(locked) {
+				return locked
+			}
+			version := common.S(state["target_release"])
+			if regexp.MustCompile(`^v2\.[0-9]+\.[0-9]+(?:[-.][A-Za-z0-9_.-]+)?$`).MatchString(version) {
+				return strings.TrimSuffix(image, ":latest") + ":" + version
+			}
+		}
+	}
+	return image
+}
+
+func matchingToolDigest(ref string, digests []string) string {
+	repository := func(image string) string {
+		image = strings.Split(image, "@")[0]
+		if colon := strings.LastIndex(image, ":"); colon > strings.LastIndex(image, "/") {
+			image = image[:colon]
+		}
+		return strings.TrimPrefix(strings.TrimPrefix(image, "docker.io/"), "index.docker.io/")
+	}
+	for _, digest := range digests {
+		if repository(digest) == repository(ref) && regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`).MatchString(digest) {
+			return digest
+		}
+	}
+	return ""
 }
 
 func runDeploymentTool(ctx context.Context, binary string, args []string) error {

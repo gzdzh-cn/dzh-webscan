@@ -57,6 +57,8 @@ func Run(ctx context.Context, action, input, output string, uninstall bool) erro
 		return persist.BackupDB(db, output)
 	case "backup-node":
 		return backupNode(ctx, output)
+	case "pin-compose-images":
+		return deploy.EnsureComposeImages(ctx, output)
 	case "restore-node":
 		return restoreNode(ctx, output, uninstall)
 	default:
@@ -154,7 +156,10 @@ func restoreNode(ctx context.Context, dir string, uninstall bool) error {
 		}
 	}
 	if common.B(state["agent_go_active"]) {
-		if _, e = deploy.RunCommand(ctx, nil, "docker", "compose", "-f", "/etc/webscan-v1/compose.yml", "up", "-d", "--no-deps", "agent"); e != nil {
+		if e = deploy.EnsureComposeImages(ctx, "/etc/webscan-v1/compose.yml"); e != nil {
+			return e
+		}
+		if _, e = deploy.RunCommand(ctx, nil, "docker", "compose", "-f", "/etc/webscan-v1/compose.yml", "up", "-d", "--pull", "never", "--no-deps", "agent"); e != nil {
 			return e
 		}
 	}

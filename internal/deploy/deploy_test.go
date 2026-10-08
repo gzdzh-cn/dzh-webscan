@@ -59,8 +59,13 @@ func TestConfigRegistryAndRedaction(t *testing.T) {
 	}
 	common.M(c.Raw["images"])["agent"] = "webscan-agent:latest"
 	os.WriteFile(c.Path, YAML(c.Raw), 0600)
+	if _, e := Load(c.Path); e != nil {
+		t.Fatal("latest rejected", e)
+	}
+	common.M(c.Raw["images"])["agent"] = "webscan-agent"
+	os.WriteFile(c.Path, YAML(c.Raw), 0600)
 	if _, e := Load(c.Path); e == nil {
-		t.Fatal("latest accepted")
+		t.Fatal("tagless image accepted")
 	}
 }
 
@@ -133,8 +138,8 @@ func TestVersionTagWithImmutableDigestConfiguration(t *testing.T) {
 	}
 	common.M(c.Raw["images"])["central"] = "webscan-central:latest@sha256:" + digest
 	os.WriteFile(c.Path, YAML(c.Raw), 0600)
-	if _, err := Load(c.Path); err == nil {
-		t.Fatal("latest accepted with digest")
+	if _, err := Load(c.Path); err != nil {
+		t.Fatal("latest rejected with digest", err)
 	}
 }
 

@@ -2,9 +2,9 @@
 
 这套系统用来发现网站文件的新增、修改、删除和改名，把需要关注的变化发送到飞书。它也会检查可疑代码、保存事件日志，在 Grafana 中展示各台服务器的运行状态。
 
-当前发布版本为 **v2.0.16**，适用于 **Linux amd64（x86_64）** 服务器。主、子服务器的自研程序都使用 Go，服务器无需安装 Python 或 Go 编译环境。
+默认使用 Docker Hub 的 **latest** 镜像，适用于 **Linux amd64（x86_64）** 服务器。每次发布同时保留版本号标签和 `latest`。主、子服务器的自研程序都使用 Go，服务器无需安装 Python 或 Go 编译环境。
 
-本地源码已增加完整参数帮助、Compose 离线检查和更明确的中文报错。这些改进尚未重新打包到发布版 SH 或线上镜像；直接使用本地源码的 `go run ./cmd/compose` 可以使用新功能。线上使用时，以实际脚本和镜像版本为准。
+配置工具提供完整参数帮助、Compose 离线检查和中文报错提示。运行服务的实际版本以容器内程序的 `webscan version` 输出为准；`latest` 是镜像标签，不代表容器会自动更新。
 
 日常维护的基本方法：**修改主服务器上的 `webscan.yaml`，再执行对应的 `deploy-webscan.sh` 命令。**
 
@@ -459,7 +459,7 @@ bash deploy-webscan.sh --reload-rules --yara-rules /root/php-webshell.yar
 
 节点每 5 秒检查规则，先校验再应用；非法规则保留旧版，多节点下发失败时尝试恢复本次已修改的配置。取消忽略后，先为已有文件建立基线，之后的修改正常告警。
 
-热更新要求部署已完成，脚本版本与部署记录匹配，YAML 没有同时混入目录、资源、镜像等其他待更新项。公共规则影响多个节点时，必须更新全部受影响节点，不能只指定其中一台。
+热更新要求 GoFrame 部署已完成，YAML 没有同时混入目录、资源、端口等其他待更新项。从 v2.0.18 起，部署工具可以比运行服务更新；YAML 的镜像版本差异不阻止下发规则，也不会升级镜像。配置比较按节点实际继承的参数进行，兼容新增节点时保存的展开配置及自动 SSH 指纹记录。公共规则影响多个节点时，必须更新全部受影响节点，不能只指定其中一台。
 
 ## 7. 镜像和下载加速
 
@@ -474,10 +474,10 @@ bash deploy-webscan.sh --reload-rules --yara-rules /root/php-webshell.yar
 
 “Docker 官方仓库”在这里指 Docker Hub。`gzdzh/webscan-central` 和 `gzdzh/webscan-agent` 是本项目在 Docker Hub 发布的公开镜像；第三方组件使用各上游项目发布的镜像。仓库地址如下：
 
-| 组件 | Docker Hub 仓库 | 固定版本 |
+| 组件 | Docker Hub 仓库 | 默认标签 |
 |---|---|---|
-| 主服务器程序 | [gzdzh/webscan-central](https://hub.docker.com/r/gzdzh/webscan-central) | `v2.0.16` |
-| 子服务器程序 | [gzdzh/webscan-agent](https://hub.docker.com/r/gzdzh/webscan-agent) | `v2.0.16` |
+| 主服务器程序 | [gzdzh/webscan-central](https://hub.docker.com/r/gzdzh/webscan-central) | `latest` |
+| 子服务器程序 | [gzdzh/webscan-agent](https://hub.docker.com/r/gzdzh/webscan-agent) | `latest` |
 | Grafana 面板 | [grafana/grafana](https://hub.docker.com/r/grafana/grafana) | `12.0.0` |
 | Loki 日志 | [grafana/loki](https://hub.docker.com/r/grafana/loki) | `3.5.0` |
 | Prometheus 指标 | [prom/prometheus](https://hub.docker.com/r/prom/prometheus) | `v3.5.0` |
@@ -496,11 +496,17 @@ registry:
   mirrors: []
 
 images:
-  central: webscan-central:v2.0.16
-  agent: webscan-agent:v2.0.16
+  central: webscan-central:latest
+  agent: webscan-agent:latest
 ```
 
-实际发布配置推荐保留“版本标签 + 固定摘要”，例如 `webscan-agent:v2.0.16@sha256:完整摘要`。标签方便看版本，摘要确保下载同一份镜像。摘要由发布生成，不要手动编造。禁止使用 `latest` 或不带版本的镜像名。
+默认保持上面的 `latest` 配置。每次发布会同时推送版本号标签和 `latest`，两者对应同一份镜像；需要指定历史版本时，也可以填写明确版本或真实摘要。
+
+SH 部署拉取 `latest` 后，会记录实际镜像摘要。运行容器显示 `docker.io/gzdzh/webscan-central:latest`、`docker.io/gzdzh/webscan-agent:latest` 这样的简短名称；摘要保存在部署状态和容器标签中，用于校验、恢复和回退。第三方容器显示各自的官方固定版本标签。
+
+已有安装升级时，也会把第三方组件的旧摘要名称改成版本标签，例如 `grafana/grafana:12.0.0`、`prom/prometheus:v3.5.0` 和 `timberio/vector:0.45.0-alpine`。即使没有开启 `upgrade_existing_components`，也能更新显示名称，并保留当前锁定的镜像内容。Docker 的容器镜像名称不能原地修改，因此首次切换名称需要重建对应监控容器，数据目录和账号保留；以后名称未变化时不会为此重复重建。仅增加一个节点时，主服务器其他组件保持运行。
+
+`latest` 更新不会自动替换已经运行的容器。SH 更新执行 `bash deploy-webscan.sh --upgrade`；Compose 更新先执行 `docker compose pull`，再执行 `docker compose up -d`。回退会恢复原来锁定的镜像，不重新选择仓库当前的 `latest`。要看程序实际版本，可在节点执行 `docker exec webscan-agent-go webscan version`。
 
 私有仓库设置 `auth_required: true` 并填写用户名和密码／访问令牌；公开仓库用 `false`，部署匿名拉取。**推送公开镜像仍需认证。** 部署认证使用临时 Docker 配置，完成后清理。
 
@@ -700,6 +706,14 @@ node_defaults:
 
 `agent_memory_mib` 是容器硬上限，不预先分配全部内存；`go_memory_mib` 是 Go 软内存目标，还需为 YARA、缓存及目录监听留空间。不要只为了通过检查而把上限压得过低。修改资源后更新节点服务。
 
+### 容器启动提示 NanoCPUs 不支持
+
+如果 Docker 提示 `NanoCPUs can not be set`，表示节点的内核或 cgroup 没有提供 CPU 配额能力，与网站目录、镜像下载或 SSH 无关。
+
+从 v2.0.17 起，SH 部署会查询子服务器 Docker 的实际能力。支持时应用 `resources.cpus`；不支持时明确提示并跳过 CPU 硬配额，保留容器内存限制、`GOMEMLIMIT` 和 `GOMAXPROCS`。并发限制不能保证 CPU 使用率上限。检查能力失败时停止部署，不静默跳过限制。
+
+直接使用 Compose 部署包时，生成工具无法查询远端 Docker；遇到此错误，可在该节点部署包的 `services.yaml` 中删除 Agent 的 `cpus` 一项后重新执行 `docker compose up -d`，保留其他资源设置。
+
 ### 终端报错怎么看
 
 本地新版工具会显示**字段位置、错误原因、填写要求及错误代码**。例如开启飞书却没有填写凭据时，会同时指出：
@@ -731,9 +745,9 @@ go run ./cmd/compose --config webscan.compose.yaml --check
 | SSH 连接或认证失败 | 核对节点 IP、端口、root 登录策略、私钥／密码及云安全组；私钥位于主服务器，权限 0400/0600 |
 | 镜像下载失败 | 检查仓库、版本及摘要、认证、网络和加速源；查看同阶段下载诊断 |
 | `enabled_node_missing_from_order` | 把全部启用节点 ID 补入 `deployment.node_order` |
-| `images_require_explicit_version_or_digest` | 镜像填明确版本或完整摘要，不用裸镜像名或 `latest` |
+| `images_require_explicit_version_or_digest` | 默认填写 `webscan-central:latest`、`webscan-agent:latest`；也支持明确版本或完整摘要，不用裸镜像名 |
 | `unfinished_deployment_requires_resume_or_rollback` | 原版本及范围下用 `--resume` 或 `--rollback` |
-| 热更新提示只能修改过滤规则 | YAML 同时改了目录、资源或镜像等，需要先应用那些更新 |
+| 热更新提示只能修改过滤规则 | YAML 同时改了目录、资源或端口等，需要先应用那些更新；v2.0.18 起镜像版本差异不阻止热更新 |
 | SSH 主机密钥变化 | 先核实服务器身份，再维护密钥记录，不直接绕过校验 |
 | 飞书没有收到消息 | 检查机器人开关、Webhook、签名、关键词要求及主服务器投递日志 |
 
@@ -777,13 +791,15 @@ go run ./cmd/compose --config webscan.compose.yaml --check
 
 ```bash
 # 版本号只是下一次发布示例，完成实际构建和推送后才能部署
-bash scripts/build-images.sh v2.0.17
-bash scripts/publish-images.sh v2.0.17
+bash scripts/build-images.sh v2.0.21
+bash scripts/publish-images.sh v2.0.21
 ```
 
 构建和推送在本地执行，只发布 central 和 agent。发布工具从指定 YAML 读取仓库及推送凭据，公开仓库也需用户名和访问令牌。可把发布专用配置路径作为第二个参数传入两个脚本，服务器公开拉取配置继续留空凭据。
 
-基础镜像及依赖锁定在 `config/base-images.lock`、`go.mod` 和 `go.sum`。生成的脚本和发布摘要在 `dist/版本号/`。正式部署同步对应版本的 SH、YAML 镜像引用及 README；只替换部署包不会自动升级运行服务。
+构建命令自动生成 `webscan-central:版本号`、`webscan-agent:版本号` 及对应的 `latest` 标签；发布命令先推送两个版本标签，再更新两个 `latest`，并校验摘要一致。以后发布新版本时，YAML 可以继续使用 `latest`。
+
+基础镜像及依赖锁定在 `config/base-images.lock`、`go.mod` 和 `go.sum`。生成的脚本和发布摘要在 `dist/版本号/`。正式部署同步 SH、YAML 及 README；只替换部署包不会自动升级运行服务。更新后的 `latest` 部署工具可以由已有的新版 SH 引导，不要求两者的小版本号相同。
 
 配套说明见 [参数填写与报错](docs/PARAMETERS.md)、[Grafana 查看与查询](docs/GRAFANA.md)、[Compose 手动部署](docs/COMPOSE.md) 和 [镜像仓库说明](docs/REGISTRY.md)。本地历史验收记录只说明当时的结果，当前使用方式以本 README 和实际代码为准。
 
