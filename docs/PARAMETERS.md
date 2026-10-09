@@ -85,3 +85,21 @@ go run ./cmd/compose --config webscan.compose.yaml --output compose-deploy-new
 ```
 
 生成后按 [Compose 教程](COMPOSE.md) 将各服务器的独立包上传并启动。修改源 YAML 不会自动更新之前已生成包内的 `runtime.json`；此前关闭飞书的旧包仍维持旧设置。已运行系统应沿用身份并按升级步骤修改配置，不要覆盖旧数据或重新生成整套令牌与证书。
+
+## 首次安装内存检查
+
+`central.install_memory_reserve_mib`：默认 128，允许 64～4096，单位 MiB。只增加首次安装所需的空闲物理内存，不修改容器限额或 Go 内存目标；旧 YAML 未填写时仍按 128 检查。
+
+要求内存 = `central.new_components_memory_budget_mib` + 新建 Grafana 192 + 新建 Loki 256 + 开启网站后台时的 `extra_memory_mib` + 安装预留。复用已有 Grafana/Loki 时不加对应预算。可用内存取 Linux 的 `MemAvailable`，不计 Swap。终端显示各项、差额和配置字段；不足时停止，不启动监控容器。预检阶段失败可修改后重新安装，无需 `--resume`。
+
+## 网站可用性后台参数
+
+`central.website_monitor` 为可选区块；旧 YAML 省略时关闭，新示例开启。`enabled` 开关、`bind_address` 映射地址、`host_port` 管理 HTTPS 端口默认 19444；`admin_username` 和 `admin_password` 为独立后台账号。密码为空首次生成，手动填写为 12～72 字节。v2.0.29 起这两个账号参数仅用于初始化；数据库已有账号不会被 YAML、SH 升级、Compose 或重装覆盖。修改密码使用后台右上角入口，忘记密码使用 root 交互命令；详见 [后台账号管理](WEBSITE.md#修改管理员密码)。`interval_seconds` 默认 60、允许 10～3600；`timeout_seconds` 默认 5、允许 1～30 且小于间隔；`max_concurrent` 默认 128、允许 1～128；`extra_memory_mib` 默认 128、允许 128～2048。开启后检查主服务器内存，并调整接收容器限制。
+
+网站、关键词及暂停状态通过后台配置，保存到数据库，不写入 YAML。修改后台监听、账号或调度参数使用 `--upgrade --central-only`。详细用法见 [网站后台指南](WEBSITE.md)。
+
+## SSL 总开关
+
+`ssl.enabled` 为布尔值，省略默认 true。true 时节点事件、指标和网站后台使用 HTTPS；false 时统一使用 HTTP，保留原端口和令牌，不生成证书。`central.public_url` 的有效协议自动由此开关决定，旧 `metrics.tls_enabled` 由总开关覆盖。飞书、仓库及网站探测自身的 HTTPS 不受影响。SH 交互安装和重装都会引导选择协议（已有安装记录也询问；中断恢复沿用原协议）；菜单 5 或 `--set-ssl on/off` 会保存设置并自动完整安装或升级主服务器和全部启用节点，同时应用 YAML 其他修改和目标镜像，无需另行执行 `--upgrade`。存在未完成部署或卸载时拒绝修改；单节点或仅主服务器操作不能切换协议。Compose 生成工具同样支持此项，HTTP 包不包含证书。面板宝塔反代示例见 [后台宝塔反代说明](WEBSITE.md#宝塔域名反向代理)。
+
+网站配置备份沿用 `central.backup_dir`，其下 `website-config/` 保存 JSON 配置文件，`website-migrations/` 保存首次升级 v2.0.29 前的一致性 SQLite 备份。手动配置备份不自动过期。证书提醒阈值固定为不超过 7 天，展示按天向上取整；详见 [后台指南](WEBSITE.md#证书有效期与网址操作)。

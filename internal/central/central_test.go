@@ -141,3 +141,39 @@ func TestOldSchemaPriorityMigrationAndUnfinishedTask(t *testing.T) {
 		t.Fatal("unfinished task not preserved", task, e)
 	}
 }
+
+func TestWebsiteRecoveryWaitsForOutageRetryWithoutBlockingFileAlerts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"website:1:0", "website:2:0", "ordinary-file-event"} {
+		if _, e := s.DB.Exec("INSERT INTO tasks(node,event_id,target,payload,created,next_try) VALUES('central',?,'feishu','{}',?,?)", id, common.Now(), common.Now()); e != nil {
+			t.Fatal(e)
+		}
+	}
+	first, e := s.claim(ctx, "feishu")
+	if e != nil || first.EventID != "website:1:0" {
+		t.Fatal(first, e)
+	}
+	if e = s.finish(ctx, first, "offline", true); e != nil {
+		t.Fatal(e)
+	}
+	next, e := s.claim(ctx, "feishu")
+	if e != nil || next.EventID != "ordinary-file-event" {
+		t.Fatal("website retry blocks file event", next, e)
+	}
+	s.finish(ctx, next, "ok", false)
+	next, e = s.claim(ctx, "feishu")
+	if e != nil || next != nil {
+		t.Fatal("recovery overtook outage", next, e)
+	}
+	s.DB.Exec("UPDATE tasks SET next_try=0 WHERE id=?", first.ID)
+	next, e = s.claim(ctx, "feishu")
+	if e != nil || next.ID != first.ID {
+		t.Fatal(next, e)
+	}
+	s.finish(ctx, next, "ok", false)
+	next, e = s.claim(ctx, "feishu")
+	if e != nil || next.EventID != "website:2:0" {
+		t.Fatal("recovery not released", next, e)
+	}
+}

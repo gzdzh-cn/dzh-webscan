@@ -37,8 +37,9 @@ require (
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/net v0.55.0
+	golang.org/x/term v0.43.0
+	golang.org/x/text v0.38.0
 	modernc.org/libc v1.22.5 // indirect
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect

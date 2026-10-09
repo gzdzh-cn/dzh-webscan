@@ -18,9 +18,6 @@ func ValidateComposeConfiguration(c *Config) error {
 	if common.B(common.M(c.Raw["registry"])["auth_required"]) {
 		return errors.New("compose_packages_require_public_registry")
 	}
-	if len(c.Selected("")) == 0 {
-		return errors.New("compose_requires_enabled_node")
-	}
 	for _, n := range c.Selected("") {
 		if common.Contains([]string{"central", "private"}, common.S(n["id"])) {
 			return errors.New("compose_node_id_collides_with_package_directory")
@@ -89,6 +86,9 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 	}
 	active := []string{}
 	secrets := common.Map{"alert_token": common.ID() + common.ID(), "nodes": common.Map{}}
+	if err := websiteSeedCredentials(c, secrets); err != nil {
+		return err
+	}
 	for _, n := range selected {
 		id := common.S(n["id"])
 		active = append(active, id)
@@ -118,32 +118,38 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 	}
 	// The CA private key is retained only in a private local directory, never in a
 	// host package. Node packages contain only that node's metrics server key.
-	if err = copyCert("ca.key", "private/ca.key"); err != nil {
-		return err
-	}
-	if err = copyCert("ca.crt", "private/ca.crt"); err != nil {
-		return err
-	}
-	for _, name := range []string{"ca.crt", "client.crt", "client.key"} {
-		if err = copyCert(name, "central/config/pki/prometheus/"+name); err != nil {
+	if c.SSLEnabled() {
+		if err = copyCert("ca.key", "private/ca.key"); err != nil {
 			return err
 		}
+		if err = copyCert("ca.crt", "private/ca.crt"); err != nil {
+			return err
+		}
+		for _, name := range []string{"ca.crt", "client.crt", "client.key"} {
+			if err = copyCert(name, "central/config/pki/prometheus/"+name); err != nil {
+				return err
+			}
+		}
+
 	}
 	central := common.M(c.Raw["central"])
-	for _, entry := range []string{"ca.crt"} {
-		if err = copyCert(entry, "central/config/pki/"+entry); err != nil {
-			return err
-		}
-	}
-	// ReceiverRuntime's cert names use the public IP; take them from its output.
 	runtime := CentralRuntime(c, secrets, active)
 	runtime["feishu"] = f
-	https := common.M(runtime["https"])
-	for _, key := range []string{"cert_file", "key_file"} {
-		name := filepath.Base(common.S(https[key]))
-		if err = copyCert(name, "central/config/pki/"+name); err != nil {
-			return err
+	if c.SSLEnabled() {
+		for _, entry := range []string{"ca.crt"} {
+			if err = copyCert(entry, "central/config/pki/"+entry); err != nil {
+				return err
+			}
 		}
+		// ReceiverRuntime's cert names use the public IP; take them from its output.
+		https := common.M(runtime["https"])
+		for _, key := range []string{"cert_file", "key_file"} {
+			name := filepath.Base(common.S(https[key]))
+			if err = copyCert(name, "central/config/pki/"+name); err != nil {
+				return err
+			}
+		}
+
 	}
 	g := common.M(central["grafana"])
 	password := common.S(g["admin_password"])
@@ -151,6 +157,7 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 		password = common.ID() + common.ID()[:8]
 	}
 	centralFiles := map[string][]byte{
+		"website-credentials.json":      common.JSON(common.Map{"url": WebsiteURL(c), "username": secrets["website_username"], "password": secrets["website_password"], "initialization_only": true}),
 		"config/runtime.json":           common.JSON(runtime),
 		"config/alert-token":            []byte(common.S(secrets["alert_token"])),
 		"config/prometheus.yml":         YAML(Prometheus(c, active)),
@@ -169,6 +176,16 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 	}
 	centralCompose := ComposeCentral(c, images)
 	standaloneImage(common.M(common.M(centralCompose["services"])["receiver"]), common.S(images["central"]))
+	if !c.SSLEnabled() {
+		prometheus := common.M(common.M(centralCompose["services"])["prometheus"])
+		filtered := []string{}
+		for _, mount := range common.SS(prometheus["volumes"]) {
+			if !strings.Contains(mount, "/pki/prometheus:") {
+				filtered = append(filtered, mount)
+			}
+		}
+		prometheus["volumes"] = filtered
+	}
 	centralCompose["name"] = "webscan-compose-central"
 	// Avoid colliding with a SH-managed stack on the same host/network.
 	common.M(common.M(centralCompose["networks"])["monitor"])["name"] = "webscan-compose-monitor"
@@ -275,17 +292,20 @@ func packageMounts(s common.Map, mapping map[string]string) {
 
 func prepareNodeCompose(c *Config, n, secrets, images common.Map, write func(string, []byte) error, copyCert func(string, string) error, launcher []byte) error {
 	id := common.S(n["id"])
-	for source, target := range map[string]string{"ca.crt": "ca.crt", id + ".crt": "server.crt", id + ".key": "server.key"} {
-		if err := copyCert(source, id+"/config/pki/"+target); err != nil {
-			return err
+	if c.SSLEnabled() {
+		for source, target := range map[string]string{"ca.crt": "ca.crt", id + ".crt": "server.crt", id + ".key": "server.key"} {
+			if err := copyCert(source, id+"/config/pki/"+target); err != nil {
+				return err
+			}
 		}
+
 	}
 	runtime := NodeRuntime(c, n, secrets)
 	yara, err := assets.Files.ReadFile("php-webshell.yar")
 	if err != nil {
 		return errors.New("compose_yara_read_failed")
 	}
-	exporterConfig := common.Map{"tls_server_config": common.Map{"cert_file": "/etc/webscan-v1/pki/server.crt", "key_file": "/etc/webscan-v1/pki/server.key", "client_auth_type": "RequireAndVerifyClientCert", "client_ca_file": "/etc/webscan-v1/pki/ca.crt"}}
+	exporterConfig := ExporterWebConfig(c)
 	for name, b := range map[string][]byte{"runtime.json": common.JSON(runtime), "php-webshell.yar": yara, "vector.yml": YAML(VectorConfig(c, n, secrets)), "exporter.yml": YAML(exporterConfig)} {
 		if err := write(id+"/config/"+name, b); err != nil {
 			return err
@@ -301,7 +321,10 @@ func prepareNodeCompose(c *Config, n, secrets, images common.Map, write func(str
 	vector["container_name"] = "webscan-vector-v1"
 	vector["network_mode"] = "host"
 	vector["user"] = "0:0"
-	vector["volumes"] = []string{"/etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro", "/etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro", "/var/log/webscan-v1:/var/log/webscan-v1:ro", "/var/lib/webscan-vector-v1:/var/lib/vector"}
+	vector["volumes"] = []string{"/etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro", "/var/log/webscan-v1:/var/log/webscan-v1:ro", "/var/lib/webscan-vector-v1:/var/lib/vector"}
+	if c.SSLEnabled() {
+		vector["volumes"] = append(common.SS(vector["volumes"]), "/etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro")
+	}
 	vector["depends_on"] = []string{"agent"}
 	exporter := service(common.S(images["exporter"]))
 	exporter["container_name"] = "webscan-exporter-v1"
@@ -309,7 +332,10 @@ func prepareNodeCompose(c *Config, n, secrets, images common.Map, write func(str
 	exporter["user"] = "0:0"
 	exporter["pid"] = "host"
 	exporter["command"] = []string{"--web.listen-address=:" + strconv.Itoa(common.I(common.M(n["metrics"])["port"])), "--web.config.file=/etc/webscan-v1/exporter.yml", "--path.procfs=/host/proc", "--path.sysfs=/host/sys", "--path.rootfs=/rootfs", "--collector.textfile.directory=/textfile"}
-	exporter["volumes"] = []string{"/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro,rslave", "/var/lib/webscan-v1/textfile:/textfile:ro", "/etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro", "/etc/webscan-v1/pki:/etc/webscan-v1/pki:ro"}
+	exporter["volumes"] = []string{"/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro,rslave", "/var/lib/webscan-v1/textfile:/textfile:ro", "/etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro"}
+	if c.SSLEnabled() {
+		exporter["volumes"] = append(common.SS(exporter["volumes"]), "/etc/webscan-v1/pki:/etc/webscan-v1/pki:ro")
+	}
 	services["vector"], services["exporter"] = vector, exporter
 	probe := common.S(common.M(c.Raw["health"])["probe_directory"])
 	for _, s := range []common.Map{agent, vector, exporter} {

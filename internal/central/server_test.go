@@ -5,9 +5,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"golang.org/x/crypto/bcrypt"
 	"math/big"
 	"net"
 	"net/http"
@@ -54,8 +57,10 @@ func TestGoFrameHTTPHTTPSDurableQueueAndShutdown(t *testing.T) {
 		}
 	}))
 	defer delivery.Close()
-	plain, tlsPort := freePort(t), freePort(t)
+	plain, tlsPort, consolePort := freePort(t), freePort(t), freePort(t)
 	config := common.Map{"data_dir": base, "bind": "127.0.0.1", "port": plain, "https": common.Map{"bind": "127.0.0.1", "port": tlsPort, "cert_file": certPath, "key_file": keyPath, "allowed_sources": []string{"127.0.0.1/32"}}, "max_request_mib": 2, "max_batch_events": 100, "nodes": common.Map{"node": common.Map{"host": "127.0.0.1", "name": "test", "token": "fixture-token"}}, "active_nodes": []string{"node"}, "loki_url": delivery.URL, "feishu": common.Map{"enabled": true, "webhook_url": delivery.URL, "notifications": common.Map{"file_changes": true}, "rate_limit": common.Map{"max_per_second": 100, "max_per_minute": 1000}, "retry": common.Map{"initial_delay_seconds": 1, "max_delay_seconds": 5}}, "retention": common.Map{"sqlite_events_days": 90, "delivery_records_days": 90}}
+	hash, _ := bcrypt.GenerateFromPassword([]byte("test-console-password"), bcrypt.MinCost)
+	config["website_monitor"] = common.Map{"enabled": true, "host_port": consolePort, "admin_username": "admin", "password_hash": string(hash), "interval_seconds": 60, "timeout_seconds": 1, "max_concurrent": 2}
 	path := filepath.Join(base, "runtime.json")
 	common.AtomicJSON(path, config)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,6 +94,42 @@ func TestGoFrameHTTPHTTPSDurableQueueAndShutdown(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	endpoint := "https://127.0.0.1:" + strconv.Itoa(tlsPort)
+	consoleURL := "https://127.0.0.1:" + strconv.Itoa(consolePort)
+	if code, _, e := common.Request(context.Background(), client, "GET", consoleURL+"/api/session", nil, nil); code != 401 {
+		t.Fatal("independent console session", code, e)
+	}
+	// A real browser may reject the deployment CA. net/http logs this TLS
+	// failure, and GoFrame must have a valid logger even with request logs off.
+	untrustedTransport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12}}
+	defer untrustedTransport.CloseIdleConnections()
+	untrusted := &http.Client{Transport: untrustedTransport, Timeout: 2 * time.Second}
+	for _, address := range []string{endpoint, consoleURL} {
+		for i := 0; i < 3; i++ {
+			response, err := untrusted.Get(address + "/api/session")
+			if response != nil {
+				response.Body.Close()
+			}
+			var unknownCA x509.UnknownAuthorityError
+			if !errors.As(err, &unknownCA) {
+				t.Fatalf("expected rejected CA at %s, got %v", address, err)
+			}
+		}
+		response, err := client.Get("http" + address[len("https"):])
+		if err != nil {
+			t.Fatal("plain HTTP to TLS port", err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("plain HTTP to TLS port: got %d", response.StatusCode)
+		}
+	}
+	if code, _, err := common.Request(context.Background(), client, "GET", consoleURL+"/api/session", nil, nil); err == nil || code != 401 {
+		t.Fatal("console unavailable after rejected TLS handshakes", code, err)
+	}
+	if code, body, e := common.Request(context.Background(), client, "POST", consoleURL+"/api/login", common.Map{"username": "admin", "password": "test-console-password"}, nil); e != nil || code != 200 || common.S(common.M(body)["csrf_token"]) == "" {
+		t.Fatal("GoFrame console login failed", code, e)
+	}
+
 	headers := map[string]string{"Authorization": "Bearer fixture-token"}
 	if code, _, e := common.Request(context.Background(), client, "POST", endpoint+"/webscan/v1/events", fixture(), headers); e != nil || code != 200 {
 		t.Fatal("TLS ingest failed", code, e)

@@ -83,6 +83,9 @@ func (d *Deploy) useInstalledMain() error {
 	// A node-only operation cannot upgrade unrelated third-party components.
 	common.M(raw["deployment"])["upgrade_existing_components"] = false
 	d.C = &Config{Raw: raw, Nodes: nodes, Path: d.C.Path}
+	for _, n := range d.C.Nodes {
+		common.M(n["metrics"])["tls_enabled"] = d.C.SSLEnabled()
+	}
 	return nil
 }
 

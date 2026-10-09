@@ -23,6 +23,12 @@ type Config struct {
 	Path  string
 }
 
+// SSLEnabled defaults to HTTPS for old YAML and saved deployment snapshots.
+func (c *Config) SSLEnabled() bool {
+	value, exists := common.M(c.Raw["ssl"])["enabled"]
+	return !exists || common.B(value)
+}
+
 func Load(path string) (_ *Config, err error) {
 	field := "配置文件"
 	defer func() {
@@ -107,11 +113,52 @@ func Load(path string) (_ *Config, err error) {
 		}
 	}
 	central := common.M(m["central"])
+	field = "central.install_memory_reserve_mib"
+	reserve := common.I(central["install_memory_reserve_mib"])
+	if reserve < 64 || reserve > 4096 {
+		return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: field, Detail: "应在 64～4096 MiB 之间；用于首次安装检查预留，不改变容器限额。"}
+	}
+	field = "central.website_monitor"
+	wm := common.M(central["website_monitor"])
+	if common.B(wm["enabled"]) {
+		if common.S(wm["admin_username"]) == "" || len(common.S(wm["admin_username"])) > 100 {
+			return nil, errors.New("website_admin_username_required")
+		}
+		pass := common.S(wm["admin_password"])
+		if pass != "" && (len(pass) < 12 || len(pass) > 72) {
+			return nil, errors.New("website_password_length_invalid")
+		}
+		for _, key := range []string{"admin_username", "admin_password"} {
+			if strings.ContainsAny(common.S(wm[key]), "\x00\r\n") {
+				return nil, errors.New("website_credentials_invalid")
+			}
+		}
+		for key, limits := range map[string][2]int{"host_port": {1, 65535}, "interval_seconds": {10, 3600}, "timeout_seconds": {1, 30}, "max_concurrent": {1, 128}, "extra_memory_mib": {128, 2048}} {
+			n := common.I(wm[key])
+			if n < limits[0] || n > limits[1] {
+				return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: "central.website_monitor." + key, Detail: fmt.Sprintf("应在 %d～%d 之间。", limits[0], limits[1])}
+			}
+		}
+		if common.I(wm["timeout_seconds"]) >= common.I(wm["interval_seconds"]) {
+			return nil, errors.New("website_timeout_exceeds_interval")
+		}
+		if net.ParseIP(common.S(wm["bind_address"])) == nil {
+			return nil, errors.New("website_bind_address_invalid")
+		}
+	}
+
 	field = "central.public_url"
 	public, e := url.Parse(common.S(central["public_url"]))
-	if e != nil || public.Scheme != "https" || net.ParseIP(public.Hostname()) == nil || public.User != nil || public.RawQuery != "" || public.Fragment != "" || public.Path != "" && public.Path != "/" {
+	if e != nil || (public.Scheme != "https" && public.Scheme != "http") || net.ParseIP(public.Hostname()) == nil || public.User != nil || public.RawQuery != "" || public.Fragment != "" || public.Path != "" && public.Path != "/" {
 		return nil, errors.New("central_requires_ip_https_url")
 	}
+	// The one SSL switch determines the effective protocol; changing it does
+	// not require separately editing the old public_url or node TLS overrides.
+	public.Scheme = "https"
+	if !c.SSLEnabled() {
+		public.Scheme = "http"
+	}
+	central["public_url"] = public.String()
 	event := common.M(central["event_service"])
 	field = "central.public_url / central.event_service.https_port"
 	if public.Port() != fmt.Sprint(common.I(event["https_port"])) {
@@ -155,7 +202,11 @@ func Load(path string) (_ *Config, err error) {
 	}
 	field = "central.event_service.port / https_port / central.grafana.host_port"
 	ports := map[int]bool{}
-	for _, p := range []int{common.I(event["port"]), common.I(event["https_port"]), common.I(grafana["host_port"]), 19190, 19193, 19110, 3100} {
+	listenPorts := []int{common.I(event["port"]), common.I(event["https_port"]), common.I(grafana["host_port"]), 19190, 19193, 19110, 3100}
+	if common.B(wm["enabled"]) {
+		listenPorts = append(listenPorts, common.I(wm["host_port"]))
+	}
+	for _, p := range listenPorts {
 		if p < 1024 || p > 65535 || ports[p] {
 			return nil, errors.New("invalid_or_conflicting_central_port")
 		}
@@ -249,16 +300,14 @@ func Load(path string) (_ *Config, err error) {
 		if net.ParseIP(common.S(metrics["allowed_source_ip"])) == nil {
 			return nil, errors.New("metrics_allowed_source_requires_ip")
 		}
-		field = nodeField + ".metrics.port / tls_enabled"
-		if common.I(metrics["port"]) < 1024 || common.I(metrics["port"]) > 65535 || !common.B(metrics["tls_enabled"]) {
+		metrics["tls_enabled"] = c.SSLEnabled()
+		field = nodeField + ".metrics.port"
+		if common.I(metrics["port"]) < 1024 || common.I(metrics["port"]) > 65535 {
 			return nil, errors.New("metrics_require_tls_nonprivileged_port")
 		}
 		c.Nodes = append(c.Nodes, n)
 	}
 	field = "nodes"
-	if len(c.Nodes) == 0 {
-		return nil, errors.New("nodes_required")
-	}
 	field = "deployment.node_order"
 	for _, id := range common.SS(common.M(m["deployment"])["node_order"]) {
 		if !seen[id] {

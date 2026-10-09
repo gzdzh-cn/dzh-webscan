@@ -68,16 +68,30 @@ func CentralRuntime(c *Config, secrets common.Map, active []string) common.Map {
 	}
 	sources = append(sources, "127.0.0.1/32", u.Hostname()+"/32")
 	f := common.Clone(common.M(c.Raw["feishu"]))
-	return common.Map{"runtime_dir": "/backup-config", "bind": "0.0.0.0", "port": event["port"], "https": common.Map{"bind": "0.0.0.0", "port": event["https_port"], "cert_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".crt", "key_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".key", "allowed_sources": sources}, "max_request_mib": event["max_request_mib"], "max_batch_events": event["max_batch_events"], "data_dir": center["data_dir"], "backup_dir": center["backup_dir"], "backup": c.Raw["backup"], "retention": c.Raw["retention"], "feishu": f, "loki_url": "http://loki:3100", "alert_token": secrets["alert_token"], "nodes": nodes, "active_nodes": active}
+	runtime := common.Map{"runtime_dir": "/backup-config", "bind": "0.0.0.0", "port": event["port"], "https": common.Map{"bind": "0.0.0.0", "port": event["https_port"], "cert_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".crt", "key_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".key", "allowed_sources": sources}, "max_request_mib": event["max_request_mib"], "max_batch_events": event["max_batch_events"], "data_dir": center["data_dir"], "backup_dir": center["backup_dir"], "backup": c.Raw["backup"], "retention": c.Raw["retention"], "website_monitor": websiteRuntime(c, secrets), "feishu": f, "loki_url": "http://loki:3100", "alert_token": secrets["alert_token"], "nodes": nodes, "active_nodes": active}
+	if !c.SSLEnabled() {
+		common.M(runtime["https"])["port"] = 0
+		common.M(runtime["https"])["cert_file"], common.M(runtime["https"])["key_file"] = "", ""
+		runtime["public_http"] = common.Map{"bind": "0.0.0.0", "port": event["https_port"]}
+	}
+	return runtime
 }
 func NodeRuntime(c *Config, n, secrets common.Map) common.Map {
 	health := common.M(c.Raw["health"])
-	return common.Map{"node_id": n["id"], "monitor": n["monitor"], "scan": n["scan"], "transport": n["transport"], "data_dir": "/var/lib/webscan-v1", "log_dir": "/var/log/webscan-v1", "probe_directory": health["probe_directory"], "probe_seconds": health["filesystem_probe_seconds"], "metrics_file": "/var/lib/webscan-v1/textfile/agent.prom", "yara_rules": "/etc/webscan-v1/php-webshell.yar", "retention_days": common.M(c.Raw["retention"])["local_logs_days"], "token": common.M(common.M(secrets["nodes"])[common.S(n["id"])])["token"], "public_url": strings.TrimRight(common.S(common.M(c.Raw["central"])["public_url"]), "/"), "central_ca_file": "/etc/webscan-v1/pki/ca.crt"}
+	runtime := common.Map{"node_id": n["id"], "monitor": n["monitor"], "scan": n["scan"], "transport": n["transport"], "data_dir": "/var/lib/webscan-v1", "log_dir": "/var/log/webscan-v1", "probe_directory": health["probe_directory"], "probe_seconds": health["filesystem_probe_seconds"], "metrics_file": "/var/lib/webscan-v1/textfile/agent.prom", "yara_rules": "/etc/webscan-v1/php-webshell.yar", "retention_days": common.M(c.Raw["retention"])["local_logs_days"], "token": common.M(common.M(secrets["nodes"])[common.S(n["id"])])["token"], "public_url": strings.TrimRight(common.S(common.M(c.Raw["central"])["public_url"]), "/"), "central_ca_file": "/etc/webscan-v1/pki/ca.crt"}
+	if !c.SSLEnabled() {
+		runtime["central_ca_file"] = ""
+	}
+	return runtime
 }
 func VectorConfig(c *Config, n, secrets common.Map) common.Map {
 	token := common.M(common.M(secrets["nodes"])[common.S(n["id"])])["token"]
 	transport := common.M(n["transport"])
-	return common.Map{"data_dir": "/var/lib/vector", "sources": common.Map{"events": common.Map{"type": "file", "include": []string{"/var/log/webscan-v1/events-*.jsonl"}, "read_from": "beginning", "max_line_bytes": 2097152}, "internal": common.Map{"type": "internal_metrics"}}, "transforms": common.Map{"decode": common.Map{"type": "remap", "inputs": []string{"events"}, "source": ". = parse_json!(string!(.message))"}}, "sinks": common.Map{"central": common.Map{"type": "http", "inputs": []string{"decode"}, "uri": strings.TrimRight(common.S(common.M(c.Raw["central"])["public_url"]), "/") + "/webscan/v1/events", "method": "post", "encoding": common.Map{"codec": "json"}, "framing": common.Map{"method": "newline_delimited"}, "auth": common.Map{"strategy": "bearer", "token": token}, "batch": common.Map{"max_events": 1}, "buffer": common.Map{"type": "disk", "max_size": common.I(transport["vector_buffer_mib"]) * 1048576, "when_full": "block"}, "acknowledgements": common.Map{"enabled": true}, "request": common.Map{"timeout_secs": transport["request_timeout_seconds"]}, "healthcheck": common.Map{"enabled": false}, "tls": common.Map{"ca_file": "/etc/webscan-v1/pki/ca.crt", "verify_certificate": true, "verify_hostname": true}}, "metrics": common.Map{"type": "prometheus_exporter", "inputs": []string{"internal"}, "address": "127.0.0.1:19101"}}}
+	vector := common.Map{"data_dir": "/var/lib/vector", "sources": common.Map{"events": common.Map{"type": "file", "include": []string{"/var/log/webscan-v1/events-*.jsonl"}, "read_from": "beginning", "max_line_bytes": 2097152}, "internal": common.Map{"type": "internal_metrics"}}, "transforms": common.Map{"decode": common.Map{"type": "remap", "inputs": []string{"events"}, "source": ". = parse_json!(string!(.message))"}}, "sinks": common.Map{"central": common.Map{"type": "http", "inputs": []string{"decode"}, "uri": strings.TrimRight(common.S(common.M(c.Raw["central"])["public_url"]), "/") + "/webscan/v1/events", "method": "post", "encoding": common.Map{"codec": "json"}, "framing": common.Map{"method": "newline_delimited"}, "auth": common.Map{"strategy": "bearer", "token": token}, "batch": common.Map{"max_events": 1}, "buffer": common.Map{"type": "disk", "max_size": common.I(transport["vector_buffer_mib"]) * 1048576, "when_full": "block"}, "acknowledgements": common.Map{"enabled": true}, "request": common.Map{"timeout_secs": transport["request_timeout_seconds"]}, "healthcheck": common.Map{"enabled": false}, "tls": common.Map{"ca_file": "/etc/webscan-v1/pki/ca.crt", "verify_certificate": true, "verify_hostname": true}}, "metrics": common.Map{"type": "prometheus_exporter", "inputs": []string{"internal"}, "address": "127.0.0.1:19101"}}}
+	if !c.SSLEnabled() {
+		delete(common.M(common.M(vector["sinks"])["central"]), "tls")
+	}
+	return vector
 }
 func service(image string) common.Map {
 	return common.Map{"image": image, "restart": "unless-stopped", "read_only": true, "cap_drop": []string{"ALL"}, "security_opt": []string{"no-new-privileges:true"}, "logging": common.Map{"driver": "json-file", "options": common.Map{"max-size": "10m", "max-file": "3"}}}
@@ -93,6 +107,12 @@ func ReceiverService(c *Config, image string) common.Map {
 	s["ports"] = []string{"127.0.0.1:" + strconv.Itoa(common.I(event["port"])) + ":" + strconv.Itoa(common.I(event["port"])), common.S(event["https_bind_address"]) + ":" + strconv.Itoa(common.I(event["https_port"])) + ":" + strconv.Itoa(common.I(event["https_port"]))}
 	s["mem_limit"] = strconv.Itoa(common.I(center["new_components_memory_budget_mib"])-common.I(center["new_components_memory_budget_mib"])*5/12-96) + "m"
 	s["environment"] = common.Map{"GOMEMLIMIT": "96MiB", "GOMAXPROCS": "2"}
+	if extra := websiteMemory(c); extra > 0 {
+		wm := common.M(center["website_monitor"])
+		s["ports"] = append(common.SS(s["ports"]), common.S(wm["bind_address"])+":"+strconv.Itoa(common.I(wm["host_port"]))+":"+strconv.Itoa(common.I(wm["host_port"])))
+		s["mem_limit"] = strconv.Itoa(common.I(center["new_components_memory_budget_mib"])-common.I(center["new_components_memory_budget_mib"])*5/12-96+extra) + "m"
+		common.M(s["environment"])["GOMEMLIMIT"] = strconv.Itoa(96+extra*3/4) + "MiB"
+	}
 	s["tmpfs"] = []string{"/tmp:size=16m"}
 	s["networks"] = common.Map{"monitor": common.Map{"aliases": []string{"webscan-v1-receiver"}}}
 	return s
@@ -171,6 +191,15 @@ func Prometheus(c *Config, active []string) common.Map {
 		}
 		jobs = append(jobs, common.Map{"job_name": "webscan-node-" + common.S(n["id"]), "scheme": "https", "tls_config": common.Map{"ca_file": "/etc/prometheus/pki/ca.crt", "cert_file": "/etc/prometheus/pki/client.crt", "key_file": "/etc/prometheus/pki/client.key"}, "static_configs": []any{common.Map{"targets": []string{common.S(n["host"]) + ":" + strconv.Itoa(common.I(common.M(n["metrics"])["port"]))}, "labels": common.Map{"node_id": n["id"], "server_name": n["name"]}}}})
 	}
+	if !c.SSLEnabled() {
+		for _, value := range jobs {
+			job := common.M(value)
+			if strings.HasPrefix(common.S(job["job_name"]), "webscan-node-") {
+				job["scheme"] = "http"
+				delete(job, "tls_config")
+			}
+		}
+	}
 	interval := strconv.Itoa(common.I(common.M(c.Raw["health"])["metrics_scrape_seconds"])) + "s"
 	return common.Map{"global": common.Map{"scrape_interval": interval, "evaluation_interval": interval}, "rule_files": []string{"/etc/prometheus/rules.yml"}, "alerting": common.Map{"alertmanagers": []any{common.Map{"static_configs": []any{common.Map{"targets": []string{"webscan-v1-alertmanager:19193"}}}}}}, "scrape_configs": jobs}
 }
@@ -185,4 +214,11 @@ func GrafanaURL(c *Config) string {
 }
 func GrafanaINI(c *Config) []byte {
 	return []byte("[server]\nhttp_addr = 0.0.0.0\nhttp_port = 3000\nroot_url = " + GrafanaURL(c) + "/\n[auth.anonymous]\nenabled = false\n[users]\nallow_sign_up = false\n")
+}
+
+func ExporterWebConfig(c *Config) common.Map {
+	if !c.SSLEnabled() {
+		return common.Map{}
+	}
+	return common.Map{"tls_server_config": common.Map{"cert_file": "/etc/webscan-v1/pki/server.crt", "key_file": "/etc/webscan-v1/pki/server.key", "client_auth_type": "RequireAndVerifyClientCert", "client_ca_file": "/etc/webscan-v1/pki/ca.crt"}}
 }

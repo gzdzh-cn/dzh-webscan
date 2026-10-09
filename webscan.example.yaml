@@ -6,12 +6,15 @@
 
 # 配置格式版本：Go 版必须为 2，旧版的 1 不再接受。
 config_version: 2
+# 一个总开关控制节点通信、指标采集和网站后台；旧配置默认 true。
+ssl:
+  enabled: true
 
 # 主服务器配置：接收节点事件、投递飞书、保存日志和提供监控面板。
 central:
   # 主服务器显示名称，用于监控面板和服务器标识。
   name: 网站监控中心
-  # 节点连接的主服务器 IP HTTPS 地址；替换示例地址，端口必须等于 https_port，不填域名。
+  # 节点连接的主服务器 IP 地址；协议由 ssl.enabled 决定，端口等于 https_port，不填域名。
   public_url: https://192.0.2.10:19443
   # 主服务器安装根目录；运行配置和 Compose 文件保存在其 webscan-v1 子目录。
   install_dir: /opt/webscan-central
@@ -30,15 +33,18 @@ central:
   # receiver、Prometheus、Alertmanager、主机 exporter 的容器内存预算，单位 MiB。
   # 不包含新建 Grafana 的 192 MiB 和 Loki 的 256 MiB，也不预先分配内存。
   new_components_memory_budget_mib: 384
+  # 首次安装检查额外预留内存，范围 64～4096 MiB；不改变组件容器限额。
+  # 内存较紧张的主机可设 64；组件总预算加此预留仍必须低于可用内存。
+  install_memory_reserve_mib: 128
   # 主服务器事件接收接口设置。
   event_service:
     # 宿主机内部 HTTP 监听地址；当前校验要求固定为 127.0.0.1。
     bind_address: 127.0.0.1
     # 宿主机内部 HTTP 端口，供就绪检查和本机维护使用。
     port: 18081
-    # 宿主机 HTTPS 端口映射地址；0.0.0.0 表示全部 IPv4 网卡。
+    # 宿主机对外事件端口映射地址；0.0.0.0 表示全部 IPv4 网卡。
     https_bind_address: 0.0.0.0
-    # 对外 HTTPS 端口；节点上报和回执走此端口，须放行节点访问。
+    # 对外事件端口（兼容沿用字段名 https_port）；关闭 SSL 后同端口使用 HTTP。
     https_port: 19443
     # 额外配置来源 CIDR 列表，如 ['198.51.100.21/32']。
     # [] 自动加入全部启用节点；非空时按列表放行，并始终加入主服务器及回环 IP。
@@ -48,6 +54,19 @@ central:
     # 单次事件上报允许的最大事件数；当前 Vector 每批发送 1 条。
     max_batch_events: 100
   # 主服务器 Grafana 面板和账号配置。
+  # 网站首页可用性检测及 Vue 管理后台；账号独立于 Grafana。
+  website_monitor:
+    enabled: true
+    bind_address: 0.0.0.0
+    host_port: 19444
+    admin_username: admin
+    # 仅用于账号初始化；留空首次生成，填写时需要 12～72 字节。
+    # 后台改密后数据库账号优先，升级／重装不会用 YAML 覆盖。
+    admin_password: ''
+    interval_seconds: 60
+    timeout_seconds: 5
+    max_concurrent: 128
+    extra_memory_mib: 128
   grafana:
     # Grafana 宿主机监听地址；0.0.0.0 对全部网卡开放。
     bind_address: 0.0.0.0
@@ -261,6 +280,7 @@ node_defaults:
     # 子服务器指标端口，使用非特权端口（建议 1024～65535）；不是 SSH 或事件上报端口。
     port: 19100
     # 必须为 true；当前校验不接受无 TLS 的指标接口。
+    # 兼容保留：实际开关由全局 ssl.enabled 决定。
     tls_enabled: true
     # 指标端口防火墙允许的主服务器 IP；替换示例地址，并与实际采集来源一致。
     allowed_source_ip: 192.0.2.10

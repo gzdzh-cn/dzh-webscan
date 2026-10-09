@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	gfSQLite "github.com/gogf/gf/contrib/drivers/sqlite/v2"
 	"github.com/gogf/gf/v2/database/gdb"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -37,4 +38,19 @@ func BackupDB(d *sql.DB, path string) error {
 		return e
 	}
 	return os.Chmod(path, 0600)
+}
+
+// OpenReadOnly is for deployment account discovery; no PRAGMA or permissions
+// are changed, and a missing database is never created.
+func OpenReadOnly(path string) (*sql.DB, error) {
+	d, e := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro&_pragma=busy_timeout(30000)"}).String())
+	if e != nil {
+		return nil, e
+	}
+	d.SetMaxOpenConns(1)
+	if e = d.Ping(); e != nil {
+		d.Close()
+		return nil, e
+	}
+	return d, nil
 }

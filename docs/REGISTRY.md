@@ -30,7 +30,7 @@ registry:
 
 这是示例域名，要替换成自己的有效地址。支持多个 HTTPS 源地址，不包含路径、查询参数或账号密码；按顺序尝试，再回到 Docker Hub。`[]` 禁用。
 
-SH 部署的加速配置用于第三方 Docker Hub 组件，自研镜像按 `registry.prefix` 直拉，不修改 Docker 全局设置。手动 Compose 直接使用生成的镜像引用，不执行 SH 的加速回退和 SSH 备用传输。
+SH 部署程序下载公开 Docker Hub 镜像时，自研 central、agent 和第三方组件都按加速源顺序尝试，失败后回到官方引用。`auth_required: true` 的项目镜像及非 Docker Hub 仓库直接下载，认证凭据不会发送给加速源；镜像摘要在切换来源时保持不变。SH 引导提取部署工具仍按 `registry.prefix` 下载 central。脚本不修改 Docker 全局设置；`mirrors: []` 只关闭脚本的加速配置，不能禁用 Docker 已配置的全局加速器。手动 Compose 直接使用生成的镜像引用，不执行 SH 的加速回退和 SSH 备用传输。
 
 ## 本地构建与发布
 

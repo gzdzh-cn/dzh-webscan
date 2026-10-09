@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -109,11 +110,16 @@ func bootstrapImageForOperation(image string, args []string) string {
 	}
 	for _, arg := range args {
 		flag := strings.Split(arg, "=")[0]
-		if flag != "--resume" && flag != "--rollback" {
+		if flag != "--resume" && flag != "--rollback" && flag != "--install" {
 			continue
 		}
 		state, err := common.ReadJSON(filepath.Join(deploy.StateRoot, "state.json"))
 		if err == nil {
+			// Menu 1 automatically continues an interrupted installation. Use
+			// its recorded tool too, even after a newer script was distributed.
+			if flag == "--install" && (!pendingDeployment(state) || retryConfirmedRollout(state, args)) {
+				continue
+			}
 			if locked := common.S(state["target_tool_image"]); regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`).MatchString(locked) {
 				return locked
 			}
@@ -132,7 +138,7 @@ func matchingToolDigest(ref string, digests []string) string {
 		if colon := strings.LastIndex(image, ":"); colon > strings.LastIndex(image, "/") {
 			image = image[:colon]
 		}
-		return strings.TrimPrefix(strings.TrimPrefix(image, "docker.io/"), "index.docker.io/")
+		return strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(image, "docker.io/"), "index.docker.io/"), "registry-1.docker.io/")
 	}
 	for _, digest := range digests {
 		if repository(digest) == repository(ref) && regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$`).MatchString(digest) {
@@ -162,4 +168,38 @@ func runDeploymentTool(ctx context.Context, binary string, args []string) error 
 		<-done
 		return ctx.Err()
 	}
+}
+
+// A new bootstrap may introduce configuration fields unavailable in a stale
+// mirrored latest. Allow newer releases, but never silently select an older one.
+func toolOlderThanBootstrap(ctx context.Context, binary string) bool {
+	b, e := command(ctx, nil, binary, "version")
+	if e != nil {
+		return true
+	}
+	parse := func(value string) []int {
+		parts := regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-.][A-Za-z0-9_.-]+)?$`).FindStringSubmatch(strings.TrimSpace(value))
+		if len(parts) != 4 {
+			return nil
+		}
+		out := []int{}
+		for _, p := range parts[1:] {
+			n, _ := strconv.Atoi(p)
+			out = append(out, n)
+		}
+		return out
+	}
+	actual, minimum := parse(string(b)), parse(Release)
+	if len(minimum) == 0 {
+		return false
+	}
+	if len(actual) == 0 {
+		return true
+	}
+	for i := range minimum {
+		if actual[i] != minimum[i] {
+			return actual[i] < minimum[i]
+		}
+	}
+	return false
 }

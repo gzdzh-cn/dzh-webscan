@@ -50,6 +50,11 @@ func wait(t *testing.T, fn func() bool) {
 	t.Fatal("integration condition timed out")
 }
 func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
+	ssl := os.Getenv("WEBSCAN_TEST_SSL") != "off"
+	scheme := "https"
+	if !ssl {
+		scheme = "http"
+	}
 	version := os.Getenv("WEBSCAN_IMAGE_VERSION")
 	if version == "" {
 		t.Skip("set WEBSCAN_IMAGE_VERSION after local build")
@@ -131,19 +136,27 @@ func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "agent", "ca.crt"), ca, 0644)
 	os.WriteFile(filepath.Join(root, "central", "server.key"), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}), 0600)
 	c := common.Map{"data_dir": "/data", "bind": "0.0.0.0", "port": 18081, "https": common.Map{"bind": "0.0.0.0", "port": 19443, "cert_file": "/config/ca.crt", "key_file": "/config/server.key", "allowed_sources": []string{"0.0.0.0/0"}}, "max_request_mib": 2, "max_batch_events": 100, "nodes": common.Map{"fixture": common.Map{"host": "127.0.0.1", "name": "isolated fixture", "token": "isolated-token"}}, "active_nodes": []string{"fixture"}, "loki_url": sinkURL, "feishu": common.Map{"enabled": true, "webhook_url": sinkURL, "notifications": common.Map{"file_changes": true, "scan_matches": true, "scan_errors": true}, "rate_limit": common.Map{"max_per_second": 100, "max_per_minute": 1000}, "retry": common.Map{"initial_delay_seconds": 1, "max_delay_seconds": 2}}, "retention": common.Map{"sqlite_events_days": 90, "delivery_records_days": 90}}
+	if !ssl {
+		common.M(c["https"])["port"] = 0
+		c["public_http"] = common.Map{"bind": "0.0.0.0", "port": 19443}
+	}
 	c["alert_token"] = "isolated-deployment-admin"
 	common.AtomicJSON(filepath.Join(root, "central", "runtime.json"), c)
 	docker(t, "run", "-d", "--name", cn, "--network", network, "--network-alias", "central", "--read-only", "--tmpfs", "/tmp:size=16m", "-p", "127.0.0.1::18081", "-p", "127.0.0.1::19443", "-v", filepath.Join(root, "central")+":/config:ro", "-v", volumes["central-data"]+":/data", "webscan-central:"+centralVersion, "central", "--config", "/config/runtime.json")
 	port := docker(t, "port", cn, "18081/tcp")
 	ready := "http://" + port + "/ready"
-	client, _ := common.HTTPClient(filepath.Join(root, "central", "ca.crt"), 3*time.Second)
+	caFile := filepath.Join(root, "central", "ca.crt")
+	if !ssl {
+		caFile = ""
+	}
+	client, _ := common.HTTPClient(caFile, 3*time.Second)
 	wait(t, func() bool {
 		_, v, e := common.Request(context.Background(), client, "GET", ready, nil, nil)
 		return e == nil && common.B(common.M(v)["ready"])
 	})
 	tlsAddress := docker(t, "port", cn, "19443/tcp")
 	event := common.Map{"event_id": "legacy-fixture", "node_id": "fixture", "operation": "modify", "path": "/sites/中文.php", "time": common.Stamp(), "scan": common.Map{"status": "pending"}}
-	if _, _, e = common.Request(context.Background(), client, "POST", "https://"+tlsAddress+"/webscan/v1/events", event, map[string]string{"Authorization": "Bearer isolated-token"}); e != nil {
+	if _, _, e = common.Request(context.Background(), client, "POST", scheme+"://"+tlsAddress+"/webscan/v1/events", event, map[string]string{"Authorization": "Bearer isolated-token"}); e != nil {
 		t.Fatal(e)
 	}
 	inspect := func(container, path string) common.Map {
@@ -168,16 +181,28 @@ func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
 	monitor["roots"] = []string{"/sites"}
 	monitor["critical_paths"] = []string{}
 	monitor["exclude_paths"] = []string{}
+	hiddenExclusions := os.Getenv("WEBSCAN_TEST_HIDDEN_EXCLUSIONS") == "on"
+	fixturePrefix := ".webscan-deploy-test-"
+	if hiddenExclusions {
+		monitor["exclude_paths"] = []string{"/sites/**/.*"}
+		fixturePrefix = "webscan-deploy-test-"
+	}
 	ac := common.Map{"node_id": "fixture", "monitor": monitor, "scan": defaults["scan"], "transport": defaults["transport"], "data_dir": "/data", "log_dir": "/logs", "probe_directory": "/probe", "metrics_file": "/data/textfile/agent.prom", "yara_rules": "/config/php-webshell.yar", "public_url": "https://central:19443", "central_ca_file": "/config/ca.crt", "token": "isolated-token", "retention_days": 7, "probe_seconds": 30}
+	ac["public_url"] = scheme + "://central:19443"
+	if !ssl {
+		ac["central_ca_file"] = ""
+	}
 	common.AtomicJSON(filepath.Join(root, "agent", "runtime.json"), ac)
 	yara, _ := assets.Files.ReadFile("php-webshell.yar")
 	os.WriteFile(filepath.Join(root, "agent", "php-webshell.yar"), yara, 0644)
 	// Use the production generator with merged json.Number defaults, rather
 	// than a separately written fixture that could miss deployment errors.
-	vc := deploy.VectorConfig(&deploy.Config{Raw: common.Map{"central": common.Map{"public_url": "https://central:19443"}}}, common.Map{"id": "fixture", "transport": common.Clone(common.M(defaults["transport"]))}, common.Map{"nodes": common.Map{"fixture": common.Map{"token": "isolated-token"}}})
+	vc := deploy.VectorConfig(&deploy.Config{Raw: common.Map{"ssl": common.Map{"enabled": ssl}, "central": common.Map{"public_url": scheme + "://central:19443"}}}, common.Map{"id": "fixture", "transport": common.Clone(common.M(defaults["transport"]))}, common.Map{"nodes": common.Map{"fixture": common.Map{"token": "isolated-token"}}})
 	vc["data_dir"] = "/vector"
 	common.M(common.M(vc["sources"])["events"])["include"] = []string{"/logs/events-*.jsonl"}
-	common.M(common.M(common.M(vc["sinks"])["central"])["tls"])["ca_file"] = "/config/ca.crt"
+	if ssl {
+		common.M(common.M(common.M(vc["sinks"])["central"])["tls"])["ca_file"] = "/config/ca.crt"
+	}
 	vb := deploy.YAML(vc)
 	os.WriteFile(filepath.Join(root, "agent", "vector.yaml"), vb, 0644)
 	docker(t, "run", "-d", "--name", an, "--network", network, "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_READ_SEARCH", "--memory", "256m", "--cpus", "1", "--tmpfs", "/tmp:size=16m", "-e", "GOMEMLIMIT=64MiB", "-v", filepath.Join(root, "agent")+":/config:ro", "-v", volumes["agent-data"]+":/data", "-v", volumes["logs"]+":/logs", "-v", volumes["sites"]+":/sites:ro", "-v", volumes["probe"]+":/probe", "webscan-agent:"+version, "agent", "--config", "/config/runtime.json")
@@ -251,6 +276,9 @@ func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
 		return e == nil && common.S(v["state"]) == "rejected" && common.S(v["version"]) == versionBefore
 	})
 	common.M(ac["monitor"])["exclude_paths"] = []string{}
+	if hiddenExclusions {
+		common.M(ac["monitor"])["exclude_paths"] = []string{"/sites/**/.*"}
+	}
 	common.AtomicJSON(filepath.Join(root, "agent", "runtime.json"), ac)
 	wait(t, func() bool { v, e := readStatus(); return e == nil && common.S(v["state"]) == "applied" })
 	wait(t, func() bool { return common.I(inspect(an, "/data/agent.sqlite3")["pending_events"]) == 0 })
@@ -280,8 +308,8 @@ func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
 		t.Fatal(capErr)
 	}
 	if common.B(common.M(capabilities)["deployment_acceptance"]) {
-		quietDir := "/sites/.webscan-deploy-test-fedcba9876543210fedcba9876543210"
-		quietDest := "/sites/.webscan-deploy-test-fedcba9876543210fedcba9876543211"
+		quietDir := "/sites/" + fixturePrefix + "fedcba9876543210fedcba9876543210"
+		quietDest := "/sites/" + fixturePrefix + "fedcba9876543210fedcba9876543211"
 		quietPath, quietMoved := quietDir+"/fixture.php", quietDest+"/fixture.php"
 		content := "<?php /* owned detector fixture; eval( base64_decode( never executed */"
 		hash := common.Hash([]byte(content))
@@ -342,7 +370,7 @@ func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
 	})
 	wait(t, func() bool { return common.B(call("/deployment-notices", mainNotice)["done"]) })
 	wait(t, func() bool { return common.B(call("/deployment-notices", nodeNotice)["done"]) })
-	fixtureDir := "/sites/.webscan-deploy-test-0123456789abcdef0123456789abcdef"
+	fixtureDir := "/sites/" + fixturePrefix + "0123456789abcdef0123456789abcdef"
 	fixturePath := fixtureDir + "/fixture.php"
 	baseline := "<?php /* deploy baseline */"
 	modified := "<?php /* deploy modified */"
@@ -399,5 +427,5 @@ func TestVersionedImagesTLSVectorYaraRestartAndHotRules(t *testing.T) {
 	}
 	t.Log("Deployment main/node notices, real PHP modification, business-code retry/restart, registration/receipt dedup and delivery drain verified")
 
-	t.Logf("TLS, persistent retry/restart, Vector, YARA, receipts and same-container rules verified; Feishu=%d Loki=%d", feishuSuccess.Load(), lokiSuccess.Load())
+	t.Logf("%s, persistent retry/restart, Vector, YARA, receipts and same-container rules verified; Feishu=%d Loki=%d", scheme, feishuSuccess.Load(), lokiSuccess.Load())
 }

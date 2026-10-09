@@ -7,6 +7,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+# Build Vue locally first; a fresh Go checkout still supports developer tests.
+RUN test -d internal/website/ui/assets && grep -q /assets/ internal/website/ui/index.html
 ARG RELEASE
 RUN test "$(go env GOVERSION)" = go1.26.3 && \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \

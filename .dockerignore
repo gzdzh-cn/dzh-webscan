@@ -7,3 +7,5 @@ build
 .cache
 *.sqlite3*
 docs
+
+web/node_modules

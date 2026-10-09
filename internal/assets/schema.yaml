@@ -1,7 +1,10 @@
 config_version: 2
+# 一个总开关控制节点通信、指标采集和网站后台；旧配置默认 true。
+ssl:
+  enabled: true
 central:
   name: 网站监控中心
-  # 子服务器直接连接此 IP 的 HTTPS 接口，不经过 Nginx。
+  # 子服务器直接连接此 IP，不经过 Nginx；协议由 ssl.enabled 决定。
   public_url: https://192.0.2.10:19443
   install_dir: /opt/webscan-central
   data_dir: /var/lib/webscan-central
@@ -10,6 +13,8 @@ central:
   # 默认部署本项目的 Grafana 和 Loki；按需明确配置复用。
   reuse_existing: {grafana: false, loki: false}
   new_components_memory_budget_mib: 384
+  # 首次安装检查额外预留；不是容器内存限额，范围 64～4096 MiB。
+  install_memory_reserve_mib: 128
   event_service:
     bind_address: 127.0.0.1
     port: 18081
@@ -19,6 +24,18 @@ central:
     allowed_source_cidrs: []
     max_request_mib: 2
     max_batch_events: 100
+  # 网站可用性后台；旧 YAML 未填写本段时保持关闭。
+  website_monitor:
+    enabled: false
+    bind_address: 0.0.0.0
+    host_port: 19444
+    # 网站后台账号仅用于初始化，已有账号以数据库为准。
+    admin_username: admin
+    admin_password: ''
+    interval_seconds: 60
+    timeout_seconds: 5
+    max_concurrent: 128
+    extra_memory_mib: 128
   grafana:
     # 浏览器通过主服务器 IP:映射端口访问，无需配置域名。
     bind_address: 0.0.0.0

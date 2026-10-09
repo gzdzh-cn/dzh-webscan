@@ -20,6 +20,9 @@ import (
 )
 
 func (d *Deploy) nodeClient() (*http.Client, error) {
+	if !d.C.SSLEnabled() {
+		return common.HTTPClient("", 10*time.Second)
+	}
 	c, e := common.HTTPClient(filepath.Join(d.C.CentralRoot(), "pki", "ca.crt"), 10*time.Second)
 	if e != nil {
 		return nil, e
@@ -36,7 +39,11 @@ func (d *Deploy) metrics(ctx context.Context, n common.Map) (map[string]float64,
 	if e != nil {
 		return nil, e
 	}
-	r, e := http.NewRequestWithContext(ctx, "GET", "https://"+common.S(n["host"])+":"+strconv.Itoa(common.I(common.M(n["metrics"])["port"]))+"/metrics", nil)
+	scheme := "https"
+	if !d.C.SSLEnabled() {
+		scheme = "http"
+	}
+	r, e := http.NewRequestWithContext(ctx, "GET", scheme+"://"+common.S(n["host"])+":"+strconv.Itoa(common.I(common.M(n["metrics"])["port"]))+"/metrics", nil)
 	if e != nil {
 		return nil, e
 	}
@@ -136,7 +143,7 @@ func (d *Deploy) WaitHealth(ctx context.Context, n common.Map) error {
 			}
 			progress.Info(ctx, fmt.Sprintf("健康核对：清单 %s｜目录覆盖 %s｜Vector %s｜待投递 %.0f 条｜待扫描 %.0f 条", flag(m["webscan_baseline_completed"]), flag(m["webscan_coverage_ok"]), flag(m["webscan_vector_metrics_up"]), m["webscan_local_pending_events"], m["webscan_pending_scans"]))
 			if e != nil {
-				progress.Info(ctx, "尚未取得节点 HTTPS 指标，继续等待")
+				progress.Info(ctx, "尚未取得节点监控指标，继续等待")
 			}
 			notice = time.Now()
 		}
@@ -154,10 +161,24 @@ func (d *Deploy) AcceptNode(ctx context.Context, n common.Map) error {
 	if e != nil {
 		return e
 	}
-	base := common.SS(common.M(n["monitor"])["roots"])[0]
-	root := base + "/.webscan-deploy-test-" + common.ID()
-	moveRoot := base + "/.webscan-deploy-test-" + common.ID()
-	yaraRoot := base + "/.webscan-deploy-test-" + common.ID()
+	root, e := deploymentFixtureRoot(n, common.ID())
+	if e != nil {
+		return e
+	}
+	moveRoot, e := deploymentFixtureRoot(n, common.ID())
+	if e != nil {
+		return e
+	}
+	yaraRoot, e := deploymentFixtureRoot(n, common.ID())
+	if e != nil {
+		return e
+	}
+	for _, dir := range []string{root, moveRoot, yaraRoot} {
+		if e = d.requireFixtureCapability(ctx, filepath.Join(dir, "fixture.php")); e != nil {
+			return e
+		}
+	}
+	progress.Info(ctx, "使用符合节点监控规则的独立验收目录："+root)
 	if _, e = r.Run(ctx, "umask 077; mkdir -- "+Q(root)+" "+Q(moveRoot)+" "+Q(yaraRoot)); e != nil {
 		return e
 	}

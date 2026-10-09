@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -54,7 +55,7 @@ func (d *Deploy) plannedActive() []string {
 // Current Go installations and fresh installations stage their nodes before
 // one main update. Legacy Python migration keeps its main-first compatibility check.
 func (d *Deploy) canStageRollout() bool {
-	return !d.O.AddNode && !d.addingNode() && !d.O.CentralOnly && len(d.C.Selected(d.O.Node)) > 0 && (!common.B(d.State["central_installed"]) || common.S(d.State["go_release"]) != "")
+	return !d.O.AddNode && !d.addingNode() && !d.O.CentralOnly && len(d.C.Selected(d.O.Node)) > 0 && (!common.B(d.State["central_installed"]) || common.S(d.State["go_release"]) != "" || strings.HasPrefix(common.S(d.State["central_runtime_release"]), "v2."))
 }
 
 func (d *Deploy) deployRollout(ctx context.Context) (err error) {
