@@ -32,6 +32,10 @@ func actionName(o Options) string {
 }
 
 func (d *Deploy) selectInstallMode() {
+	if d.canRetryRollout() {
+		d.O.Upgrade = true
+		return
+	}
 	run, step := common.S(d.State["run_id"]), common.S(d.State["step"])
 	if strings.HasPrefix(run, "go-") && step != "complete" && step != "rolled-back" {
 		d.O.Resume = true

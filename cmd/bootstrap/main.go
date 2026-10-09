@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -53,8 +54,87 @@ func command(ctx context.Context, input io.Reader, args ...string) ([]byte, erro
 	}
 	return out.Bytes(), nil
 }
-func run() error {
-	args, err := selectAction(os.Args[1:], os.Stdin, os.Stdout)
+func run() (runErr error) {
+	initial, err := parseBootstrapArgs(os.Args[1:])
+	if err != nil {
+		return err
+	}
+	if stage := initial["--prepare-package"]; stage != "" {
+		if len(os.Args) != 3 || runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Geteuid() != 0 {
+			return errors.New("包准备操作仅允许 root 在 Linux amd64 主服务器执行，不能混用其他参数")
+		}
+		if e := preparePackage(stage, systemPackagePaths(), os.Stdout); e != nil {
+			return &progress.Failure{Code: "package_prepare_failed", Message: e.Error()}
+		}
+		return nil
+	}
+	readOnly := initial["--dry-run"] == "true" || initial["--check"] == "true" || initial["--help"] == "true" || initial["-h"] == "true" || initial["--config-help"] == "true"
+	interactive := !readOnly && initial["--non-interactive"] != "true"
+	var unlock func()
+	if !readOnly {
+		if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Geteuid() != 0 {
+			return errors.New("run_on_linux_amd64_main_server_as_root")
+		}
+		unlock, err = lockBootstrap()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	scanner := bufio.NewScanner(terminalLineReader{os.Stdin})
+	initialized := false
+	pathBefore := configPath(os.Args[1:])
+	if interactive {
+		// Do not initialize during recovery/uninstall or maintenance operations.
+		setupAllowed := len(os.Args) == 1 || initial["--install"] == "true" || initial["--upgrade"] == "true" || initial["--reinstall"] == "true"
+		if setupAllowed && initial["--resume"] != "true" && initial["--rollback"] != "true" {
+			initialized, err = initializeConfig(pathBefore, deploy.StateRoot, liveInput(scanner, os.Stdout))
+			if err != nil {
+				if errors.Is(err, errSetupCancel) {
+					fmt.Fprintln(os.Stdout, "配置已取消，未启动安装；原文件保留。")
+					return nil
+				}
+				return setupError(err)
+			}
+		}
+	}
+	if !readOnly {
+		state, e := deploymentState()
+		if e != nil {
+			return e
+		}
+		if isInstalled(state) {
+			if e = safeRegular(pathBefore); os.IsNotExist(e) {
+				return &progress.Failure{Code: "installed_config_missing", Message: "系统已安装但 webscan.yaml 丢失，请恢复原配置；不能重新初始化"}
+			}
+		}
+		absolute, _ := filepath.Abs(pathBefore)
+		if absolute == "/root/webscan-deploy/webscan.yaml" {
+			if !registerLocalShortcut(systemPackagePaths(), os.Stdout) {
+				defer fmt.Fprintln(os.Stdout, "本次未注册全局命令；请继续使用 bash /root/webscan-deploy/deploy-webscan.sh 管理，不要使用其他软件的 webscan。")
+			}
+		}
+	}
+	loadNodes := func() ([]common.Map, error) {
+		c, e := configuration.Load(pathBefore)
+		if e != nil {
+			return nil, e
+		}
+		return c.Nodes, nil
+	}
+	setup := func(a []string, s *bufio.Scanner, out io.Writer) ([]string, error) {
+		if initialized {
+			return a, nil
+		}
+		return installationSSL(a, s, out)
+	}
+	var add func(*bufio.Scanner, io.Writer) ([]string, error)
+	if interactive {
+		add = func(s *bufio.Scanner, out io.Writer) ([]string, error) {
+			return addConfiguredNode(pathBefore, deploy.StateRoot, liveInput(s, out))
+		}
+	}
+	args, err := selectActionWithScanner(os.Args[1:], scanner, os.Stdout, loadNodes, setup, add)
 	if errors.Is(err, errMenuExit) {
 		return nil
 	}
@@ -76,7 +156,7 @@ func run() error {
 	dry, node := parsed["--dry-run"] == "true", parsed["--node"]
 	uninstall, centralOnly := parsed["--uninstall"] == "true", parsed["--central-only"] == "true"
 	if parsed["--help"] == "true" || parsed["-h"] == "true" {
-		fmt.Println("bash deploy-webscan.sh：显示 1 安装、2 重装、3 卸载、4 增加子服务器菜单\nbash deploy-webscan.sh [--install|--reinstall|--uninstall|--check|--upgrade|--add-node|--resume|--rollback|--reload-rules] [--dry-run] [--config-help] [--config YAML] [--node ID] [--central-only|--grafana-only|--sync-grafana-credentials] [--non-interactive]\n菜单 4 等同于 --add-node --node 节点ID，沿用主服务器当前版本和配置；恢复追加 --resume，回退追加 --rollback。\n重装与卸载保留监控数据、凭据、备份及三文件部署包。")
+		fmt.Println("bash deploy-webscan.sh：显示 1 安装、2 重装、3 卸载、4 增加子服务器、5 SSL 设置并自动部署菜单\nbash deploy-webscan.sh [--set-ssl on|off] [--install|--reinstall|--uninstall|--check|--upgrade|--add-node|--resume|--rollback|--reload-rules] [--dry-run] [--config-help] [--config YAML] [--node ID] [--central-only|--grafana-only|--sync-grafana-credentials] [--non-interactive]\n菜单 4 等同于 --add-node --node 节点ID，沿用主服务器当前版本和配置；恢复追加 --resume，回退追加 --rollback。\n--set-ssl on/off 保存协议后自动完整部署；交互安装和重装会引导选择 SSL，--non-interactive 沿用 YAML。\n重装与卸载保留监控数据、凭据、备份及三文件部署包。")
 		return nil
 	}
 
@@ -133,11 +213,44 @@ func run() error {
 	}
 	baseCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	unlock, err := lockBootstrap()
-	if err != nil {
-		return err
+	if unlock == nil {
+		unlock, err = lockBootstrap()
+		if err != nil {
+			return err
+		}
+		defer unlock()
 	}
-	defer unlock()
+	if mode := parsed["--set-ssl"]; mode != "" {
+		// Release only the deployment lock before starting the child. The
+		// bootstrap lock remains held until the whole installation finishes.
+		args, err = prepareSSLDeployment(path, mode, args, os.Stdout)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if runErr == nil {
+				return
+			}
+			state, readErr := deploymentState()
+			if readErr == nil && pendingDeployment(state) {
+				fmt.Fprintln(os.Stderr, "SSL 部署尚未完成，所选 YAML 和部署记录已保留。请保持本次配置，执行 bash deploy-webscan.sh --resume 继续，或 --rollback 回退。")
+			} else {
+				retryAction := ""
+				if parsed["--reinstall"] == "true" {
+					retryAction = "--reinstall "
+				}
+				fmt.Fprintf(os.Stderr, "SSL 部署未完成，所选 YAML 已保留；请查看失败阶段及日志，排除原因后重新执行 bash deploy-webscan.sh %s--set-ssl %s。\n", retryAction, mode)
+			}
+		}()
+		parsed, err = parseBootstrapArgs(args)
+		if err != nil {
+			return err
+		}
+		c, err = configuration.Load(path)
+		if err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(baseCtx, 15*time.Minute)
 	defer cancel()
 	reporter, err := progress.Open(c.Raw, "引导", "/var/lib/webscan-deploy/logs")
@@ -213,6 +326,26 @@ func run() error {
 	binary, err := extractTool(ctx, docker, tmp, ref)
 	if err != nil {
 		return err
+	}
+	if strings.HasSuffix(ref, ":latest") && toolOlderThanBootstrap(ctx, binary) {
+		if common.B(reg["auth_required"]) || !strings.HasPrefix(ref, "docker.io/") {
+			return errors.New("bootstrap_tool_release_mismatch")
+		}
+		progress.Warn(ctx, "加速源返回的 latest 程序版本过旧，改从 Docker Hub 官方入口获取")
+		ref = strings.Replace(ref, "docker.io/", "registry-1.docker.io/", 1)
+		if err = progress.Stage(ctx, host, "从官方入口重新下载主服务器镜像", func(ctx context.Context) error {
+			_, e := docker(ctx, nil, "pull", "--platform", "linux/amd64", ref)
+			return e
+		}); err != nil {
+			return err
+		}
+		binary, err = extractTool(ctx, docker, tmp, ref)
+		if err != nil {
+			return err
+		}
+		if toolOlderThanBootstrap(ctx, binary) {
+			return errors.New("bootstrap_tool_release_mismatch")
+		}
 	}
 	if err = validateToolVersionForImage(ctx, binary, c.Image("central")); err != nil {
 		return err

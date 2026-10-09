@@ -7,9 +7,14 @@ import (
 )
 
 func TestAcceptanceSuppressesOnlyRegisteredExpectedEventsAndKeepsLoki(t *testing.T) {
+	for _, path := range []string{"/sites/.webscan-deploy-test-0123456789abcdef0123456789abcdef/fixture.php", "/sites/webscan-deploy-test-0123456789abcdef0123456789abcdef/fixture.php"} {
+		t.Run(path, func(t *testing.T) { testAcceptanceSuppressesOnlyRegisteredExpectedEvents(t, path) })
+	}
+}
+
+func testAcceptanceSuppressesOnlyRegisteredExpectedEvents(t *testing.T, path string) {
 	s := testStore(t)
 	s.Config["alert_token"] = "deployment-admin"
-	path := "/sites/.webscan-deploy-test-0123456789abcdef0123456789abcdef/fixture.php"
 	hash := common.Hash([]byte("known benign YARA test fixture"))
 	request := common.Map{"node": "node", "events": []any{common.Map{"operation": "scan", "path": path, "sha256": hash, "scan": common.Map{"status": "matched"}}}}
 	if w := deploymentCall(s, "/deployment-acceptance", "fixture-token", request); w.Code != 401 {

@@ -21,18 +21,21 @@ import (
 	"sync"
 	"time"
 	"webscan/internal/persist"
+	"webscan/internal/website"
 
 	"github.com/gogf/gf/v2/net/ghttp"
+	"github.com/gogf/gf/v2/os/glog"
 	"webscan/internal/common"
 )
 
 type Store struct {
-	Config  common.Map
-	DB      *sql.DB
-	HTTP    *http.Client
-	mu      sync.Mutex
-	slots   chan struct{}
-	history []float64
+	Config   common.Map
+	DB       *sql.DB
+	HTTP     *http.Client
+	mu       sync.Mutex
+	slots    chan struct{}
+	history  []float64
+	Websites *website.Monitor
 }
 
 const Schema = `
@@ -101,6 +104,15 @@ func New(config common.Map) (*Store, error) {
 					s.history = append(s.history, common.F(n))
 				}
 			}
+		}
+	}
+	if common.B(common.M(config["website_monitor"])["enabled"]) {
+		websiteConfig := common.Clone(common.M(config["website_monitor"]))
+		websiteConfig["backup_dir"] = config["backup_dir"]
+		s.Websites, e = website.New(d, websiteConfig, common.M(config["nodes"]), &s.mu, common.B(common.M(config["feishu"])["enabled"]))
+		if e != nil {
+			d.Close()
+			return nil, e
 		}
 	}
 	return s, nil
@@ -273,6 +285,13 @@ func write(w http.ResponseWriter, code int, v any) {
 	w.WriteHeader(code)
 	_, _ = w.Write(common.JSON(v))
 }
+
+type publicEventRequest struct{}
+
+func (s *Store) publicHTTPHandler(w http.ResponseWriter, r *http.Request) {
+	s.Handler(w, r.WithContext(context.WithValue(r.Context(), publicEventRequest{}, true)))
+}
+
 func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 	select {
 	case s.slots <- struct{}{}:
@@ -281,7 +300,7 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 		write(w, 503, common.Map{"error": "overloaded"})
 		return
 	}
-	public := r.TLS != nil
+	public := r.TLS != nil || r.Context().Value(publicEventRequest{}) == true
 	path := r.URL.Path
 	if public {
 		ipstr, _, e := net.SplitHostPort(r.RemoteAddr)
@@ -307,6 +326,19 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		path = strings.TrimPrefix(path, "/webscan/v1")
 	}
+	if !public && path == "/website-verify" && r.Method == http.MethodPost {
+		admin := common.S(s.Config["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Config["alert_token"]))) == 1
+		if !admin {
+			write(w, 401, common.Map{})
+			return
+		}
+		if s.Websites == nil || s.Websites.Verify(r.Context()) != nil {
+			write(w, 503, common.Map{})
+			return
+		}
+		write(w, 200, common.Map{"ready": true})
+		return
+	}
 	if r.Method == http.MethodGet && !public {
 		switch path {
 		case "/ready":
@@ -315,7 +347,7 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 				write(w, 503, common.Map{})
 				return
 			}
-			write(w, 200, common.Map{"ready": true, "event_protocol": 1, "deployment_acceptance": true})
+			write(w, 200, common.Map{"ready": true, "event_protocol": 1, "deployment_acceptance": true, "deployment_visible_tests": true})
 			return
 		case "/metrics":
 			v, e := s.Metrics(r.Context())
@@ -435,7 +467,7 @@ func (s *Store) claim(ctx context.Context, target string) (*Task, error) {
 	}
 	defer tx.Rollback()
 	t := &Task{}
-	e = tx.QueryRowContext(ctx, "SELECT id,node,event_id,target,payload,attempts FROM tasks WHERE target=? AND done IS NULL AND next_try<=? AND lease<=? ORDER BY priority DESC,id LIMIT 1", target, common.Now(), common.Now()).Scan(&t.ID, &t.Node, &t.EventID, &t.Target, &t.Payload, &t.Attempts)
+	e = tx.QueryRowContext(ctx, "SELECT id,node,event_id,target,payload,attempts FROM tasks WHERE target=? AND done IS NULL AND next_try<=? AND lease<=? AND (node<>'central' OR event_id NOT LIKE 'website:%' OR NOT EXISTS(SELECT 1 FROM tasks earlier WHERE earlier.target=tasks.target AND earlier.node='central' AND earlier.event_id LIKE 'website:%' AND earlier.id<tasks.id AND earlier.done IS NULL)) ORDER BY priority DESC,id LIMIT 1", target, common.Now(), common.Now()).Scan(&t.ID, &t.Node, &t.EventID, &t.Target, &t.Payload, &t.Attempts)
 	if e == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -616,6 +648,9 @@ func (s *Store) Metrics(ctx context.Context) (string, error) {
 		fmt.Fprintf(&out, "webscan_probe_received_seconds{node_id=%q} %g\nwebscan_probe_loki_seconds{node_id=%q} %g\n", node, received, node, loki)
 	}
 	out.WriteString("webscan_central_up 1\n")
+	if s.Websites != nil {
+		out.WriteString(s.Websites.Metrics(ctx))
+	}
 	return out.String(), nil
 }
 func (s *Store) QueryProbes(ctx context.Context) error {
@@ -702,7 +737,10 @@ func Run(ctx context.Context, configPath string) error {
 	}
 	workers.Add(1)
 	go func() { defer workers.Done(); s.maintenance(ctx) }()
-	cfg := ghttp.ServerConfig{Name: "webscan-central", Address: fmt.Sprintf("%s:%d", common.S(config["bind"]), common.I(config["port"])), ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, KeepAlive: true, LogLevel: "error", LogStdout: false, AccessLogEnabled: false, ErrorLogEnabled: false, DumpRouterMap: false, Handler: s.Handler}
+	// GoFrame's underlying net/http error writer always uses Logger, including
+	// TLS handshake failures. Disabling request/file logs does not make a nil
+	// Logger safe: a browser rejecting our CA must never stop the receiver.
+	cfg := ghttp.ServerConfig{Name: "webscan-central", Address: fmt.Sprintf("%s:%d", common.S(config["bind"]), common.I(config["port"])), ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, KeepAlive: true, Logger: glog.New(), LogLevel: "error", LogStdout: false, AccessLogEnabled: false, ErrorLogEnabled: false, DumpRouterMap: false, Handler: s.Handler}
 	https := common.M(config["https"])
 	if common.I(https["port"]) > 0 {
 		pair, err := tls.LoadX509KeyPair(common.S(https["cert_file"]), common.S(https["key_file"]))
@@ -718,6 +756,47 @@ func Run(ctx context.Context, configPath string) error {
 	}
 	if e = server.Start(); e != nil {
 		return e
+	}
+	publicHTTP := common.M(config["public_http"])
+	if common.I(publicHTTP["port"]) > 0 {
+		ingress := ghttp.GetServer("webscan-events-http")
+		ingressCfg := ghttp.ServerConfig{Name: "webscan-events-http", Address: fmt.Sprintf("%s:%d", common.S(publicHTTP["bind"]), common.I(publicHTTP["port"])), ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, KeepAlive: true, Logger: glog.New(), LogLevel: "error", AccessLogEnabled: false, ErrorLogEnabled: false, Handler: s.publicHTTPHandler}
+		if e = ingress.SetConfig(ingressCfg); e != nil {
+			server.Shutdown()
+			return e
+		}
+		if e = ingress.Start(); e != nil {
+			server.Shutdown()
+			return e
+		}
+		defer ingress.Shutdown()
+	}
+	if s.Websites != nil {
+		wc := common.M(config["website_monitor"])
+		console := ghttp.GetServer("webscan-console")
+		consoleCfg := ghttp.ServerConfig{Name: "webscan-console", HTTPSAddr: fmt.Sprintf("0.0.0.0:%d", common.I(wc["host_port"])), TLSConfig: cfg.TLSConfig, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, Logger: glog.New(), LogLevel: "error", LogStdout: false, AccessLogEnabled: false, ErrorLogEnabled: false, DumpRouterMap: false, Handler: s.Websites.Handler}
+		consoleSSL := true
+		if value, exists := wc["ssl_enabled"]; exists {
+			consoleSSL = common.B(value)
+		}
+		if !consoleSSL {
+			consoleCfg.Address, consoleCfg.HTTPSAddr, consoleCfg.TLSConfig = consoleCfg.HTTPSAddr, "", nil
+		}
+		if consoleSSL && consoleCfg.TLSConfig == nil {
+			server.Shutdown()
+			return errors.New("website_console_requires_https_certificate")
+		}
+		if e = console.SetConfig(consoleCfg); e != nil {
+			server.Shutdown()
+			return e
+		}
+		if e = console.Start(); e != nil {
+			server.Shutdown()
+			return e
+		}
+		defer console.Shutdown()
+		workers.Add(1)
+		go func() { defer workers.Done(); s.Websites.Run(ctx) }()
 	}
 	fmt.Println("central_ready=goframe-v2.10.3")
 	<-ctx.Done()

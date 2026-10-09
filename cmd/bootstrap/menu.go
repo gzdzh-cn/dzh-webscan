@@ -22,7 +22,7 @@ func parseBootstrapArgs(args []string) (map[string]string, error) {
 	for i := 0; i < len(args); i++ {
 		key, value, equals := strings.Cut(args[i], "=")
 		switch key {
-		case "--config", "--node", "--yara-rules":
+		case "--config", "--node", "--yara-rules", "--set-ssl", "--prepare-package":
 			if !equals {
 				if i+1 >= len(args) || strings.HasPrefix(args[i+1], "-") {
 					return nil, &progress.Failure{Code: "cli_option_requires_value", Message: "此参数必须填写值；指定子服务器请使用 --node 节点ID，已停止操作"}
@@ -60,8 +60,16 @@ func validateActions(args []string) error {
 	flags := map[string]bool{}
 	for key, value := range parsed {
 		flags[key] = value == "true"
-		if key == "--node" || key == "--config" || key == "--yara-rules" {
+		if key == "--node" || key == "--config" || key == "--yara-rules" || key == "--set-ssl" {
 			flags[key] = true
+		}
+	}
+	if flags["--set-ssl"] {
+		if parsed["--set-ssl"] != "on" && parsed["--set-ssl"] != "off" {
+			return &progress.Failure{Code: "invalid_ssl_selection", Message: "SSL 设置只能使用 --set-ssl on 或 --set-ssl off"}
+		}
+		if flags["--node"] || flags["--central-only"] || flags["--dry-run"] {
+			return errors.New("incompatible_cli_options")
 		}
 	}
 	if flags["--yara-rules"] && !flags["--reload-rules"] {
@@ -69,8 +77,11 @@ func validateActions(args []string) error {
 	}
 
 	count := 0
-	for _, flag := range []string{"--install", "--reinstall", "--uninstall", "--upgrade", "--add-node", "--resume", "--rollback", "--check", "--grafana-only", "--sync-grafana-credentials", "--reload-rules"} {
+	for _, flag := range []string{"--install", "--reinstall", "--uninstall", "--upgrade", "--add-node", "--resume", "--rollback", "--check", "--grafana-only", "--sync-grafana-credentials", "--reload-rules", "--set-ssl"} {
 		if flag == "--add-node" && (flags["--resume"] || flags["--rollback"]) {
+			continue
+		}
+		if flag == "--set-ssl" && flags["--reinstall"] {
 			continue
 		}
 		if flag == "--upgrade" && (flags["--resume"] || flags["--grafana-only"]) {
@@ -97,50 +108,81 @@ func validateActions(args []string) error {
 }
 
 func selectAction(args []string, in io.Reader, out io.Writer) ([]string, error) {
-	return selectActionWithNodes(args, in, out, func() ([]common.Map, error) {
-		path := "webscan.yaml"
-		for i, arg := range args {
-			if arg == "--config" && i+1 < len(args) {
-				path = args[i+1]
-			}
-			if strings.HasPrefix(arg, "--config=") {
-				path = strings.TrimPrefix(arg, "--config=")
-			}
-		}
-		c, err := configuration.Load(path)
+	return selectActionWithSetup(args, in, out, func() ([]common.Map, error) {
+		c, err := configuration.Load(configPath(args))
 		if err != nil {
 			return nil, err
 		}
 		return c.Nodes, nil
-	})
+	}, installationSSL)
 }
 
 func selectActionWithNodes(args []string, in io.Reader, out io.Writer, loadNodes func() ([]common.Map, error)) ([]string, error) {
-	nonInteractive := false
+	return selectActionWithSetup(args, in, out, loadNodes, nil)
+}
+
+type installSetup func([]string, *bufio.Scanner, io.Writer) ([]string, error)
+
+func selectActionWithSetup(args []string, in io.Reader, out io.Writer, loadNodes func() ([]common.Map, error), setup installSetup) ([]string, error) {
+	return selectActionWithScanner(args, bufio.NewScanner(in), out, loadNodes, setup, nil)
+}
+
+func selectActionWithScanner(args []string, scanner *bufio.Scanner, out io.Writer, loadNodes func() ([]common.Map, error), setup installSetup, add func(*bufio.Scanner, io.Writer) ([]string, error)) ([]string, error) {
+	parsed, err := parseBootstrapArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateActions(args); err != nil {
+		return nil, err
+	}
+	prepare := func(selected []string) ([]string, error) {
+		if setup == nil {
+			return selected, nil
+		}
+		return setup(selected, scanner, out)
+	}
 	for _, arg := range args {
 		key := strings.SplitN(arg, "=", 2)[0]
 		switch key {
-		case "--install", "--reinstall", "--uninstall", "--upgrade", "--add-node", "--resume", "--rollback", "--check", "--dry-run", "--reload-rules", "--grafana-only", "--sync-grafana-credentials", "--config-help", "--help", "-h":
+		case "--set-ssl", "--install", "--reinstall", "--uninstall", "--upgrade", "--add-node", "--resume", "--rollback", "--check", "--dry-run", "--reload-rules", "--grafana-only", "--sync-grafana-credentials", "--config-help", "--help", "-h":
+			if (key == "--install" || key == "--upgrade" || key == "--reinstall") && parsed[key] == "true" {
+				selected, err := prepare(args)
+				if selected == nil && err == nil {
+					return nil, errMenuExit
+				}
+				return selected, err
+			}
 			return args, nil
-		case "--non-interactive":
-			nonInteractive = true
 		}
 	}
-	if nonInteractive {
+	if parsed["--non-interactive"] == "true" {
 		return append(args, "--install"), nil
 	}
-	scanner := bufio.NewScanner(in)
 	for {
-		fmt.Fprintln(out, "\n网站监控部署管理\n1、安装（首次安装；已安装时升级或继续）\n2、重装（重建监控容器和配置，保留数据及账号）\n3、卸载（选择卸载范围，保留数据与部署包）\n4、增加子服务器（选择 YAML 中启用的子服务器）\n0、退出")
-		fmt.Fprint(out, "请选择 [1/2/3/4/0]：")
+		fmt.Fprintln(out, "\n网站监控部署管理\n1、安装（首次安装；已安装时升级或继续）\n2、重装（重建监控容器和配置，保留数据及账号）\n3、卸载（选择卸载范围，保留数据与部署包）\n4、增加子服务器（选择已有节点或交互录入新节点）\n5、SSL 设置并自动部署（统一控制主子通信、采集和面板）\n0、退出")
+		fmt.Fprint(out, "请选择 [1/2/3/4/5/0]：")
 		if !scanner.Scan() {
 			return nil, errors.New("menu_requires_selection_or_non_interactive")
 		}
 		switch strings.TrimSpace(scanner.Text()) {
 		case "1":
-			return append(args, "--install"), nil
+			selected, err := prepare(append(args, "--install"))
+			if err != nil {
+				return nil, err
+			}
+			if selected == nil {
+				continue
+			}
+			return selected, nil
 		case "2":
-			return append(args, "--reinstall"), nil
+			selected, err := prepare(append(args, "--reinstall"))
+			if err != nil {
+				return nil, err
+			}
+			if selected == nil {
+				continue
+			}
+			return selected, nil
 		case "3":
 			selection, err := selectUninstall(scanner, out, loadNodes)
 			if err != nil {
@@ -151,7 +193,7 @@ func selectActionWithNodes(args []string, in io.Reader, out io.Writer, loadNodes
 			}
 			return append(withoutScope(args), selection...), nil
 		case "4":
-			selection, err := selectAddition(scanner, out, loadNodes)
+			selection, err := selectAdditionWithNew(scanner, out, loadNodes, add)
 			if err != nil {
 				return nil, err
 			}
@@ -159,10 +201,29 @@ func selectActionWithNodes(args []string, in io.Reader, out io.Writer, loadNodes
 				continue
 			}
 			return append(withoutScope(args), selection...), nil
+		case "5":
+			for {
+				fmt.Fprintln(out, "\nSSL 设置并自动部署（统一控制节点事件、监控指标和系统面板）\n选择后自动安装或完整升级主服务器和全部启用节点，同时应用 YAML 中其他修改及配置指定的镜像版本。\n0、返回上一级\n1、使用 SSL（HTTPS）\n2、不使用 SSL（HTTP；通信明文，面板可交给宝塔 HTTPS 反代）")
+				fmt.Fprint(out, "请选择 [0/1/2]：")
+				if !scanner.Scan() {
+					return nil, errors.New("menu_requires_selection_or_non_interactive")
+				}
+				choice := strings.TrimSpace(scanner.Text())
+				if choice == "0" {
+					break
+				}
+				if choice == "1" {
+					return append(withoutScope(args), "--set-ssl", "on"), nil
+				}
+				if choice == "2" {
+					return append(withoutScope(args), "--set-ssl", "off"), nil
+				}
+				fmt.Fprintln(out, "请输入 0、1 或 2。")
+			}
 		case "0":
 			return nil, errMenuExit
 		default:
-			fmt.Fprintln(out, "请输入 1、2、3、4 或 0。")
+			fmt.Fprintln(out, "请输入 1、2、3、4、5 或 0。")
 		}
 	}
 }
@@ -183,6 +244,9 @@ func withoutScope(args []string) []string {
 }
 
 func selectAddition(scanner *bufio.Scanner, out io.Writer, loadNodes func() ([]common.Map, error)) ([]string, error) {
+	return selectAdditionWithNew(scanner, out, loadNodes, nil)
+}
+func selectAdditionWithNew(scanner *bufio.Scanner, out io.Writer, loadNodes func() ([]common.Map, error), add func(*bufio.Scanner, io.Writer) ([]string, error)) ([]string, error) {
 	nodes, err := loadNodes()
 	if err != nil {
 		return nil, err
@@ -193,18 +257,28 @@ func selectAddition(scanner *bufio.Scanner, out io.Writer, loadNodes func() ([]c
 			enabled = append(enabled, n)
 		}
 	}
-	if len(enabled) == 0 {
+	if len(enabled) == 0 && add == nil {
 		fmt.Fprintln(out, "YAML 中没有启用的子服务器。请先配置 nodes、enabled: true 和 deployment.node_order，然后重新执行脚本。")
 		return nil, nil
 	}
 	for {
-		fmt.Fprintln(out, "\n请选择需要增加的子服务器\n请先在 YAML 中配置并启用节点；已安装节点会执行单节点更新。\n0、返回上一级")
+		fmt.Fprintln(out, "\n请选择需要增加的子服务器\n已安装节点会执行单节点更新；可选择 N 交互新增节点。\n0、返回上一级")
 		for i, n := range enabled {
 			fmt.Fprintf(out, "%d、%s [%s] %s\n", i+1, common.S(n["name"]), common.S(n["id"]), common.S(n["host"]))
+		}
+		if add != nil {
+			fmt.Fprintln(out, "N、录入新子服务器并立即安装")
 		}
 		fmt.Fprint(out, "请输入序号：")
 		if !scanner.Scan() {
 			return nil, errors.New("menu_requires_selection_or_non_interactive")
+		}
+		if strings.EqualFold(strings.TrimSpace(scanner.Text()), "N") && add != nil {
+			selection, e := add(scanner, out)
+			if errors.Is(e, errSetupCancel) {
+				continue
+			}
+			return selection, e
 		}
 		choice, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
 		if err == nil && choice == 0 {

@@ -2,10 +2,12 @@ package deploy
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"webscan/internal/common"
+	"webscan/internal/website"
 )
 
 // Stop the writer before restoring configuration. Never replace current SQLite
@@ -23,8 +25,21 @@ func (d *Deploy) restoreCentral(ctx context.Context, j *Journal, uninstall bool)
 			return errors.New("central_stop_before_restore_failed")
 		}
 	}
+	// Read after stopping the writer, before restoring historical runtime.
+	account, accountErr := website.Account{}, sql.ErrNoRows
+	if previous && !uninstall {
+		account, accountErr = website.AccountAt(filepath.Join(common.S(common.M(d.C.Raw["central"])["data_dir"]), "events-v1.sqlite3"))
+	}
+	if accountErr != nil && !errors.Is(accountErr, os.ErrNotExist) && !errors.Is(accountErr, sql.ErrNoRows) {
+		return errors.New("回退前读取当前后台账号失败，已停止回退")
+	}
 	if err := j.Rollback(); err != nil {
 		return err
+	}
+	if previous && !uninstall && accountErr == nil {
+		if err := preserveWebsiteAccount(filepath.Join(d.C.CentralRoot(), "runtime.json"), account); err != nil {
+			return err
+		}
 	}
 	if previous && !uninstall {
 		args := []string{"up", "-d", "--no-deps", "receiver"}
@@ -43,4 +58,19 @@ func (d *Deploy) centralRuntime(active []string) common.Map {
 		runtime["loki_url"] = url
 	}
 	return runtime
+}
+
+func preserveWebsiteAccount(path string, account website.Account) error {
+	runtime, e := common.ReadJSON(path)
+	if e != nil {
+		return e
+	}
+	wm := common.M(runtime["website_monitor"])
+	if len(wm) > 0 {
+		wm["admin_username"] = account.Username
+		wm["password_hash"] = account.Hash
+		runtime["website_monitor"] = wm
+		return common.AtomicJSON(path, runtime)
+	}
+	return nil
 }

@@ -37,6 +37,13 @@ func syntaxError(err error) error {
 }
 
 var instructions = map[string]string{
+	"invalid_parameter_value":          "参数取值无效，请按参数说明填写。",
+	"website_admin_username_required":  "网站后台 admin_username 必须填写，最多 100 字节。",
+	"website_password_length_invalid":  "网站后台 admin_password 应为 12～72 字节；留空可自动生成。",
+	"website_credentials_invalid":      "网站后台账号密码不能包含换行或空字符。",
+	"website_timeout_exceeds_interval": "网站后台 timeout_seconds 必须小于 interval_seconds。",
+	"website_bind_address_invalid":     "网站后台 bind_address 必须填写有效 IP。",
+
 	"cannot_read_yaml":                          "无法读取 YAML。请确认 --config 指向存在的普通文件，当前用户有读取权限；未指定时读取当前目录的 webscan.yaml。",
 	"invalid_yaml_syntax":                       "YAML 语法错误。请检查空格缩进、冒号、引号及重复字段；不要使用 Tab。",
 	"yaml_requires_single_document":             "一个配置文件只能包含一份 YAML 文档；请删除多余的 --- 文档或末尾无效内容。",
@@ -46,7 +53,7 @@ var instructions = map[string]string{
 	"private_registry_credentials_required":     "registry.auth_required 为 true 时，registry.username 和 registry.password 均必填。Docker Hub 密码字段填写访问令牌；公开拉取可设 auth_required: false。",
 	"invalid_registry_credentials":              "仓库账号及密码必须是单行字符串，不能含换行或空字符。",
 	"images_require_explicit_version_or_digest": "填写相对镜像名及标签，默认 webscan-central:latest、webscan-agent:latest；也支持已发布版本及 @sha256: 加 64 位小写十六进制摘要。不要省略标签或填写占位摘要。",
-	"central_requires_ip_https_url":             "填写 https://主服务器IP:HTTPS端口，例如 https://192.0.2.10:19443；不能用域名、HTTP、账号、查询参数或额外路径。",
+	"central_requires_ip_https_url":             "填写 http:// 或 https://主服务器IP:端口，例如 https://192.0.2.10:19443；有效协议由 ssl.enabled 决定，不能用域名、账号、查询参数或额外路径。",
 	"central_https_port_mismatch":               "central.public_url 中的端口必须与 central.event_service.https_port 相同，并显式填写端口。",
 	"invalid_absolute_path":                     "填写绝对路径，例如 /www/wwwroot 或 /opt/webscan-central；不能包含 ..、换行或空字符。",
 	"path_too_broad":                            "目录范围过大。请使用专用子目录；不能直接使用 /、/etc、/usr、/var、/root、/home 或 /www。",
@@ -69,7 +76,7 @@ var instructions = map[string]string{
 	"invalid_scan_limits":                       "workers 必须为 1～16，timeout_seconds 为 1～600，max_file_mib 至少 1；均填写整数。",
 	"invalid_reconciliation_limits":             "interval_hours 和 max_read_mib_per_second 必须是至少为 1 的整数。",
 	"metrics_allowed_source_requires_ip":        "metrics.allowed_source_ip 填写主服务器实际采集来源 IP，不带端口或 /32。",
-	"metrics_require_tls_nonprivileged_port":    "metrics.port 必须是 1024～65535 的整数，并填写 tls_enabled: true。",
+	"metrics_require_tls_nonprivileged_port":    "metrics.port 必须是 1024～65535 的整数；指标 TLS 由总开关 ssl.enabled 控制。",
 	"nodes_required":                            "nodes 至少填写一台子服务器，参考示例的列表结构；每台可覆盖 node_defaults 的同名参数。",
 	"unknown_node_order_id":                     "deployment.node_order 只能填写 nodes 中已定义的 id；请删除不存在的 ID 或补齐节点配置。",
 	"enabled_node_missing_from_order":           "请将全部 enabled: true 的节点 id 加入 deployment.node_order 列表；单节点操作仍须保持完整配置。",

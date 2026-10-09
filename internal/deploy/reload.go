@@ -42,6 +42,10 @@ func withoutRules(c common.Map) common.Map {
 	out["nodes"] = nodes
 	delete(out, "node_defaults")
 	delete(out, "images")
+	center := common.M(out["central"])
+	if !common.B(common.M(center["website_monitor"])["enabled"]) {
+		delete(center, "website_monitor")
+	}
 	return out
 }
 

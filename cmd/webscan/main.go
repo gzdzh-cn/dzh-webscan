@@ -37,8 +37,11 @@ func main() {
 	toolCmd := &gcmd.Command{Name: "tool", Strict: true, Arguments: []gcmd.Argument{{Name: "action"}, {Name: "input"}, {Name: "output"}, {Name: "uninstall", Orphan: true}}, Func: func(ctx context.Context, p *gcmd.Parser) error {
 		return tool.Run(ctx, p.GetOpt("action").String(), p.GetOpt("input").String(), p.GetOpt("output").String(), present(p, "uninstall"))
 	}}
+	passwordCmd := &gcmd.Command{Name: "website-password", Brief: "管理员交互式重置后台密码（不回显）", Arguments: cfg, Strict: true, Func: func(ctx context.Context, p *gcmd.Parser) error {
+		return resetWebsitePassword(p.GetOpt("config").String())
+	}}
 	version := &gcmd.Command{Name: "version", Func: func(context.Context, *gcmd.Parser) error { fmt.Println(deploy.Release); return nil }}
-	if e := root.AddCommand(agentCmd, centralCmd, deployCmd, toolCmd, version); e != nil {
+	if e := root.AddCommand(agentCmd, centralCmd, deployCmd, toolCmd, version, passwordCmd); e != nil {
 		fmt.Fprintln(os.Stderr, "command_registration_failed")
 		os.Exit(1)
 	}

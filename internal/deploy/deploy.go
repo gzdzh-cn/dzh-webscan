@@ -97,6 +97,9 @@ func Run(ctx context.Context, o Options) error {
 	if actions > 1 || o.Node != "" && o.CentralOnly || o.DryRun && (o.Check || o.Rollback || o.GrafanaOnly || o.SyncGrafana || o.ReloadRules) || o.YaraRules != "" && !o.ReloadRules || o.ReloadRules && o.CentralOnly || o.GrafanaOnly && (o.Node != "" || o.CentralOnly) || o.SyncGrafana && (o.Node != "" || o.CentralOnly) || o.Reinstall && (o.Node != "" || o.CentralOnly) {
 		return errors.New("incompatible_cli_options")
 	}
+	if e = d.validateSSLChange(); e != nil {
+		return e
+	}
 	if o.AddNode {
 		if o.Node == "" || o.CentralOnly || o.Install || o.Upgrade || o.Uninstall || o.Reinstall || o.Check || o.ReloadRules || o.GrafanaOnly || o.SyncGrafana {
 			return errors.New("incompatible_cli_options")
@@ -231,6 +234,9 @@ func (d *Deploy) Preflight(ctx context.Context) error {
 	}
 	if !d.O.CentralOnly {
 		for _, n := range d.C.Selected(d.O.Node) {
+			if err := progress.Stage(ctx, progress.Node(n), "检查验收测试路径是否被监控规则排除", func(ctx context.Context) error { return d.checkAcceptancePaths(ctx, n) }); err != nil {
+				return err
+			}
 			if err := progress.Stage(ctx, progress.Node(n), "自动记录或校验 SSH 主机指纹，检查 Docker、Compose 和磁盘", func(ctx context.Context) error {
 				r, e := Connect(ctx, n)
 				if e != nil {
@@ -264,6 +270,31 @@ func (d *Deploy) Preflight(ctx context.Context) error {
 			}
 		}
 	}
+	if common.B(d.State["central_installed"]) && !d.O.AddNode && d.O.Node == "" && websiteMemory(d.C) > 0 {
+		runtime, readErr := common.ReadJSON(filepath.Join(d.C.CentralRoot(), "runtime.json"))
+		if readErr != nil {
+			return errors.New("website_previous_runtime_unreadable")
+		}
+		if !common.B(common.M(runtime["website_monitor"])["enabled"]) {
+			memory, err := os.ReadFile("/proc/meminfo")
+			if err != nil {
+				return err
+			}
+			available := 0
+			for _, line := range strings.Split(string(memory), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) > 1 && fields[0] == "MemAvailable:" {
+					available, _ = strconv.Atoi(fields[1])
+				}
+			}
+			required := websiteMemory(d.C) + 64
+			progress.Info(ctx, fmt.Sprintf("网站后台新增内存检查：可用 %d MiB，要求至少 %d MiB", available/1024, required))
+			if available < required*1024 {
+				return &progress.Failure{Code: "website_monitor_memory_insufficient", Message: fmt.Sprintf("开启网站后台内存不足：可用 %d MiB，需要至少 %d MiB；请释放内存后重试", available/1024, required)}
+			}
+		}
+	}
+
 	if !common.B(d.State["central_installed"]) {
 		b, e := os.ReadFile("/proc/meminfo")
 		if e != nil {
@@ -276,23 +307,16 @@ func (d *Deploy) Preflight(ctx context.Context) error {
 				available, _ = strconv.Atoi(fields[1])
 			}
 		}
-		center := common.M(d.C.Raw["central"])
-		needed := common.I(center["new_components_memory_budget_mib"]) + 128
-		if !common.B(common.M(center["reuse_existing"])["grafana"]) {
-			needed += 192
-		}
-		if !common.B(common.M(center["reuse_existing"])["loki"]) {
-			needed += 256
-		}
-		progress.Info(ctx, fmt.Sprintf("首次安装内存检查：当前可用 %d MiB，要求至少 %d MiB；新组件预算 %d MiB", available/1024, needed, common.I(center["new_components_memory_budget_mib"])))
-		if available < needed*1024 {
-			return &progress.Failure{Code: "insufficient_available_memory_for_fresh_install", Message: fmt.Sprintf("首次安装内存不足：当前可用 %d MiB，要求至少 %d MiB；请调整 central.new_components_memory_budget_mib 或释放内存", available/1024, needed)}
+		budget := freshInstallMemory(d.C)
+		progress.Info(ctx, fmt.Sprintf("首次安装内存检查：可用 %d MiB，要求 %d MiB = 新组件 %d + Grafana %d + Loki %d + 网站后台 %d + 预留 %d MiB", available/1024, budget.Total(), budget.Components, budget.Grafana, budget.Loki, budget.Website, budget.Reserve))
+		if err := budget.Check(available); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 func (d *Deploy) initialize() error {
-	if d.canRetryAddition() {
+	if d.canRetryAddition() || d.canRetryRollout() {
 		d.State["step"] = "rolled-back"
 	}
 	if common.S(d.State["go_release"]) == "" && common.B(d.State["central_installed"]) && !d.O.Upgrade && !d.O.Resume {
@@ -350,6 +374,11 @@ func (d *Deploy) initialize() error {
 		return e
 	}
 	d.Journal = j
+	if !d.O.AddNode {
+		if e = websiteCredentials(d.C, d.Secrets); e != nil {
+			return e
+		}
+	}
 	g := common.M(common.M(d.C.Raw["central"])["grafana"])
 	for _, key := range []string{"admin_password", "viewer_password"} {
 		if common.S(d.Secrets[key]) == "" {
@@ -413,7 +442,17 @@ func (d *Deploy) LockImages(ctx context.Context) error {
 		var ref string
 		e := progress.Stage(ctx, progress.Host(d.C.Raw), "下载并校验 "+progress.Role(role), func(ctx context.Context) error {
 			var err error
-			ref, err = docker.Pull(ctx, d.C.Image(role))
+			request := d.C.Image(role)
+			if role == "central" && strings.HasSuffix(request, ":latest") {
+				if tool := os.Getenv("WEBSCAN_TOOL_IMAGE_LOCK"); strings.Contains(tool, "@sha256:") {
+					if _, err = docker.Exec(ctx, nil, "image", "inspect", tool); err == nil {
+						progress.Info(ctx, "沿用刚刚校验的部署工具所在主服务器镜像，避免 latest 缓存回退")
+						ref, err = docker.Resolve(ctx, tool)
+						return err
+					}
+				}
+			}
+			ref, err = docker.Pull(ctx, request)
 			return err
 		})
 		if e != nil {
@@ -483,6 +522,9 @@ func (d *Deploy) Deploy(ctx context.Context) (err error) {
 	if d.canRetryAddition() {
 		progress.Info(ctx, "上次新增节点已确认回退；本次创建新的部署记录，保留原备份、数据库和队列")
 	}
+	if d.canRetryRollout() {
+		progress.Info(ctx, "上次全部节点已确认回退且没有已验收节点；使用本次目标版本重新部署，保留原部署记录、当前主服务器、数据库和队列")
+	}
 	if err = progress.Stage(ctx, progress.Host(d.C.Raw), "准备部署状态、凭据和回退记录", func(context.Context) error { return d.initialize() }); err != nil {
 		return err
 	}
@@ -494,7 +536,14 @@ func (d *Deploy) Deploy(ctx context.Context) (err error) {
 	if err = progress.Stage(ctx, progress.Host(d.C.Raw), imageStage, d.LockImages); err != nil {
 		return err
 	}
-	if err = progress.Stage(ctx, progress.Host(d.C.Raw), "准备主服务器和节点 HTTPS 证书", func(context.Context) error {
+	certificateStage := "准备主服务器和节点 HTTPS 证书"
+	if !d.C.SSLEnabled() {
+		certificateStage = "使用 HTTP 通信，保留旧证书并跳过证书生成"
+	}
+	if err = progress.Stage(ctx, progress.Host(d.C.Raw), certificateStage, func(context.Context) error {
+		if !d.C.SSLEnabled() {
+			return nil
+		}
 		if err := d.restoreRetainedPKI(); err != nil {
 			return err
 		}
@@ -588,6 +637,7 @@ func (d *Deploy) finishDeployment(ctx context.Context) (err error) {
 			return err
 		}
 	}
+	d.showWebsite()
 	if err = progress.Stage(ctx, progress.Host(d.C.Raw), "验证并显示 Grafana 登录信息", d.ShowGrafana); err != nil {
 		return err
 	}
@@ -597,7 +647,17 @@ func (d *Deploy) finishDeployment(ctx context.Context) (err error) {
 	if err = d.save(); err != nil {
 		return err
 	}
-	progress.Info(ctx, "GoFrame 部署完成；启用节点已通过文件检测、投递和健康验收")
+	if len(d.C.Selected(d.O.Node)) == 0 {
+		progress.Info(ctx, "主服务器部署及验收完成；未配置子服务器，已跳过节点文件检测测试")
+	} else {
+		progress.Info(ctx, "GoFrame 部署完成；启用节点已通过文件检测、投递和健康验收")
+	}
+	protocol := "HTTP"
+	if d.C.SSLEnabled() {
+		protocol = "HTTPS"
+	}
+	progress.Info(ctx, "当前通信、指标采集和系统面板协议："+protocol)
+	fmt.Println("安装及验收完成。\n以后在主服务器任意目录输入 webscan 即可打开部署管理菜单，无需再次下载安装文件。\n部署目录：/root/webscan-deploy\n配置文件：" + d.O.Config)
 	return nil
 }
 func (d *Deploy) compose(ctx context.Context, args ...string) ([]byte, error) {
@@ -761,7 +821,7 @@ func (d *Deploy) Central(ctx context.Context) error {
 			return e
 		}
 	}
-	if fresh {
+	if fresh || !d.addingNode() {
 		if e = d.ProvisionGrafana(); e != nil {
 			return e
 		}
@@ -788,6 +848,9 @@ func (d *Deploy) Central(ctx context.Context) error {
 		}
 	}
 	if e = progress.Stage(ctx, progress.Host(d.C.Raw), "等待主服务器接收服务就绪", d.waitReady); e != nil {
+		return e
+	}
+	if e = progress.Stage(ctx, progress.Host(d.C.Raw), "验收网站后台连接、持久化账号和数据库", d.verifyWebsite); e != nil {
 		return e
 	}
 	if e = progress.Stage(ctx, progress.Host(d.C.Raw), "配置 Grafana 账号、数据源和看板", d.ConfigureGrafana); e != nil {

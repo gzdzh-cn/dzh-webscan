@@ -13,6 +13,7 @@ import (
 	"time"
 	"webscan/internal/common"
 	"webscan/internal/persist"
+	"webscan/internal/website"
 )
 
 func (s *Store) maintenance(ctx context.Context) {
@@ -128,6 +129,8 @@ func ArchiveDirectory(source, target, root string) error {
 	return e
 }
 func (s *Store) Backup() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	settings := common.M(s.Config["backup"])
 	root := common.S(s.Config["backup_dir"])
 	directory := filepath.Join(root, time.Now().UTC().Format("20060102-150405"))
@@ -140,13 +143,23 @@ func (s *Store) Backup() error {
 		}
 	}
 	if common.B(settings["include_runtime_config"]) {
-		if e := common.AtomicJSON(filepath.Join(directory, "runtime.json"), s.Config); e != nil {
+		if e := common.AtomicJSON(filepath.Join(directory, "runtime.json"), s.backupRuntime()); e != nil {
 			return e
 		}
 		if source := common.S(s.Config["runtime_dir"]); source != "" {
 			if e := ArchiveDirectory(source, filepath.Join(directory, "runtime-files.tar.gz"), "webscan-v1"); e != nil {
 				return e
 			}
+		}
+	}
+	if common.B(settings["include_sqlite"]) {
+		source := filepath.Join(root, "website-config")
+		if info, e := os.Stat(source); e == nil && info.IsDir() {
+			if e = ArchiveDirectory(source, filepath.Join(directory, "website-config.tar.gz"), "website-config"); e != nil {
+				return e
+			}
+		} else if e != nil && !os.IsNotExist(e) {
+			return e
 		}
 	}
 	entries, e := os.ReadDir(root)
@@ -169,4 +182,15 @@ func (s *Store) Backup() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) backupRuntime() common.Map {
+	config := common.Clone(s.Config)
+	if a, e := website.ReadAccount(s.DB); e == nil {
+		wm := common.M(config["website_monitor"])
+		wm["admin_username"] = a.Username
+		wm["password_hash"] = a.Hash
+		config["website_monitor"] = wm
+	}
+	return config
 }

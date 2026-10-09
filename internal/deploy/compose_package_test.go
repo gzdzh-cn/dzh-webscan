@@ -163,3 +163,36 @@ func TestComposePackagesRejectUnsupportedModesBeforeWriting(t *testing.T) {
 		})
 	}
 }
+
+func TestCentralOnlyComposeWithZeroNodes(t *testing.T) {
+	for _, ssl := range []bool{true, false} {
+		c := fixture(t)
+		c.Raw["ssl"] = common.Map{"enabled": ssl}
+		c.Raw["nodes"] = []any{}
+		common.M(c.Raw["deployment"])["node_order"] = []string{}
+		c.Nodes = nil
+		common.M(c.Raw["registry"])["prefix"] = "docker.io/gzdzh"
+		dir := filepath.Join(t.TempDir(), "packages")
+		if e := PrepareCompose(c, dir, []byte("include: []\n")); e != nil {
+			t.Fatal(e)
+		}
+		runtime, e := common.ReadJSON(filepath.Join(dir, "central/config/runtime.json"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if len(common.M(runtime["nodes"])) != 0 || len(common.A(runtime["active_nodes"])) != 0 {
+			t.Fatal("unexpected nodes")
+		}
+		raw, e := os.ReadFile(filepath.Join(dir, "central/services.yaml"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		var services common.Map
+		if e = yaml.Unmarshal(raw, &services); e != nil {
+			t.Fatal(e)
+		}
+		if len(common.M(services["services"])) < 5 {
+			t.Fatal("central services absent")
+		}
+	}
+}

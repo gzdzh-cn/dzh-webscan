@@ -236,18 +236,20 @@ func (d *Deploy) InstallNode(ctx context.Context, n common.Map) error {
 		yara, _ = assets.Files.ReadFile("php-webshell.yar")
 	}
 	files := map[string][]byte{"/etc/webscan-v1/runtime.json": common.JSON(runtime), "/etc/webscan-v1/php-webshell.yar": yara, "/etc/webscan-v1/compose.yml": YAML(compose)}
-	for source, dest := range map[string]string{"ca.crt": "ca.crt", id + ".crt": "server.crt", id + ".key": "server.key"} {
-		b, e := os.ReadFile(filepath.Join(d.C.CentralRoot(), "pki", source))
-		if e != nil {
-			return e
+	if d.C.SSLEnabled() {
+		for source, dest := range map[string]string{"ca.crt": "ca.crt", id + ".crt": "server.crt", id + ".key": "server.key"} {
+			b, e := os.ReadFile(filepath.Join(d.C.CentralRoot(), "pki", source))
+			if e != nil {
+				return e
+			}
+			files["/etc/webscan-v1/pki/"+dest] = b
 		}
-		files["/etc/webscan-v1/pki/"+dest] = b
 	}
 	_, e = r.Run(ctx, "set -eu; mkdir -p /var/lib/webscan-v1/textfile /var/log/webscan-v1 "+Q(common.S(runtime["probe_directory"]))+"; if systemctl cat webscan-agent-v1.service >/dev/null 2>&1; then systemctl disable --now webscan-agent-v1; fi")
 	if e != nil {
 		return e
 	}
-	progress.Info(ctx, "正在写入节点配置、YARA 规则和 HTTPS 证书")
+	progress.Info(ctx, "正在写入节点配置、YARA 规则和通信配置")
 	for path, b := range files {
 		if e = r.Write(ctx, path, b, 0600); e != nil {
 			return e
@@ -417,13 +419,17 @@ func (d *Deploy) InstallNodeSidecars(ctx context.Context, n common.Map) error {
 	if _, e = r.Run(ctx, "docker run --rm --network none --read-only -v /etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro "+Q(refs["vector"])+" validate --no-environment /etc/vector/vector.yaml"); e != nil {
 		return errors.New("node_vector_config_invalid")
 	}
-	exporter := common.Map{"tls_server_config": common.Map{"cert_file": "/etc/webscan-v1/pki/server.crt", "key_file": "/etc/webscan-v1/pki/server.key", "client_auth_type": "RequireAndVerifyClientCert", "client_ca_file": "/etc/webscan-v1/pki/ca.crt"}}
+	exporter := ExporterWebConfig(d.C)
 	if e = r.Write(ctx, "/etc/webscan-v1/exporter.yml", YAML(exporter), 0600); e != nil {
 		return e
 	}
 	base := "--network host --read-only --cap-drop ALL --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3"
 	aliases := map[string]string{"vector": "docker.io/" + VendorImages["vector"], "exporter": "docker.io/" + VendorImages["exporter"]}
 	commands := map[string]string{"vector": "/usr/bin/docker run --pull never --name webscan-vector-v1 " + base + " -v /etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro -v /etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro -v /var/log/webscan-v1:/var/log/webscan-v1:ro -v /var/lib/webscan-vector-v1:/var/lib/vector " + aliases["vector"], "exporter": "/usr/bin/docker run --pull never --name webscan-exporter-v1 " + base + " --user 0:0 --pid host -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro,rslave -v /var/lib/webscan-v1/textfile:/textfile:ro -v /etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro -v /etc/webscan-v1/pki:/etc/webscan-v1/pki:ro " + aliases["exporter"] + " --web.listen-address=:" + strconv.Itoa(common.I(common.M(n["metrics"])["port"])) + " --web.config.file=/etc/webscan-v1/exporter.yml --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs --collector.textfile.directory=/textfile"}
+	if !d.C.SSLEnabled() {
+		commands["vector"] = strings.ReplaceAll(commands["vector"], " -v /etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro", "")
+		commands["exporter"] = strings.ReplaceAll(commands["exporter"], " -v /etc/webscan-v1/pki:/etc/webscan-v1/pki:ro", "")
+	}
 	for name, command := range commands {
 		// Restart=always does not recover a unit stopped through Requires=docker.
 		// PartOf propagates Docker restarts; WantedBy also covers stop/start.

@@ -56,3 +56,26 @@ func TestToolDigestSelectsRequestedRegistry(t *testing.T) {
 		t.Fatal("wrong registry selected", got)
 	}
 }
+
+func TestStaleLatestCannotRunNewBootstrapConfiguration(t *testing.T) {
+	before := Release
+	Release = "v2.0.21"
+	t.Cleanup(func() { Release = before })
+	file := filepath.Join(t.TempDir(), "webscan")
+	for _, tc := range []struct {
+		version string
+		old     bool
+	}{{"v2.0.20", true}, {"v2.0.21", false}, {"v2.0.22", false}, {"v2.1.0", false}} {
+		os.WriteFile(file, []byte("#!/bin/sh\nprintf '"+tc.version+"\\n'\n"), 0700)
+		if toolOlderThanBootstrap(context.Background(), file) != tc.old {
+			t.Fatal(tc)
+		}
+	}
+}
+
+func TestOfficialDockerHubDigestAlias(t *testing.T) {
+	digest := "gzdzh/webscan-central@sha256:" + strings.Repeat("a", 64)
+	if matchingToolDigest("registry-1.docker.io/gzdzh/webscan-central:latest", []string{digest}) != digest {
+		t.Fatal("official fallback digest not recognized")
+	}
+}

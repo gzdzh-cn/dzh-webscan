@@ -43,6 +43,9 @@ func serial() *big.Int {
 	return n
 }
 func certificates(c *Config) error {
+	if !c.SSLEnabled() {
+		return nil
+	}
 	dir := filepath.Join(c.CentralRoot(), "pki")
 	if e := os.MkdirAll(dir, 0700); e != nil {
 		return e

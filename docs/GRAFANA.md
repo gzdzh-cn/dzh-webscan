@@ -6,7 +6,7 @@
 
 ## 1. 登录后先看哪几个页面
 
-浏览器访问 `http://主服务器IP:Grafana端口`，默认端口 `3000`；使用 YAML 配置的账号登录。SH 随机密码见部署结束提示，Compose 随机密码见主服务器包内 `grafana-credentials.json`。账号维护方法见 [README 的 Grafana 说明](../README.md#8-grafana-账号及节点状态)。
+浏览器访问 `http://主服务器IP:Grafana端口`，默认端口 `3000`；使用 YAML 配置的账号登录。SH 随机密码见部署结束提示，Compose 随机密码见主服务器包内 `grafana-credentials.json`。账号维护方法见 [Grafana 账号维护](OPERATIONS.md#grafana-账号与节点状态)。
 
 点击左侧 **Dashboards（仪表盘）**，搜索并打开以下面板：
 
@@ -327,6 +327,27 @@ ALERTS{alertstate="firing", node_id="node-29"}
 
 日常检查建议：打开 `Webscan servers` 看在线和资源 → 打开 `Webscan health` 看覆盖、心跳及积压 → 打开 `Webscan events` 看异常事件 → 有疑问时用 Explore 按节点、文件及事件编号定位。
 
-如需验证真实文件监控，只在独立测试目录修改 PHP，再核对文件变化、扫描结果、Loki 和飞书；不要修改业务文件做测试，也不要运行测试 PHP 内容。运行故障的服务日志及恢复命令见 [README 常见问题](../README.md#12-常见问题)。
+如需验证真实文件监控，只在独立测试目录修改 PHP，再核对文件变化、扫描结果、Loki 和飞书；不要修改业务文件做测试，也不要运行测试 PHP 内容。运行故障的服务日志及恢复命令见 [安装与运行问题排查](TROUBLESHOOTING.md)。
 
 [返回项目使用说明](../README.md)
+
+## 网站可用性
+
+v2.0.21 开启网站后台并升级主服务器后，搜索“网站可用性”看板。网站列表通过 [管理后台](WEBSITE.md) 添加，Grafana 用于观察趋势。
+
+| 查询 | 含义 |
+|---|---|
+| `webscan_website_available` | 1 正常、0 连续失败已告警、-1 尚未确认；暂停网站不导出 |
+| `webscan_website_latency_seconds` | 最近一次首页检查耗时 |
+| `webscan_website_http_status` | 最近 HTTP 状态；连接失败时为 0 |
+| `webscan_website_success_ratio` | 自网站添加或状态重置起的检查成功比例 |
+| `(webscan_website_certificate_expiry_seconds - time()) / 86400` | 最近取得证书的剩余天数；证书指标为 0 时不适用 |
+| `webscan_website_scheduler_up` | 1 表示调度正常运行，0 表示停滞或读取失败 |
+| `webscan_website_backlog_seconds` | 检测积压持续时间 |
+| `time() - webscan_website_last_check_seconds` | 距离最近检查的时间 |
+
+可以通过 `site_id`、`website` 和 `node_id` 标签筛选，例如 `webscan_website_available{website="示例官网"}`。没有数据时先确认网站后台已开启、已经添加网站，且主服务器采集目标正常；不要把“没有数据”视为网站正常。
+
+网站故障和恢复由 Go 服务统一发送飞书，Grafana/Alertmanager 默认不重复发送这些网站告警。
+
+网站可用性看板的证书剩余天数使用 `webscan_website_certificate_remaining_days`。负数或零表示已过期；未知、不适用显示无数据，不会被当成过期证书。可用 `webscan_website_certificate_known` 区分是否有已取得的证书。网络失败后保留最近证书信息，检查新鲜度请在网站后台详情查看最近证书检查时间。网站证书告警由 Go 服务发送，不另建 Alertmanager 重复提醒。

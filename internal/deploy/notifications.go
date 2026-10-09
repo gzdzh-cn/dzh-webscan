@@ -150,8 +150,14 @@ func (d *Deploy) DeploymentPHPTest(ctx context.Context, n common.Map) error {
 		return err
 	}
 	key := common.Hash([]byte(d.RunID + ":" + node))[:32]
-	root := filepath.Join(common.SS(common.M(n["monitor"])["roots"])[0], ".webscan-deploy-test-"+key)
+	root, err := deploymentFixtureRoot(n, key)
+	if err != nil {
+		return err
+	}
 	path := filepath.Join(root, "fixture.php")
+	if err = d.requireFixtureCapability(ctx, path); err != nil {
+		return err
+	}
 	baseline := []byte("<?php /* deployment fixture baseline " + key + " */\n")
 	modified := []byte("<?php /* deployment fixture modified " + key + " */\n")
 	payload := common.Map{"id": "deployment:" + key + ":php", "node": node, "path": path, "sha256": common.Hash(modified)}

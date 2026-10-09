@@ -385,6 +385,7 @@ func Explain(err error) string {
 	}
 	code := common.SecretFree(err)
 	for key, message := range map[string]string{
+		"website_previous_runtime_unreadable":             "无法读取主服务器已有 runtime.json，不能确认网站后台的内存增量；请检查主服务器安装目录和权限。",
 		"add_node_requires_installed_compatible_main":     "增加子服务器需要已安装且协议兼容的主服务器；请先通过菜单 1 安装或升级主服务器，本次未切换服务",
 		"rollout_rollback_not_confirmed":                  "合并部署失败且恢复尚未确认；已停止后续节点，请检查恢复日志并使用原参数继续或回退",
 		"selected_node_not_configured":                    "YAML 中找不到指定的子服务器，请核对节点 ID",

@@ -12,7 +12,7 @@ import (
 func TestMenuActions(t *testing.T) {
 	for _, tc := range []struct{ input, action string }{{"1\n", "--install"}, {"2\n", "--reinstall"}, {"3\n1\n", "--uninstall"}, {"bad\n 3 \n1\n", "--uninstall"}} {
 		var out bytes.Buffer
-		got, err := selectAction([]string{"--config", "test.yaml"}, strings.NewReader(tc.input), &out)
+		got, err := selectActionWithNodes([]string{"--config", "test.yaml"}, strings.NewReader(tc.input), &out, nil)
 		if err != nil || got[len(got)-1] != tc.action || !strings.Contains(out.String(), "3、卸载") {
 			t.Fatalf("selection: %v %v", got, err)
 		}

@@ -14,7 +14,7 @@ func pullCandidates(c *Config, image string) []string {
 	}
 	reg := common.M(c.Raw["registry"])
 	privateHost := strings.Split(common.S(reg["prefix"]), "/")[0]
-	if privateHost != "" && strings.HasPrefix(image, privateHost+"/") {
+	if common.B(reg["auth_required"]) && privateHost != "" && strings.HasPrefix(image, privateHost+"/") {
 		return []string{image}
 	}
 	mirrors := common.SS(reg["mirrors"])

@@ -171,7 +171,7 @@ func imageRepository(image string) string {
 }
 
 func repositoryKey(repo string) string {
-	repo = strings.TrimPrefix(strings.TrimPrefix(repo, "docker.io/"), "index.docker.io/")
+	repo = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(repo, "docker.io/"), "index.docker.io/"), "registry-1.docker.io/")
 	if !strings.Contains(repo, "/") {
 		return "library/" + repo
 	}
