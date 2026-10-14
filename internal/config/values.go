@@ -109,7 +109,7 @@ func validateValues(m common.Map, prefix string) error {
 			if common.I(v) <= 0 || common.I(v) > 100 {
 				return bad("使用率阈值必须是 1～100 的整数，例如 80 表示 80%。")
 			}
-			if strings.Contains(key, "warning") && common.I(v) >= common.I(m[strings.Replace(key, "warning", "critical", 1)]) {
+			if critical, exists := m[strings.Replace(key, "warning", "critical", 1)]; strings.Contains(key, "warning") && exists && common.I(v) >= common.I(critical) {
 				return bad("警告阈值必须低于对应的严重告警阈值；建议 warning: 80、critical: 90。")
 			}
 		}

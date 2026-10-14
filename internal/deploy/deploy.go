@@ -26,9 +26,10 @@ var Release = "development"
 var StateRoot = "/var/lib/webscan-deploy"
 
 type Options struct {
-	Config, Node, YaraRules                                                                                                                     string
+	Config, Node, YaraRules, ExpectedRevision                                                                                                   string
 	DryRun, Check, Install, Reinstall, Upgrade, Resume, Rollback, Uninstall, CentralOnly, GrafanaOnly, SyncGrafana, ReloadRules, NonInteractive bool
 	AddNode                                                                                                                                     bool
+	KeepImages                                                                                                                                  bool
 }
 type Deploy struct {
 	C                      *Config
@@ -59,6 +60,9 @@ func New(c *Config, o Options) (*Deploy, error) {
 	if e != nil {
 		return nil, e
 	}
+	for _, n := range c.Nodes {
+		n["deployment"] = common.Map{"mode": ResolveNodeMode(n, state)}
+	}
 	images := common.Clone(common.M(state["image_lock"]))
 	delete(images, "deployer")
 	return &Deploy{C: c, O: o, State: state, Secrets: secrets, Images: images, Remotes: map[string]*Remote{}, HTTP: h}, nil
@@ -85,6 +89,12 @@ func Run(ctx context.Context, o Options) error {
 		return e
 	}
 	defer d.Close()
+	if o.Resume && common.S(d.State["step"]) == "compose-adoption-pending" {
+		return AdoptCompose(ctx, o.Config)
+	}
+	if o.Rollback && common.S(d.State["step"]) == "compose-adoption-pending" {
+		return rollbackAdoption(ctx, c, d.State)
+	}
 	if pending := common.M(d.State["single_uninstall"]); len(pending) > 0 && !common.B(pending["complete"]) && !o.Uninstall && !o.DryRun && !o.Check {
 		return errors.New("single_uninstall_pending_use_original_node")
 	}
@@ -158,6 +168,15 @@ func Run(ctx context.Context, o Options) error {
 		return errors.New("deployment_already_running")
 	}
 	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+	if o.ExpectedRevision != "" {
+		raw, err := os.ReadFile(o.Config)
+		if err != nil {
+			return err
+		}
+		if common.Hash(raw) != o.ExpectedRevision {
+			return errors.New("配置已被修改，任务未执行，请重新预览")
+		}
+	}
 	reporter, e := progress.Open(c.Raw, "部署", filepath.Join(StateRoot, "logs"))
 	if e != nil {
 		return e
@@ -223,6 +242,11 @@ func Run(ctx context.Context, o Options) error {
 	return d.Deploy(ctx)
 }
 func (d *Deploy) Preflight(ctx context.Context) error {
+	if Native(d.C) {
+		if e := requireManagementHost(); e != nil {
+			return e
+		}
+	}
 	if _, e := RunCommand(ctx, nil, "docker", "info", "--format", "{{.Architecture}}"); e != nil {
 		return e
 	}
@@ -237,32 +261,14 @@ func (d *Deploy) Preflight(ctx context.Context) error {
 			if err := progress.Stage(ctx, progress.Node(n), "检查验收测试路径是否被监控规则排除", func(ctx context.Context) error { return d.checkAcceptancePaths(ctx, n) }); err != nil {
 				return err
 			}
-			if err := progress.Stage(ctx, progress.Node(n), "自动记录或校验 SSH 主机指纹，检查 Docker、Compose 和磁盘", func(ctx context.Context) error {
+			if err := progress.Stage(ctx, progress.Node(n), "自动记录或校验 SSH 主机指纹，检查部署方式、运行环境和磁盘", func(ctx context.Context) error {
 				r, e := Connect(ctx, n)
 				if e != nil {
 					return fmt.Errorf("node_%s_%w", common.S(n["id"]), e)
 				}
 				d.Remotes[common.S(n["id"])] = r
-				if _, checkErr := r.Run(ctx, "docker info >/dev/null 2>&1 && docker compose version >/dev/null 2>&1"); checkErr != nil {
-					if d.O.Check {
-						return errors.New("node_docker_or_compose_missing")
-					}
-					script, _ := assets.Files.ReadFile("install-docker.sh")
-					if _, checkErr = r.Exec(ctx, "bash", strings.NewReader(string(script))); checkErr != nil {
-						if _, dockerErr := r.Run(ctx, "docker info >/dev/null 2>&1"); dockerErr != nil {
-							return errors.New("node_fresh_docker_installation_failed")
-						}
-						if checkErr = d.installComposeFallback(ctx, r); checkErr != nil {
-							return checkErr
-						}
-					}
-				}
-				b, e := r.Run(ctx, "uname -m; docker info --format '{{.Architecture}}'; docker compose version --short; df -Pk /var/lib; test -x /bin/bash; command -v sync >/dev/null; command -v sha256sum >/dev/null")
-				if e != nil {
-					return fmt.Errorf("node_%s_environment_check_failed", common.S(n["id"]))
-				}
-				if !strings.Contains(string(b), "x86_64") {
-					return errors.New("linux_amd64_nodes_required")
+				if e = d.checkNodeEnvironment(ctx, r, n); e != nil {
+					return fmt.Errorf("node_%s_%w", common.S(n["id"]), e)
 				}
 				return nil
 			}); err != nil {
@@ -433,6 +439,17 @@ func (d *Deploy) LockImages(ctx context.Context) error {
 	}
 	delete(d.Images, "deployer")
 	roles := []string{"central", "agent"}
+	if d.O.CentralOnly {
+		roles = []string{"central"}
+	}
+	if d.O.KeepImages {
+		for _, role := range roles {
+			if common.S(d.Images[role]) == "" {
+				return errors.New("现有镜像锁缺失，无法仅应用配置，请先执行完整升级")
+			}
+		}
+		roles = nil
+	}
 	if d.addingNode() {
 		roles = []string{"agent"}
 		progress.Info(ctx, "新增节点：沿用主服务器已锁定镜像，仅准备节点镜像；部署工具已从主服务器镜像提取")
@@ -461,7 +478,10 @@ func (d *Deploy) LockImages(ctx context.Context) error {
 		d.Images[role] = ref
 	}
 	for _, role := range []string{"prometheus", "alertmanager", "exporter", "loki", "grafana", "vector"} {
-		if d.addingNode() && role != "vector" && role != "exporter" {
+		if Native(d.C) {
+			continue
+		}
+		if d.addingNode() || role == "vector" {
 			continue
 		}
 		tag := VendorImages[role]
@@ -606,9 +626,18 @@ func (d *Deploy) Deploy(ctx context.Context) (err error) {
 			}
 			if err != nil {
 				progress.Warn(ctx, id+" 验收失败，恢复此节点旧服务并停止后续节点")
-				rollback := progress.Stage(ctx, progress.Node(n), "恢复此节点旧服务", func(ctx context.Context) error { return d.RollbackNode(ctx, n, false) })
+				rollback := progress.Stage(ctx, progress.Node(n), "恢复此节点旧服务", func(ctx context.Context) error {
+					state := common.M(common.M(d.State["nodes"])[id])
+					if common.S(state["go_run_id"]) == d.RunID || common.S(state["backup_pending"]) == d.RunID {
+						return d.RollbackNode(ctx, n, false)
+					}
+					return d.clearNodeMaintenance(ctx, n)
+				})
 				d.State["last_failure"] = common.Map{"stage": id, "time": common.Now(), "rollback_confirmed": rollback == nil}
 				d.save()
+				return err
+			}
+			if err = d.clearNodeMaintenance(ctx, n); err != nil {
 				return err
 			}
 			nodeState = common.M(common.M(d.State["nodes"])[id])
@@ -617,7 +646,7 @@ func (d *Deploy) Deploy(ctx context.Context) (err error) {
 			if err = d.save(); err != nil {
 				return err
 			}
-			progress.Info(ctx, id+" Go 容器部署、检测、投递和健康验收通过")
+			progress.Info(ctx, id+" Go 服务部署、检测、投递和健康验收通过")
 		}
 	}
 	d.State["step"] = "notifying"
@@ -638,10 +667,15 @@ func (d *Deploy) finishDeployment(ctx context.Context) (err error) {
 		}
 	}
 	d.showWebsite()
-	if err = progress.Stage(ctx, progress.Host(d.C.Raw), "验证并显示 Grafana 登录信息", d.ShowGrafana); err != nil {
-		return err
+	if !Native(d.C) {
+		if err = progress.Stage(ctx, progress.Host(d.C.Raw), "验证并显示 Grafana 登录信息", d.ShowGrafana); err != nil {
+			return err
+		}
 	}
 	d.State["step"], d.State["go_release"], d.State["configuration"], d.State["config_hash"] = "complete", Release, Redact(d.C.Raw), common.Hash(common.JSON(Redact(d.C.Raw)))
+	if d.O.KeepImages {
+		common.M(d.State["configuration"])["images"] = common.M(d.State["previous_configuration"])["images"]
+	}
 	d.State["completed_at"] = common.Now()
 	delete(d.State, "last_failure")
 	if err = d.save(); err != nil {
@@ -670,6 +704,12 @@ func (d *Deploy) compose(ctx context.Context, args ...string) ([]byte, error) {
 	return RunCommand(ctx, nil, append([]string{"docker", "compose", "-f", filepath.Join(d.C.CentralRoot(), "compose.yml")}, args...)...)
 }
 func (d *Deploy) Central(ctx context.Context) error {
+	if Native(d.C) {
+		return d.nativeCentral(ctx)
+	}
+	if e := d.InstallManagement(ctx); e != nil {
+		return e
+	}
 	root := d.C.CentralRoot()
 	center := common.M(d.C.Raw["central"])
 	if d.rolloutMainApplied(ctx) {

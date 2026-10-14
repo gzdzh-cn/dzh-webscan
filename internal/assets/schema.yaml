@@ -6,6 +6,9 @@ central:
   name: 网站监控中心
   # 子服务器直接连接此 IP，不经过 Nginx；协议由 ssl.enabled 决定。
   public_url: https://192.0.2.10:19443
+  # 仅接管 Compose 时由工具填写；普通部署留空。
+  managed_runtime_dir: ''
+  managed_compose_name: ''
   install_dir: /opt/webscan-central
   data_dir: /var/lib/webscan-central
   log_dir: /var/log/webscan
@@ -15,6 +18,13 @@ central:
   new_components_memory_budget_mib: 384
   # 首次安装检查额外预留；不是容器内存限额，范围 64～4096 MiB。
   install_memory_reserve_mib: 128
+  # native：Go 一体化；legacy：保留旧组件并运行影子采集。
+  monitoring:
+    mode: legacy
+    raw_hours: 48
+    history_days: 15
+    memory_mib: 384
+    go_memory_mib: 256
   event_service:
     bind_address: 127.0.0.1
     port: 18081
@@ -49,6 +59,30 @@ central:
     create_viewer: true
     viewer_username: webscan-viewer
     viewer_password: ''
+# 邮件默认关闭；授权码仅保存在受保护配置中。
+email:
+  enabled: false
+  smtp_host: ''
+  smtp_port: 465
+  tls_mode: tls
+  username: ''
+  password: ''
+  from_address: ''
+  from_name: 网站监控
+  recipients: []
+  timeout_seconds: 15
+  max_per_minute: 30
+  retry:
+    initial_delay_seconds: 30
+    max_delay_seconds: 3600
+  notifications:
+    file_changes: true
+    important_config_changes: true
+    scan_matches: true
+    scan_errors: true
+    health_failures: true
+    health_recoveries: true
+
 feishu:
   enabled: true
   mode: inline
@@ -73,6 +107,8 @@ optional_components:
   clamav: {enabled: false, min_available_memory_mib: 1536}
   auditd: {enabled: false}
 node_defaults:
+  # 新节点默认免 Docker；已有节点未指定方式时沿用部署记录。
+  deployment: {mode: native}
   resources: {agent_memory_mib: 256, go_memory_mib: 64, cpus: 1.0, gomaxprocs: 2}
   ssh:
     username: root
@@ -123,6 +159,15 @@ health:
   filesystem_probe_seconds: 60
   probe_directory: /var/lib/webscan/probe
   alerts:
+    # CPU 与内存告警默认关闭；恢复阈值须低于触发阈值。
+    cpu_enabled: false
+    cpu_warning_percent: 85
+    cpu_recovery_percent: 80
+    cpu_duration_seconds: 300
+    memory_enabled: false
+    memory_warning_percent: 90
+    memory_recovery_percent: 85
+    memory_duration_seconds: 300
     node_unreachable_seconds: 120
     agent_stopped_seconds: 60
     local_probe_stale_seconds: 180
@@ -138,7 +183,7 @@ health:
   alert_on_inotify_overflow: true
   alert_on_dropped_events: true
   alertmanager: {group_wait_seconds: 30, group_interval_seconds: 300, repeat_interval_hours: 4}
-retention: {prometheus_days: 15, loki_days: 30, sqlite_events_days: 30, delivery_records_days: 30, local_logs_days: 7}
+retention: {prometheus_days: 15, loki_days: 30, sqlite_events_days: 30, security_events_days: 30, website_incidents_days: 30, server_alerts_days: 15, delivery_records_days: 30, local_logs_days: 7}
 backup:
   enabled: true
   time: '02:30'

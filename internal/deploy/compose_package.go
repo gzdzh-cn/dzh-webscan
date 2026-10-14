@@ -72,7 +72,11 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 		return nil
 	}
 	selected := c.Selected("")
-	for _, path := range []string{"central/data/grafana", "central/data/loki", "central/data/prometheus", "central/data/alertmanager", "central/backups"} {
+	paths := []string{"central/data", "central/backups"}
+	if !Native(c) {
+		paths = append(paths, "central/data/grafana", "central/data/loki", "central/data/prometheus", "central/data/alertmanager")
+	}
+	for _, path := range paths {
 		if err := os.MkdirAll(filepath.Join(base, path), 0700); err != nil {
 			return errors.New("compose_data_directory_failed")
 		}
@@ -125,9 +129,11 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 		if err = copyCert("ca.crt", "private/ca.crt"); err != nil {
 			return err
 		}
-		for _, name := range []string{"ca.crt", "client.crt", "client.key"} {
-			if err = copyCert(name, "central/config/pki/prometheus/"+name); err != nil {
-				return err
+		if !Native(c) {
+			for _, name := range []string{"ca.crt", "client.crt", "client.key"} {
+				if err = copyCert(name, "central/config/pki/prometheus/"+name); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -135,8 +141,9 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 	central := common.M(c.Raw["central"])
 	runtime := CentralRuntime(c, secrets, active)
 	runtime["feishu"] = f
+	runtime["management_socket"] = ""
 	if c.SSLEnabled() {
-		for _, entry := range []string{"ca.crt"} {
+		for _, entry := range []string{"ca.crt", "client.crt", "client.key"} {
 			if err = copyCert(entry, "central/config/pki/"+entry); err != nil {
 				return err
 			}
@@ -152,22 +159,28 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 
 	}
 	g := common.M(central["grafana"])
-	password := common.S(g["admin_password"])
-	if password == "" {
-		password = common.ID() + common.ID()[:8]
-	}
 	centralFiles := map[string][]byte{
-		"website-credentials.json":      common.JSON(common.Map{"url": WebsiteURL(c), "username": secrets["website_username"], "password": secrets["website_password"], "initialization_only": true}),
-		"config/runtime.json":           common.JSON(runtime),
-		"config/alert-token":            []byte(common.S(secrets["alert_token"])),
-		"config/prometheus.yml":         YAML(Prometheus(c, active)),
-		"config/rules.yml":              YAML(AlertRules(c)),
-		"config/alertmanager.yml":       YAML(Alertmanager(c)),
-		"config/loki.yml":               YAML(LokiConfig(c)),
-		"config/grafana.ini":            GrafanaINI(c),
-		"config/grafana.env":            []byte("GF_SECURITY_ADMIN_USER=" + common.S(g["admin_username"]) + "\nGF_SECURITY_ADMIN_PASSWORD__FILE=/etc/grafana/admin-password\n"),
-		"config/grafana-admin-password": []byte(password),
-		"grafana-credentials.json":      common.JSON(common.Map{"admin_username": g["admin_username"], "admin_password": password}),
+		"website-credentials.json": common.JSON(common.Map{"url": WebsiteURL(c), "username": secrets["website_username"], "password": secrets["website_password"], "initialization_only": true}),
+		"config/runtime.json":      common.JSON(runtime),
+		"config/alert-token":       []byte(common.S(secrets["alert_token"])),
+	}
+	if !Native(c) {
+		password := common.S(g["admin_password"])
+		if password == "" {
+			password = common.ID() + common.ID()[:8]
+		}
+		for name, data := range map[string][]byte{
+			"config/prometheus.yml":         YAML(Prometheus(c, active)),
+			"config/rules.yml":              YAML(AlertRules(c)),
+			"config/alertmanager.yml":       YAML(Alertmanager(c)),
+			"config/loki.yml":               YAML(LokiConfig(c)),
+			"config/grafana.ini":            GrafanaINI(c),
+			"config/grafana.env":            []byte("GF_SECURITY_ADMIN_USER=" + common.S(g["admin_username"]) + "\nGF_SECURITY_ADMIN_PASSWORD__FILE=/etc/grafana/admin-password\n"),
+			"config/grafana-admin-password": []byte(password),
+			"grafana-credentials.json":      common.JSON(common.Map{"admin_username": g["admin_username"], "admin_password": password}),
+		} {
+			centralFiles[name] = data
+		}
 	}
 	for name, data := range centralFiles {
 		if err = write("central/"+name, data); err != nil {
@@ -176,7 +189,7 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 	}
 	centralCompose := ComposeCentral(c, images)
 	standaloneImage(common.M(common.M(centralCompose["services"])["receiver"]), common.S(images["central"]))
-	if !c.SSLEnabled() {
+	if !Native(c) && !c.SSLEnabled() {
 		prometheus := common.M(common.M(centralCompose["services"])["prometheus"])
 		filtered := []string{}
 		for _, mount := range common.SS(prometheus["volumes"]) {
@@ -192,6 +205,13 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 	for _, v := range common.M(centralCompose["services"]) {
 		s := common.M(v)
 		s["platform"] = "linux/amd64"
+		volumes := []string{}
+		for _, v := range common.SS(s["volumes"]) {
+			if !strings.HasPrefix(v, "/run/webscan-management:") {
+				volumes = append(volumes, v)
+			}
+		}
+		s["volumes"] = volumes
 		packageMounts(s, map[string]string{
 			c.CentralRoot():                 "./config",
 			common.S(central["data_dir"]):   "./data",
@@ -205,37 +225,83 @@ func prepareComposeFiles(c *Config, base string, launcher []byte) error {
 			s["env_file"] = paths
 		}
 	}
+	hostConfig := common.Clone(c.Raw)
+	hostConfig["feishu"] = f
+	for _, v := range common.A(hostConfig["nodes"]) {
+		ssh := common.M(common.M(v)["ssh"])
+		ssh["password"] = ""
+		if common.S(ssh["auth_method"]) == "password" {
+			ssh["auth_method"] = "key"
+			ssh["private_key_path"] = "/root/.ssh/id_ed25519"
+		}
+	}
+	defaults := common.M(common.M(hostConfig["node_defaults"])["ssh"])
+	defaults["password"] = ""
+	if common.S(defaults["auth_method"]) == "password" {
+		defaults["auth_method"] = "key"
+		defaults["private_key_path"] = "/root/.ssh/id_ed25519"
+	}
+	common.M(hostConfig["registry"])["password"] = ""
+	common.M(hostConfig["registry"])["username"] = ""
+	if Native(c) {
+		helper := `#!/usr/bin/env bash
+set -euo pipefail
+[[ $EUID -eq 0 && $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo '请在 Linux amd64 主服务器以 root 执行' >&2; exit 1; }
+base=$(cd -- "$(dirname -- "$0")" && pwd)
+cd "$base"
+[[ -f management.yaml && ! -L management.yaml ]] || { echo 'management.yaml 缺失或不是普通文件' >&2; exit 1; }
+chmod 600 management.yaml
+mkdir -p /usr/local/lib/webscan
+chmod 700 /usr/local/lib/webscan
+image=$(docker compose -f services.yaml images -q receiver)
+[[ -n $image ]] || { echo '请先启动本包 receiver 容器' >&2; exit 1; }
+container=$(docker create "$image")
+trap 'docker rm "$container" >/dev/null 2>&1 || true' EXIT
+docker cp "$container:/usr/local/bin/webscan" /usr/local/lib/webscan/adoption-tool
+chmod 700 /usr/local/lib/webscan/adoption-tool
+/usr/local/lib/webscan/adoption-tool adopt-compose --config "$base/management.yaml"
+echo '宿主机管理接管完成；刷新后台可管理配置及节点。'
+`
+		if err = write("central/enable-management.sh", []byte(helper)); err != nil {
+			return err
+		}
+	}
+	if err = write("central/management.yaml", YAML(hostConfig)); err != nil {
+		return err
+	}
 	if err = write("central/services.yaml", YAML(centralCompose)); err != nil {
 		return err
 	}
-	provision := common.Map{"apiVersion": 1, "datasources": []any{
-		common.Map{"name": "Webscan Prometheus", "uid": "webscan-prom", "type": "prometheus", "access": "proxy", "url": "http://webscan-v1-prometheus:19190", "editable": false},
-		common.Map{"name": "Webscan Loki", "uid": "webscan-loki", "type": "loki", "access": "proxy", "url": "http://loki:3100", "editable": false},
-	}}
-	if err = write("central/config/provisioning/datasources/webscan.yml", YAML(provision)); err != nil {
-		return err
-	}
-	providers := common.Map{"apiVersion": 1, "providers": []any{common.Map{"name": "webscan", "type": "file", "options": common.Map{"path": "/etc/grafana/provisioning/webscan-dashboards"}, "disableDeletion": true}}}
-	if err = write("central/config/provisioning/dashboards/webscan.yml", YAML(providers)); err != nil {
-		return err
-	}
-	entries, _ := assets.Files.ReadDir(".")
-	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), "dashboard-") {
-			continue
-		}
-		b, err := assets.Files.ReadFile(entry.Name())
-		if err != nil {
-			return errors.New("compose_dashboard_read_failed")
-		}
-		v, err := common.Decode(b)
-		if err != nil {
+	if !Native(c) {
+		provision := common.Map{"apiVersion": 1, "datasources": []any{
+			common.Map{"name": "Webscan Prometheus", "uid": "webscan-prom", "type": "prometheus", "access": "proxy", "url": "http://webscan-v1-prometheus:19190", "editable": false},
+			common.Map{"name": "Webscan Loki", "uid": "webscan-loki", "type": "loki", "access": "proxy", "url": "http://loki:3100", "editable": false},
+		}}
+		if err = write("central/config/provisioning/datasources/webscan.yml", YAML(provision)); err != nil {
 			return err
 		}
-		dashboard := common.M(v)
-		dashboard["timezone"] = g["timezone"]
-		if err = write("central/config/provisioning/webscan-dashboards/"+strings.TrimPrefix(entry.Name(), "dashboard-"), common.JSON(dashboard)); err != nil {
+		providers := common.Map{"apiVersion": 1, "providers": []any{common.Map{"name": "webscan", "type": "file", "options": common.Map{"path": "/etc/grafana/provisioning/webscan-dashboards"}, "disableDeletion": true}}}
+		if err = write("central/config/provisioning/dashboards/webscan.yml", YAML(providers)); err != nil {
 			return err
+		}
+		entries, _ := assets.Files.ReadDir(".")
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "dashboard-") {
+				continue
+			}
+			b, err := assets.Files.ReadFile(entry.Name())
+			if err != nil {
+				return errors.New("compose_dashboard_read_failed")
+			}
+			v, err := common.Decode(b)
+			if err != nil {
+				return err
+			}
+			dashboard := common.M(v)
+			dashboard["timezone"] = g["timezone"]
+			if err = write("central/config/provisioning/webscan-dashboards/"+strings.TrimPrefix(entry.Name(), "dashboard-"), common.JSON(dashboard)); err != nil {
+				return err
+			}
 		}
 	}
 	if err = writeLauncher(write, "central", launcher); err != nil {
@@ -305,43 +371,42 @@ func prepareNodeCompose(c *Config, n, secrets, images common.Map, write func(str
 	if err != nil {
 		return errors.New("compose_yara_read_failed")
 	}
-	exporterConfig := ExporterWebConfig(c)
-	for name, b := range map[string][]byte{"runtime.json": common.JSON(runtime), "php-webshell.yar": yara, "vector.yml": YAML(VectorConfig(c, n, secrets)), "exporter.yml": YAML(exporterConfig)} {
+	runtime["deployment_mode"] = nodeMode(n)
+	runtime["clamav_config"] = "/etc/webscan-v1/clamd.conf"
+	if nodeMode(n) == "native" {
+		runtime["host_metrics"] = common.Map{"proc": "/proc", "sys": "/sys", "root": "/"}
+		runtime["scanner_tools"] = common.Map{"yara": "/opt/webscan-go/standalone/tools/bin/yara", "clamav": "/opt/webscan-go/standalone/tools/bin/clamdscan"}
+	}
+	for name, b := range map[string][]byte{"runtime.json": common.JSON(runtime), "php-webshell.yar": yara, "clamd.conf": []byte("LocalSocket /run/clamav/clamd.ctl\n")} {
 		if err := write(id+"/config/"+name, b); err != nil {
 			return err
 		}
+	}
+	if nodeMode(n) == "native" {
+		script, e := assets.Files.ReadFile("install-native-node.sh")
+		if e != nil {
+			return e
+		}
+		if e = write(id+"/install-native.sh", append([]byte("TASK_CLAMAV="+strconv.FormatBool(common.B(common.M(common.M(n["scan"])["clamav"])["enabled"]))+"\n"), script...)); e != nil {
+			return e
+		}
+		if e = write(id+"/webscan-agent-native.service", []byte(NativeNodeUnit(n, "/opt/webscan-go/standalone"))); e != nil {
+			return e
+		}
+		probe := common.S(common.M(c.Raw["health"])["probe_directory"])
+		if e = write(id+"/prepare-directories.sh", []byte("#!/bin/bash\nset -eu\numask 077\nmkdir -p "+Q(probe)+"\n")); e != nil {
+			return e
+		}
+		return write(id+"/README.md", []byte("# 直接运行 Go\n从同版本主服务器镜像取得 agent-native.tar.gz 与 SHA256，复制到本机。执行 `bash install-native.sh agent-native.tar.gz <SHA256>`。无需 Docker；仅用于全新安装，升级及切换方式请使用中心后台。配置和凭据仅限 root；开启 ClamAV 需已有扫描服务。\n"))
 	}
 	compose := ComposeAgent(c, n, common.S(images["agent"]))
 	compose["name"] = "webscan-compose-" + id
 	services := common.M(compose["services"])
 	agent := common.M(services["agent"])
 	standaloneImage(agent, common.S(images["agent"]))
-	// All three services use the host network, as the existing deployment does.
-	vector := service(common.S(images["vector"]))
-	vector["container_name"] = "webscan-vector-v1"
-	vector["network_mode"] = "host"
-	vector["user"] = "0:0"
-	vector["volumes"] = []string{"/etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro", "/var/log/webscan-v1:/var/log/webscan-v1:ro", "/var/lib/webscan-vector-v1:/var/lib/vector"}
-	if c.SSLEnabled() {
-		vector["volumes"] = append(common.SS(vector["volumes"]), "/etc/webscan-v1/pki/ca.crt:/etc/webscan-v1/pki/ca.crt:ro")
-	}
-	vector["depends_on"] = []string{"agent"}
-	exporter := service(common.S(images["exporter"]))
-	exporter["container_name"] = "webscan-exporter-v1"
-	exporter["network_mode"] = "host"
-	exporter["user"] = "0:0"
-	exporter["pid"] = "host"
-	exporter["command"] = []string{"--web.listen-address=:" + strconv.Itoa(common.I(common.M(n["metrics"])["port"])), "--web.config.file=/etc/webscan-v1/exporter.yml", "--path.procfs=/host/proc", "--path.sysfs=/host/sys", "--path.rootfs=/rootfs", "--collector.textfile.directory=/textfile"}
-	exporter["volumes"] = []string{"/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro,rslave", "/var/lib/webscan-v1/textfile:/textfile:ro", "/etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro"}
-	if c.SSLEnabled() {
-		exporter["volumes"] = append(common.SS(exporter["volumes"]), "/etc/webscan-v1/pki:/etc/webscan-v1/pki:ro")
-	}
-	services["vector"], services["exporter"] = vector, exporter
 	probe := common.S(common.M(c.Raw["health"])["probe_directory"])
-	for _, s := range []common.Map{agent, vector, exporter} {
-		s["platform"] = "linux/amd64"
-		packageMounts(s, map[string]string{"/etc/webscan-v1": "./config", "/var/lib/webscan-v1": "./data", "/var/log/webscan-v1": "./logs", "/var/lib/webscan-vector-v1": "./vector-data", probe: "./probe"})
-	}
+	agent["platform"] = "linux/amd64"
+	packageMounts(agent, map[string]string{"/etc/webscan-v1": "./config", "/var/lib/webscan-v1": "./data", "/var/log/webscan-v1": "./logs", probe: "./probe"})
 	if err := write(id+"/services.yaml", YAML(compose)); err != nil {
 		return err
 	}

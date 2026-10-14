@@ -166,7 +166,7 @@ func (d *Deploy) ReloadRules(ctx context.Context) error {
 		if string(common.JSON(monitor)) != string(common.JSON(policy.Monitor)) {
 			return errors.New("node_nonrule_monitor_configuration_mismatch")
 		}
-		container, e := r.Run(ctx, "docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.State.Pid}}' webscan-agent-go")
+		container, e := d.nodeProcessIdentity(ctx, r, n)
 		if e != nil {
 			return e
 		}
@@ -187,11 +187,16 @@ func (d *Deploy) ReloadRules(ctx context.Context) error {
 		}
 		nodeState := common.M(common.M(d.State["nodes"])[common.S(u.Node["id"])])
 		image := common.S(nodeState["go_image"])
-		if image == "" {
-			e = errors.New("node_agent_image_missing")
-			break
+		if tool := common.S(common.M(u.Runtime["scanner_tools"])["yara"]); tool != "" {
+			_, e = u.Remote.Run(ctx, Q(tool)+" -w "+Q(stage)+" /dev/null")
+		} else {
+			if image == "" {
+				e = errors.New("node_agent_image_missing")
+				break
+			}
+			_, e = u.Remote.Run(ctx, "docker run --rm --network none --read-only -v /etc/webscan-v1:/etc/webscan-v1:ro --entrypoint yara "+Q(image)+" -w "+Q(stage)+" /dev/null")
 		}
-		_, e = u.Remote.Run(ctx, "docker run --rm --network none --read-only -v /etc/webscan-v1:/etc/webscan-v1:ro --entrypoint yara "+Q(image)+" -w "+Q(stage)+" /dev/null")
+
 		u.Remote.Run(context.WithoutCancel(ctx), "rm -f -- "+Q(stage))
 		if e != nil {
 			e = errors.New("candidate_yara_invalid_not_replaced")
@@ -259,7 +264,7 @@ func (d *Deploy) waitRules(ctx context.Context, u *ruleUpdate, version string) e
 			return e
 		}
 		s := common.M(v)
-		container, e := u.Remote.Run(ctx, "docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.State.Pid}}' webscan-agent-go")
+		container, e := d.nodeProcessIdentity(ctx, u.Remote, u.Node)
 		if e != nil {
 			return e
 		}
@@ -286,3 +291,14 @@ func (d *Deploy) waitRules(ctx context.Context, u *ruleUpdate, version string) e
 }
 
 var _ = filepath.Join
+
+func OnlyRuleChanges(previous, current common.Map) bool {
+	return string(common.JSON(previous)) != string(common.JSON(current)) && string(common.JSON(withoutRules(previous))) == string(common.JSON(withoutRules(current)))
+}
+
+func (d *Deploy) nodeProcessIdentity(ctx context.Context, r *Remote, n common.Map) ([]byte, error) {
+	if nodeMode(n) == "native" {
+		return r.Run(ctx, "systemctl is-active --quiet webscan-agent-native && systemctl show webscan-agent-native -p MainPID -p ExecMainStartTimestampMonotonic")
+	}
+	return r.Run(ctx, "docker inspect --format '{{.Id}} {{.State.StartedAt}} {{.State.Pid}}' webscan-agent-go")
+}

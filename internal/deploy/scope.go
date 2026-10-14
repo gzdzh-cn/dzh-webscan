@@ -54,6 +54,7 @@ func (d *Deploy) useInstalledMain() error {
 	common.M(raw["images"])["agent"] = common.M(d.C.Raw["images"])["agent"]
 	delete(common.M(raw["images"]), "deployer")
 	raw["feishu"] = common.Clone(common.M(runtime["feishu"]))
+	raw["email"] = common.Clone(common.M(runtime["email"]))
 	// Preserve the actual API identity and old node tokens across the operation.
 	d.Secrets["alert_token"] = runtime["alert_token"]
 	for id, v := range common.M(runtime["nodes"]) {
@@ -92,7 +93,11 @@ func (d *Deploy) useInstalledMain() error {
 func (d *Deploy) showScope(ctx context.Context) {
 	if d.O.AddNode {
 		progress.Info(ctx, "操作范围：仅安装或更新 "+progress.Node(d.C.Selected(d.O.Node)[0])+"；沿用主服务器当前镜像和配置，忽略 YAML 中待应用的主服务器修改")
-		progress.Info(ctx, "主服务器变更：仅此节点登记和采集目标；receiver、Prometheus 各最多重建一次；Grafana、Loki、Alertmanager 与其他节点保持运行")
+		if Native(d.C) {
+			progress.Info(ctx, "主服务器变更：仅此节点登记和 Go 采集目标；receiver 最多重建一次，其他节点保持运行")
+		} else {
+			progress.Info(ctx, "主服务器变更：仅此节点登记和采集目标；receiver、Prometheus 各最多重建一次；Grafana、Loki、Alertmanager 与其他节点保持运行")
+		}
 		progress.Info(ctx, "主服务器沿用镜像："+common.S(common.M(d.State["image_lock"])["central"]))
 		return
 	}

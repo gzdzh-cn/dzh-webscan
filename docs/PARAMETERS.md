@@ -90,7 +90,7 @@ go run ./cmd/compose --config webscan.compose.yaml --output compose-deploy-new
 
 `central.install_memory_reserve_mib`：默认 128，允许 64～4096，单位 MiB。只增加首次安装所需的空闲物理内存，不修改容器限额或 Go 内存目标；旧 YAML 未填写时仍按 128 检查。
 
-要求内存 = `central.new_components_memory_budget_mib` + 新建 Grafana 192 + 新建 Loki 256 + 开启网站后台时的 `extra_memory_mib` + 安装预留。复用已有 Grafana/Loki 时不加对应预算。可用内存取 Linux 的 `MemAvailable`，不计 Swap。终端显示各项、差额和配置字段；不足时停止，不启动监控容器。预检阶段失败可修改后重新安装，无需 `--resume`。
+legacy 模式要求内存 = `central.new_components_memory_budget_mib` + 新建 Grafana 192 + 新建 Loki 256 + 开启网站后台时的 `extra_memory_mib` + 安装预留。复用已有 Grafana/Loki 时不加对应预算。可用内存取 Linux 的 `MemAvailable`，不计 Swap。终端显示各项、差额和配置字段；不足时停止，不启动监控容器。预检阶段失败可修改后重新安装，无需 `--resume`。
 
 ## 网站可用性后台参数
 
@@ -103,3 +103,66 @@ go run ./cmd/compose --config webscan.compose.yaml --output compose-deploy-new
 `ssl.enabled` 为布尔值，省略默认 true。true 时节点事件、指标和网站后台使用 HTTPS；false 时统一使用 HTTP，保留原端口和令牌，不生成证书。`central.public_url` 的有效协议自动由此开关决定，旧 `metrics.tls_enabled` 由总开关覆盖。飞书、仓库及网站探测自身的 HTTPS 不受影响。SH 交互安装和重装都会引导选择协议（已有安装记录也询问；中断恢复沿用原协议）；菜单 5 或 `--set-ssl on/off` 会保存设置并自动完整安装或升级主服务器和全部启用节点，同时应用 YAML 其他修改和目标镜像，无需另行执行 `--upgrade`。存在未完成部署或卸载时拒绝修改；单节点或仅主服务器操作不能切换协议。Compose 生成工具同样支持此项，HTTP 包不包含证书。面板宝塔反代示例见 [后台宝塔反代说明](WEBSITE.md#宝塔域名反向代理)。
 
 网站配置备份沿用 `central.backup_dir`，其下 `website-config/` 保存 JSON 配置文件，`website-migrations/` 保存首次升级 v2.0.29 前的一致性 SQLite 备份。手动配置备份不自动过期。证书提醒阈值固定为不超过 7 天，展示按天向上取整；详见 [后台指南](WEBSITE.md#证书有效期与网址操作)。
+
+## Go 一体化采集与告警
+
+`central.monitoring.mode`：新示例为 `native`；旧 YAML 未填写时为 `legacy`，兼容运行原组件并影子采集。已有旧系统不能直接修改此值绕过[历史迁移](MIGRATION.md)。
+
+| 参数 | 默认值与含义 |
+|---|---|
+| `central.monitoring.raw_hours` | 48；原始指标保留小时数 |
+| `central.monitoring.history_days` | 15；5 分钟均值／峰值及健康历史保留天数 |
+| `central.monitoring.memory_mib` | 384；native 中心容器内存上限，包含网站后台 |
+| `central.monitoring.go_memory_mib` | 256；Go 内存回收目标，需要小于容器上限 |
+| `health.metrics_scrape_seconds` | 30；Go 指标采集周期，最多并发 4 |
+| `health.alerts.cpu_enabled` / `memory_enabled` | false；按需开启资源告警 |
+| `health.alerts.cpu_warning_percent` / `cpu_recovery_percent` | 85 / 80；CPU 5 分钟均值超过阈值、恢复低于阈值 |
+| `health.alerts.memory_warning_percent` / `memory_recovery_percent` | 90 / 85 |
+| `health.alerts.cpu_duration_seconds` / `memory_duration_seconds` | 300；异常持续时间；恢复需连续两次有效采样 |
+| `health.alertmanager.group_wait_seconds` | 30；native 保留兼容字段用于 Go 首次分组等待 |
+| `health.alertmanager.group_interval_seconds` | 300；同节点及类别下一批通知间隔 |
+| `health.alertmanager.repeat_interval_hours` | 4；持续异常重复提醒间隔 |
+
+native 首次安装内存要求 = 中心容器预算 + exporter 32 MiB + 宿主机管理服务 128 MiB + 安装预留；不再加 Grafana、Loki 或第二份网站后台预算。默认合计 672 MiB，仍以实际 MemAvailable 检查。
+
+`central.managed_runtime_dir`、`managed_compose_name` 是 Compose 接管工具写入的内部布局参数，普通 YAML 保持为空，不通过网页修改。可视化配置参数及生效范围见[统一后台](CONSOLE.md#修改-yaml-参数)。
+
+## 邮箱通知（v2.0.34）
+
+顶层 `email` 默认关闭，SH、Compose 和可视化设置共用。[完整示例和教程](EMAIL.md)。
+
+| 参数 | 默认／约束 |
+|---|---|
+| enabled | false；关闭保留并暂停队列 |
+| smtp_host / smtp_port / tls_mode | 主机不带协议和端口；465 / tls；支持 starttls |
+| username / password / from_address | 开启时必填；密码只用于 SMTP，后台留空保持 |
+| from_name / recipients | 网站监控；去重后 1～20 个有效地址 |
+| timeout_seconds / max_per_minute | 15（1～60 秒）/ 30（1～600 次尝试） |
+| retry.initial_delay_seconds / max_delay_seconds | 30 / 3600；指数退避，最大不超过 86400 秒 |
+| notifications | 六类开关，与飞书独立；旧配置初始继承飞书 |
+
+SMTP TLS 校验始终开启，不受 `ssl.enabled` 影响；仅需主服务器出站连接。邮件历史与任务纳入事件数据库一致性备份。
+
+## 子服务器部署方式与投递（v2.0.35）
+
+```yaml
+node_defaults:
+  deployment:
+    mode: native
+nodes:
+  - id: node-example
+    deployment:
+      mode: docker
+```
+
+`native` 为 systemd 单服务，`docker` 为 Agent 单容器。节点显式字段优先于公共默认；旧配置未填写且已有部署记录时沿用原方式，否则 native。中心 `monitoring.mode` 不决定节点方式。
+
+`resources.agent_memory_mib`、`cpus`、`go_memory_mib`、`gomaxprocs` 同时用于 systemd 和容器；native 在启动后核对 MemoryMax、CPUQuota 和文件句柄，未生效则验收失败。
+
+`transport.local_event_queue_max_mib` 继续限制事件库队列，`request_timeout_seconds` 控制请求超时，中心请求上限继续约束每批数据。`vector_buffer_mib` 仅兼容旧 YAML，不再控制 Go 投递器。扫描工具随程序发布，ClamAV 启用需已有 `/run/clamav/clamd.ctl` 扫描服务。指标端口与来源 IP、双向 TLS 和统一 SSL 开关保持原规则。
+
+## v2.0.36 历史管理
+
+`retention.security_events_days`、`retention.website_incidents_days`、`retention.server_alerts_days` 新增独立保留期限；与 `sqlite_events_days`、`delivery_records_days` 一样要求 1～3650 天整数。缺失安全期限沿用事件期限，缺失服务器期限沿用原聚合期限，网站缺省 30 天。所有旧值保留，不进行数据重新导入。[清理行为、保护及导出](RETENTION.md)。
+
+文件事件的页面自动刷新间隔是浏览器偏好，不属于 YAML；后台默认不开启，查询后手动开启，范围 10～3600 秒。

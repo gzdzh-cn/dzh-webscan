@@ -11,9 +11,10 @@ command -v npm >/dev/null || { echo '前端构建需要本地 Node.js 和 npm' >
 [[ -d internal/website/ui/assets ]] && grep -q '/assets/' internal/website/ui/index.html || { echo '前端产物缺失，拒绝打包占位页面' >&2; exit 1; }
 go test ./...
 cp config/bootstrap-ca.crt "dist/$TASK_VERSION/bootstrap-ca.crt"
-printf "*\n!webscan\n!bootstrap-ca.crt\n" > "dist/$TASK_VERSION/.dockerignore"
+printf "*\n!webscan\n!bootstrap-ca.crt\n!native-tools.sh\n" > "dist/$TASK_VERSION/.dockerignore"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X webscan/internal/deploy.Release=$TASK_VERSION" -o "dist/$TASK_VERSION/webscan" ./cmd/webscan
 bash scripts/package-bootstrap.sh "$TASK_VERSION"
+cp scripts/native-tools.sh "dist/$TASK_VERSION/native-tools.sh"
 cp install.sh "dist/$TASK_VERSION/install.sh"
 chmod 700 "dist/$TASK_VERSION/install.sh"
 printf 'Built %s\n' "$TASK_VERSION"

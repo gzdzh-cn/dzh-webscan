@@ -30,19 +30,9 @@ func (s *Store) maintenance(ctx context.Context) {
 	}
 }
 func (s *Store) Maintain(ctx context.Context) error {
-	c := s.Config
-	r := common.M(c["retention"])
+	c := s.Snapshot()
 	s.mu.Lock()
 	_, e := s.DB.ExecContext(ctx, "INSERT INTO kv VALUES('heartbeat',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", strconv.FormatFloat(common.Now(), 'f', 6, 64))
-	if e == nil {
-		_, e = s.DB.ExecContext(ctx, "DELETE FROM delivery_records WHERE time<?", common.Now()-common.F(r["delivery_records_days"])*86400)
-	}
-	if e == nil {
-		_, e = s.DB.ExecContext(ctx, "DELETE FROM events WHERE received<? AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.node=events.node AND tasks.event_id=events.id AND done IS NULL)", common.Now()-common.F(r["sqlite_events_days"])*86400)
-	}
-	if e == nil {
-		_, e = s.DB.ExecContext(ctx, "DELETE FROM tasks WHERE done IS NOT NULL AND done<?", common.Now()-common.F(r["delivery_records_days"])*86400)
-	}
 	s.mu.Unlock()
 	if e != nil {
 		return e
@@ -68,6 +58,16 @@ func (s *Store) Maintain(ctx context.Context) error {
 		}
 		if purpose == "backup" {
 			e = s.Backup()
+			status := "complete"
+			reason := ""
+			if e != nil {
+				status = "failed"
+				reason = "自动备份失败，请检查磁盘和目录权限"
+			}
+			_, recordErr := s.DB.ExecContext(ctx, "INSERT INTO kv VALUES('last_backup_result',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(common.JSON(common.Map{"status": status, "time": time.Now().Unix(), "reason": reason})))
+			if e == nil {
+				e = recordErr
+			}
 		} else {
 			e = s.Notice(ctx, key, "通知链路每日测试（不是业务文件变化）\n发生时间："+noticeTime(common.Stamp()))
 		}
@@ -131,8 +131,8 @@ func ArchiveDirectory(source, target, root string) error {
 func (s *Store) Backup() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	settings := common.M(s.Config["backup"])
-	root := common.S(s.Config["backup_dir"])
+	settings := common.M(s.Snapshot()["backup"])
+	root := common.S(s.Snapshot()["backup_dir"])
 	directory := filepath.Join(root, time.Now().UTC().Format("20060102-150405"))
 	if e := os.MkdirAll(directory, 0700); e != nil {
 		return e
@@ -142,11 +142,16 @@ func (s *Store) Backup() error {
 			return e
 		}
 	}
+	if s.Telemetry != nil && common.B(settings["include_sqlite"]) {
+		if e := persist.BackupDB(s.Telemetry.DB, filepath.Join(directory, "metrics.sqlite3")); e != nil {
+			return e
+		}
+	}
 	if common.B(settings["include_runtime_config"]) {
 		if e := common.AtomicJSON(filepath.Join(directory, "runtime.json"), s.backupRuntime()); e != nil {
 			return e
 		}
-		if source := common.S(s.Config["runtime_dir"]); source != "" {
+		if source := common.S(s.Snapshot()["runtime_dir"]); source != "" {
 			if e := ArchiveDirectory(source, filepath.Join(directory, "runtime-files.tar.gz"), "webscan-v1"); e != nil {
 				return e
 			}
@@ -181,11 +186,12 @@ func (s *Store) Backup() error {
 			}
 		}
 	}
-	return nil
+	_, e = s.DB.Exec("INSERT INTO kv VALUES('last_backup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", directory)
+	return e
 }
 
 func (s *Store) backupRuntime() common.Map {
-	config := common.Clone(s.Config)
+	config := common.Clone(s.Snapshot())
 	if a, e := website.ReadAccount(s.DB); e == nil {
 		wm := common.M(config["website_monitor"])
 		wm["admin_username"] = a.Username

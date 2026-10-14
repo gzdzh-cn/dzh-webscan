@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, watch, ref } from 'vue'
+import { useRoute,useRouter } from 'vue-router'
+import RecordDelete from './RecordDelete.vue'
 import { api, beijingTime, type Page } from './api'
-interface Backup { id: string; created: number; source: string; count: number; restored: number; result: string }
+interface Backup { can_delete:boolean;delete_reason:string; id: string; created: number; source: string; count: number; restored: number; result: string }
 interface Preview { added: number; updated: number; unchanged: number; unknown_nodes: string[]; token: string }
-const items = ref<Backup[]>([]), total = ref(0), page = ref(1), busy = ref(false), error = ref(''), feedback = ref('')
+const checked=ref<Backup[]>([]),deletion=ref<InstanceType<typeof RecordDelete>>()
+const route=useRoute(),router=useRouter();let generation=0,disposed=false
+const items = ref<Backup[]>([]), total = ref(0), page = ref(Math.max(1,Number(route.query.website_page)||1)), busy = ref(false), error = ref(''), feedback = ref('')
 const file = ref<HTMLInputElement | null>(null), selected = ref<Backup | null>(null), preview = ref<Preview | null>(null)
 function fail(e: unknown) { error.value = e instanceof Error ? e.message : '备份操作失败，请重试' }
-async function refresh() { try { const data = await api<Page<Backup>>('/api/backups?page=' + page.value); items.value = data.items; total.value = data.total } catch (e) { fail(e) } }
+async function refresh() {const current=++generation;try{const data=await api<Page<Backup>>('/api/backups?page='+page.value);if(current===generation&&!disposed){items.value=data.items;total.value=data.total;checked.value=[];if(page.value>Math.max(1,Math.ceil(data.total/20))){page.value=Math.max(1,Math.ceil(data.total/20));void refresh()};error.value=''}}catch(e){if(current===generation&&!disposed)fail(e)}}
+function paginate(){void router.replace({path:'/backups',query:{...route.query,website_page:String(page.value)}})}
+watch(()=>route.fullPath,()=>{page.value=Math.max(1,Number(route.query.website_page)||1);void refresh()})
+onUnmounted(()=>{disposed=true;generation++})
 async function create() { busy.value = true; error.value = ''; try { await api('/api/backups', 'POST'); page.value = 1; feedback.value = '全部网站配置已备份到服务器本地'; await refresh() } catch (e) { fail(e) } finally { busy.value = false } }
 async function importFile(event: Event) {
  const input = event.target as HTMLInputElement, chosen = input.files?.[0]
@@ -29,7 +36,7 @@ async function exportFile(b: Backup) {
 }
 async function showPreview(b: Backup) {
  error.value = ''; busy.value = true
- try { const result = await api<Preview>('/api/backups/' + b.id + '/preview', 'POST'); preview.value = result; selected.value = b } catch (e) { fail(e) } finally { busy.value = false }
+ try { const result = await api<Preview>('/api/backups/' + b.id + '/preview', 'POST'); preview.value = result; selected.value = b;b.can_delete=false;b.delete_reason='恢复预览在 10 分钟有效期内' } catch (e) { fail(e) } finally { busy.value = false }
 }
 async function restore() {
  if (!selected.value || !preview.value) return
@@ -46,15 +53,15 @@ onMounted(refresh)
   <el-alert v-if="feedback" :title="feedback" type="success" closable @close="feedback = ''" />
   <el-card shadow="never">
    <div class="card-heading"><div><h3>网站配置备份</h3><p class="small muted">保存全部网站配置（含暂停网站）。导入仅加入历史；恢复按网址合并，保留其他网站。</p></div><div class="backup-actions"><el-button type="primary" :loading="busy" @click="create">一键备份</el-button><el-button :disabled="busy" @click="file?.click()">导入 JSON</el-button></div></div>
-   <input ref="file" type="file" accept=".json,application/json" hidden @change="importFile" />
-   <el-table :data="items" empty-text="暂无备份，点击一键备份保存网站配置">
-    <el-table-column label="备份时间（北京时间）" min-width="190"><template #default="{ row }">{{ beijingTime(row.created) }}</template></el-table-column>
+   <RecordDelete ref="deletion" :records="checked" label="网站配置备份" endpoint="/api/backups/delete" @done="refresh"/><input ref="file" type="file" accept=".json,application/json" hidden @change="importFile" />
+   <el-table :data="items" @selection-change="checked=$event" empty-text="暂无备份，点击一键备份保存网站配置">
+    <el-table-column type="selection" :selectable="(row:Backup)=>row.can_delete" width="48"/><el-table-column label="备份时间（北京时间）" min-width="190"><template #default="{ row }">{{ beijingTime(row.created) }}</template></el-table-column>
     <el-table-column label="来源" min-width="145"><template #default="{ row }">{{ source(row.source) }}</template></el-table-column>
     <el-table-column prop="count" label="网站数量" width="100" />
     <el-table-column label="最近恢复" min-width="240"><template #default="{ row }"><div>{{ row.restored ? beijingTime(row.restored) : '尚未恢复' }}</div><span class="small muted">{{ row.result }}</span></template></el-table-column>
-    <el-table-column label="操作" width="170"><template #default="{ row }"><el-button link type="primary" @click="exportFile(row)">导出 JSON</el-button><el-button link type="primary" :disabled="busy" @click="showPreview(row)">恢复</el-button></template></el-table-column>
+    <el-table-column label="操作" min-width="240"><template #default="{ row }"><el-button link type="primary" @click="exportFile(row)">导出 JSON</el-button><el-button link type="primary" :disabled="busy" @click="showPreview(row)">恢复</el-button><el-button link type="danger" :disabled="!row.can_delete" :title="row.delete_reason" @click="deletion?.open([row])">删除</el-button><small class="muted">{{row.delete_reason}}</small></template></el-table-column>
    </el-table>
-   <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" @change="refresh" />
+   <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" @change="paginate" />
   </el-card>
   <el-dialog :model-value="!!selected" title="合并恢复预览" width="min(540px, 94vw)" :close-on-click-modal="false" @close="selected = null">
    <el-alert v-if="error" :title="error" type="error" :closable="false" />

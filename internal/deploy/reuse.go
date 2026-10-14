@@ -12,6 +12,9 @@ import (
 // Existing deployments use the legacy container names and bind provisioning.
 // Foreign services are only touched when explicitly selected for reuse.
 func (d *Deploy) detectReuse(ctx context.Context) error {
+	if Native(d.C) {
+		return nil
+	}
 	reuse := common.M(common.M(d.C.Raw["central"])["reuse_existing"])
 	var networks map[string]bool
 	for _, role := range []string{"grafana", "loki"} {

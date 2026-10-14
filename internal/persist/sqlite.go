@@ -2,6 +2,8 @@ package persist
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	gfSQLite "github.com/gogf/gf/contrib/drivers/sqlite/v2"
 	"github.com/gogf/gf/v2/database/gdb"
 	"net/url"
@@ -30,14 +32,44 @@ func OpenDB(path string) (*sql.DB, error) {
 	return d, nil
 }
 func BackupDB(d *sql.DB, path string) error {
+	if _, e := os.Lstat(path); !os.IsNotExist(e) {
+		if e != nil {
+			return e
+		}
+		return fmt.Errorf("backup target already exists")
+	}
 	if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 		return e
 	}
-	_, e := d.Exec("VACUUM INTO ?", path)
+	f, e := os.CreateTemp(filepath.Dir(path), ".sqlite-backup-*")
 	if e != nil {
 		return e
 	}
-	return os.Chmod(path, 0600)
+	temp := f.Name()
+	f.Close()
+	os.Remove(temp)
+	defer os.Remove(temp)
+	if _, e = d.Exec("VACUUM INTO ?", temp); e != nil {
+		var code interface{ Code() int }
+		if errors.As(e, &code) && code.Code()&255 == 13 {
+			return errors.New("consistent_backup_disk_full")
+		}
+		return errors.New("consistent_database_backup_failed")
+	}
+	if e = os.Chmod(temp, 0600); e != nil {
+		return e
+	}
+	f, e = os.Open(temp)
+	if e != nil {
+		return e
+	}
+	e = f.Sync()
+	f.Close()
+	if e != nil {
+		return e
+	}
+	// Link atomically refuses an existing or concurrently created destination.
+	return os.Link(temp, path)
 }
 
 // OpenReadOnly is for deployment account discovery; no PRAGMA or permissions

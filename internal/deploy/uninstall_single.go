@@ -32,6 +32,14 @@ func withoutNode(ids []string, node string) []string {
 func removeNodeRegistration(runtime common.Map, prom common.Map, node string) {
 	delete(common.M(runtime["nodes"]), node)
 	runtime["active_nodes"] = withoutNode(common.SS(runtime["active_nodes"]), node)
+	monitor := common.M(runtime["monitoring"])
+	list := []any{}
+	for _, v := range common.A(monitor["nodes"]) {
+		if common.S(common.M(v)["id"]) != node {
+			list = append(list, v)
+		}
+	}
+	monitor["nodes"] = list
 	jobs := []any{}
 	for _, v := range common.A(prom["scrape_configs"]) {
 		if common.S(common.M(v)["job_name"]) != "webscan-node-"+node {
@@ -57,7 +65,7 @@ func (d *Deploy) singleUninstallPreflight(ctx context.Context) error {
 	if err = yaml.Unmarshal(b, &compose); err != nil {
 		return err
 	}
-	for _, service := range []string{"receiver", "prometheus"} {
+	for _, service := range d.registrationServices() {
 		image := lockedServiceImage(common.M(common.M(compose["services"])[service]))
 		if image == "" {
 			return errors.New("uninstall_main_service_missing")
@@ -96,19 +104,25 @@ func (d *Deploy) prepareSingleUninstall(ctx context.Context) (common.Map, error)
 		if err != nil {
 			return nil, err
 		}
-		b, err := os.ReadFile(filepath.Join(root, "prometheus.yml"))
-		if err != nil {
-			return nil, err
-		}
-		var prom common.Map
-		if err = yaml.Unmarshal(b, &prom); err != nil {
-			return nil, err
+		prom := common.Map{}
+		if !Native(d.C) {
+			b, err := os.ReadFile(filepath.Join(root, "prometheus.yml"))
+			if err != nil {
+				return nil, err
+			}
+			if err = yaml.Unmarshal(b, &prom); err != nil {
+				return nil, err
+			}
 		}
 		j, err := NewJournal(filepath.Join(backup, "central"))
 		if err != nil {
 			return nil, err
 		}
-		for _, name := range []string{"runtime.json", "prometheus.yml"} {
+		names := []string{"runtime.json"}
+		if !Native(d.C) {
+			names = append(names, "prometheus.yml")
+		}
+		for _, name := range names {
 			if err = j.Remember(filepath.Join(root, name)); err != nil {
 				return nil, err
 			}
@@ -121,7 +135,7 @@ func (d *Deploy) prepareSingleUninstall(ctx context.Context) (common.Map, error)
 			return nil, err
 		}
 		s["central_present"], s["port"] = true, runtime["port"]
-		for _, service := range []string{"receiver", "prometheus"} {
+		for _, service := range d.registrationServices() {
 			identity, err := d.serviceIdentity(ctx, service)
 			if err != nil {
 				return nil, err
@@ -169,7 +183,7 @@ func (d *Deploy) uninstallSingle(ctx context.Context) error {
 			if e != nil {
 				return e
 			}
-			_, e = r.Exec(ctx, "bash -se", strings.NewReader(nodeUninstallScript(filepath.Join(StateRoot, "maintenance", common.S(s["id"])))))
+			_, e = r.Exec(ctx, "bash -se", strings.NewReader(nodeUninstallScript(filepath.Join(StateRoot, "maintenance", common.S(s["id"])), nodeMode(n))))
 			return e
 		}); err != nil {
 			return err
@@ -206,7 +220,11 @@ func (d *Deploy) finishSingleUninstall(ctx context.Context, s common.Map) error 
 	if err != nil {
 		return err
 	}
-	for _, pair := range [][2]string{{"runtime.json", "target-runtime.json"}, {"prometheus.yml", "target-prometheus.yml"}} {
+	pairs := [][2]string{{"runtime.json", "target-runtime.json"}}
+	if !Native(d.C) {
+		pairs = append(pairs, [2]string{"prometheus.yml", "target-prometheus.yml"})
+	}
+	for _, pair := range pairs {
 		path := filepath.Join(root, pair[0])
 		desired, err := os.ReadFile(filepath.Join(backup, pair[1]))
 		if err != nil {
@@ -231,7 +249,7 @@ func (d *Deploy) finishSingleUninstall(ctx context.Context, s common.Map) error 
 			return err
 		}
 	}
-	for _, service := range []string{"receiver", "prometheus"} {
+	for _, service := range d.registrationServices() {
 		if common.B(s[service+"_restarted"]) {
 			continue
 		}
@@ -250,6 +268,9 @@ func (d *Deploy) finishSingleUninstall(ctx context.Context, s common.Map) error 
 	for time.Now().Before(deadline) {
 		_, v, e := common.Request(ctx, d.HTTP, "GET", "http://127.0.0.1:"+strconv.Itoa(common.I(s["port"]))+"/ready", nil, nil)
 		if e == nil && common.B(common.M(v)["ready"]) {
+			if Native(d.C) {
+				return nil
+			}
 			req, e := http.NewRequestWithContext(ctx, "GET", "http://127.0.0.1:19190/-/ready", nil)
 			if e != nil {
 				return e

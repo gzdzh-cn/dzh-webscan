@@ -15,6 +15,7 @@ import (
 	"strings"
 	"webscan/internal/assets"
 	"webscan/internal/common"
+	"webscan/internal/notify"
 )
 
 type Config struct {
@@ -83,7 +84,39 @@ func Load(path string) (_ *Config, err error) {
 	if _, ok := common.M(m["registry"])["mirrors"]; !ok {
 		common.M(m["registry"])["mirrors"] = []any{}
 	}
+	if _, exists := m["email"]; !exists {
+		m["email"] = common.Map{}
+	}
+	if _, ok := common.M(m["email"])["notifications"]; !ok {
+		common.M(m["email"])["notifications"] = common.Clone(common.M(common.M(m["feishu"])["notifications"]))
+	}
+	modeExplicit := common.S(common.M(common.M(m["node_defaults"])["deployment"])["mode"]) != ""
+	// Resolve missing fields before defaults are merged to retain old installation policy.
+	retention := common.M(m["retention"])
+	if _, ok := retention["security_events_days"]; !ok {
+		days := retention["sqlite_events_days"]
+		if days == nil {
+			days = 30
+		}
+		retention["security_events_days"] = days
+	}
+	if _, ok := retention["server_alerts_days"]; !ok {
+		days := common.M(common.M(m["central"])["monitoring"])["history_days"]
+		if days == nil {
+			days = 15
+		}
+		retention["server_alerts_days"] = days
+	}
 	m = common.Merge(schema, m)
+	for _, key := range []string{"sqlite_events_days", "security_events_days", "website_incidents_days", "server_alerts_days", "delivery_records_days"} {
+		value := common.F(common.M(m["retention"])[key])
+		if value < 1 || value > 3650 || value != float64(int(value)) {
+			return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: "retention." + key, Detail: "保留期限须为 1～3650 天整数"}
+		}
+	}
+	if e = notify.Validate(common.M(m["email"])); e != nil {
+		return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: "email", Detail: e.Error()}
+	}
 	c := &Config{Raw: m, Path: path}
 	reg := common.M(m["registry"])
 	field = "registry.mirrors"
@@ -113,6 +146,25 @@ func Load(path string) (_ *Config, err error) {
 		}
 	}
 	central := common.M(m["central"])
+	if p := common.S(central["managed_runtime_dir"]); p != "" && (!filepath.IsAbs(p) || filepath.Clean(p) == "/") {
+		return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: "central.managed_runtime_dir", Detail: "接管目录必须为绝对路径且不能是根目录"}
+	}
+	monitoring := common.M(central["monitoring"])
+	field = "central.monitoring"
+	if mode := common.S(monitoring["mode"]); mode != "native" && mode != "legacy" {
+		return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: field + ".mode", Detail: "只能为 native 或 legacy"}
+	}
+	if common.I(monitoring["raw_hours"]) < 1 || common.I(monitoring["raw_hours"]) > 168 || common.I(monitoring["history_days"]) < 1 || common.I(monitoring["history_days"]) > 90 || common.I(monitoring["memory_mib"]) < 256 || common.I(monitoring["memory_mib"]) > 8192 || common.I(monitoring["go_memory_mib"]) < 128 || common.I(monitoring["go_memory_mib"]) > common.I(monitoring["memory_mib"])-64 {
+		return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: field, Detail: "原始数据保留 1～168 小时，聚合历史 1～90 天；容器至少 256 MiB，Go 内存至少 128 MiB 且预留至少 64 MiB"}
+	}
+	for _, metric := range []string{"cpu", "memory"} {
+		a := common.M(common.M(m["health"])["alerts"])
+		high, low, duration := common.I(a[metric+"_warning_percent"]), common.I(a[metric+"_recovery_percent"]), common.I(a[metric+"_duration_seconds"])
+		if high < 1 || high > 100 || low < 0 || low >= high || duration < 30 || duration > 86400 {
+			return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: "health.alerts." + metric, Detail: "告警阈值为 1～100，恢复值必须更低，持续时间为 30～86400 秒"}
+		}
+	}
+
 	field = "central.install_memory_reserve_mib"
 	reserve := common.I(central["install_memory_reserve_mib"])
 	if reserve < 64 || reserve > 4096 {
@@ -228,6 +280,11 @@ func Load(path string) (_ *Config, err error) {
 		nodeField := fmt.Sprintf("nodes[%d]", index)
 		field = nodeField + ".id"
 		n := common.Merge(defaults, common.M(value))
+		n["_deployment_explicit"] = modeExplicit || common.S(common.M(common.M(value)["deployment"])["mode"]) != ""
+		mode := common.S(common.M(n["deployment"])["mode"])
+		if mode != "native" && mode != "docker" {
+			return nil, &Diagnostic{Err: errors.New("invalid_parameter_value"), Field: nodeField + ".deployment.mode", Detail: "只能为 native 或 docker"}
+		}
 		id := common.S(n["id"])
 		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`).MatchString(id) || seen[id] {
 			return nil, errors.New("invalid_or_duplicate_node_id")
@@ -418,6 +475,9 @@ func (c *Config) Image(role string) string {
 	return strings.TrimRight(common.S(common.M(c.Raw["registry"])["prefix"]), "/") + "/" + common.S(common.M(c.Raw["images"])[role])
 }
 func (c *Config) CentralRoot() string {
+	if p := common.S(common.M(c.Raw["central"])["managed_runtime_dir"]); p != "" {
+		return filepath.Clean(p)
+	}
 	return filepath.Join(common.S(common.M(c.Raw["central"])["install_dir"]), "webscan-v1")
 }
 func (c *Config) Selected(node string) []common.Map {

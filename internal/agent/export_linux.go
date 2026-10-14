@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,13 +18,33 @@ import (
 )
 
 func (a *Agent) export(ctx context.Context) {
+	delay := 2 * time.Second
 	for ctx.Err() == nil {
-		if e := a.Export(ctx); e != nil {
+		err := a.Export(ctx)
+		if a.direct() {
+			reason := ""
+			if err != nil {
+				reason = common.SecretFree(err)
+			}
+			a.writeMu.Lock()
+			_, stateErr := a.DB.ExecContext(ctx, "INSERT OR REPLACE INTO delivery_status VALUES(1,?,?)", reason, common.Now())
+			a.writeMu.Unlock()
+			if err == nil {
+				err = stateErr
+			}
+		}
+		wait := delay
+		if e := err; e != nil {
 			a.counter("transport_errors_total", 1, false)
 			fmt.Println("export_error=" + common.SecretFree(e))
+			a.counter("transport_last_failure_seconds", common.Now(), true)
+			delay = min(delay*2, 60*time.Second)
+		} else {
+			delay = 2 * time.Second
+			wait = delay
 		}
 		a.counter("export_heartbeat_seconds", common.Now(), true)
-		if !common.Sleep(ctx, 2*time.Second) {
+		if !common.Sleep(ctx, min(wait+time.Duration(rand.Int64N(int64(wait/5))), 60*time.Second)) {
 			return
 		}
 	}
@@ -47,6 +68,9 @@ func (a *Agent) logBytes() (int64, error) {
 	return total, nil
 }
 func (a *Agent) Export(ctx context.Context) error {
+	if a.direct() {
+		return a.DirectExport(ctx)
+	}
 	rows, e := a.DB.QueryContext(ctx, "SELECT id,payload FROM events WHERE exported IS NULL AND accepted IS NULL ORDER BY created LIMIT 100")
 	if e != nil {
 		return e
@@ -276,18 +300,38 @@ func (a *Agent) Metrics(ctx context.Context) error {
 		running = 1
 	}
 	fmt.Fprintf(&out, "webscan_inventory_running %d\nwebscan_inventory_files_checked %d\n", running, a.inventoryChecked.Load())
-	u := common.S(a.C["vector_metrics_url"])
-	if u == "" {
-		u = "http://127.0.0.1:19101/metrics"
-	}
-	request, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	raw, e := readText(request, a.HTTP, u, 2*1048576)
-	if e == nil {
-		out.WriteString(VectorMetrics(string(raw)))
-		out.WriteString("webscan_vector_metrics_up 1\n")
+	if a.direct() {
+		var failed int
+		if e := a.DB.QueryRow("SELECT count(*) FROM delivery_failures").Scan(&failed); e != nil {
+			return e
+		}
+		heartbeat := 0.
+		a.DB.QueryRow("SELECT value FROM counters WHERE key='export_heartbeat_seconds'").Scan(&heartbeat)
+		up := 0
+		if common.Now()-heartbeat < 90 {
+			up = 1
+		}
+		fmt.Fprintf(&out, "webscan_transport_up %d\nwebscan_vector_metrics_up %d\nwebscan_transport_rejected_events %d\n", up, up, failed)
+		var lastError string
+		if e := a.DB.QueryRow("SELECT error FROM delivery_status WHERE id=1").Scan(&lastError); e == nil && lastError != "" {
+			fmt.Fprintf(&out, "webscan_transport_error{reason=%q} 1\n", lastError)
+		}
+		out.WriteString(a.hostMetrics())
+		fmt.Fprintf(&out, "webscan_agent_info{version=%q,mode=%q} 1\n", common.S(a.C["release"]), common.S(a.C["deployment_mode"]))
 	} else {
-		out.WriteString("webscan_vector_metrics_up 0\n")
+		u := common.S(a.C["vector_metrics_url"])
+		if u == "" {
+			u = "http://127.0.0.1:19101/metrics"
+		}
+		request, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		raw, e := readText(request, a.HTTP, u, 2*1048576)
+		if e == nil {
+			out.WriteString(VectorMetrics(string(raw)))
+			out.WriteString("webscan_vector_metrics_up 1\n")
+		} else {
+			out.WriteString("webscan_vector_metrics_up 0\n")
+		}
 	}
 	return common.Atomic(common.S(a.C["metrics_file"]), []byte(out.String()), 0644)
 }

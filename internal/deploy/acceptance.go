@@ -92,7 +92,7 @@ func (d *Deploy) WaitHealth(ctx context.Context, n common.Map) error {
 	for time.Now().Before(deadline) {
 		m, e := d.metrics(ctx, n)
 		healthy := e == nil && m["webscan_collector_ready"] == 1 && m["webscan_baseline_completed"] == 1 && m["webscan_coverage_ok"] == 1 && m["webscan_vector_metrics_up"] == 1 && common.Now()-m["webscan_agent_heartbeat_seconds"] < 90 && common.Now()-m["webscan_local_probe_seconds"] < 180 && m["webscan_local_oldest_pending_seconds"] < 300
-		if healthy {
+		if healthy && !Native(d.C) {
 			for _, metric := range []string{"webscan_probe_received_seconds", "webscan_probe_loki_seconds"} {
 				query := metric + `{node_id="` + common.S(n["id"]) + `"}`
 				data, err := d.prom(ctx, "query?"+url.Values{"query": {query}}.Encode())
@@ -117,7 +117,7 @@ func (d *Deploy) WaitHealth(ctx context.Context, n common.Map) error {
 				}
 			}
 		}
-		if healthy {
+		if healthy && !Native(d.C) {
 			data, err := d.prom(ctx, "alerts")
 			if err != nil {
 				healthy = false
@@ -377,6 +377,13 @@ func waitDeliveries(ctx context.Context, db *sql.DB, node, id string) error {
 			if count > 0 {
 				return nil
 			}
+			var stored int
+			if e = db.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE node=? AND id=?", node, id).Scan(&stored); e != nil {
+				return e
+			}
+			if stored == 1 {
+				return nil
+			}
 		}
 		if !common.Sleep(ctx, time.Second) {
 			return ctx.Err()
@@ -388,6 +395,22 @@ func waitDeliveries(ctx context.Context, db *sql.DB, node, id string) error {
 var _ = os.Getpid
 
 func (d *Deploy) waitLokiEvent(ctx context.Context, node, id string) error {
+	if Native(d.C) {
+		db, e := persist.OpenDB(filepath.Join(common.S(common.M(d.C.Raw["central"])["data_dir"]), "events-v1.sqlite3"))
+		if e != nil {
+			return e
+		}
+		defer db.Close()
+		var count int
+		e = db.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE node=? AND id=?", node, id).Scan(&count)
+		if e != nil {
+			return e
+		}
+		if count == 1 {
+			return nil
+		}
+		return errors.New("事件尚未确认入库查询")
+	}
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		query := `{job="webscan-v1",node_id="` + node + `"} |= "` + id + `"`

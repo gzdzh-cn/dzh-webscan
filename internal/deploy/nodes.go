@@ -145,6 +145,9 @@ func (d *Deploy) TransferImage(ctx context.Context, r *Remote, image string) (st
 	return config, nil
 }
 func (d *Deploy) PrepareNode(ctx context.Context, n common.Map) error {
+	return d.prepareUnifiedNode(ctx, n)
+}
+func (d *Deploy) prepareLegacyNode(ctx context.Context, n common.Map) error {
 	r, e := d.remote(ctx, n)
 	if e != nil {
 		return e
@@ -182,10 +185,13 @@ func (d *Deploy) nodeBackup(ctx context.Context, n common.Map) error {
 		return e
 	}
 	backup := "/var/lib/webscan-deploy/runs/" + d.RunID
-	_, e = r.Run(ctx, "set -eu; umask 077; mkdir -p "+Q(backup)+"; if [ ! -f "+Q(backup+"/node-state.json")+" ]; then /opt/webscan-go/bin/webscan tool --action backup-node --output "+Q(backup)+"; fi")
+	_, e = r.Run(ctx, "set -eu; umask 077; mkdir -p "+Q(backup)+"; if [ ! -f "+Q(backup+"/backup-complete")+" ]; then /opt/webscan-go/bin/webscan tool --action backup-node --output "+Q(backup)+"; fi")
 	return e
 }
 func (d *Deploy) InstallNode(ctx context.Context, n common.Map) error {
+	return d.installUnifiedNode(ctx, n)
+}
+func (d *Deploy) installLegacyNode(ctx context.Context, n common.Map) error {
 	id := common.S(n["id"])
 	r, e := d.remote(ctx, n)
 	if e != nil {
@@ -299,11 +305,13 @@ func (d *Deploy) InstallNode(ctx context.Context, n common.Map) error {
 		if e = d.Journal.Write(filepath.Join(d.C.CentralRoot(), "runtime.json"), common.JSON(d.centralRuntime(active)), 0600); e != nil {
 			return e
 		}
-		if e = d.Journal.Write(filepath.Join(d.C.CentralRoot(), "prometheus.yml"), YAML(Prometheus(d.C, active)), 0600); e != nil {
-			return e
+		if !Native(d.C) {
+			if e = d.Journal.Write(filepath.Join(d.C.CentralRoot(), "prometheus.yml"), YAML(Prometheus(d.C, active)), 0600); e != nil {
+				return e
+			}
 		}
-		if e = progress.Stage(ctx, progress.Host(d.C.Raw), "登记节点并更新主服务器接收服务和 Prometheus", func(ctx context.Context) error {
-			_, err := d.compose(ctx, "up", "-d", "--no-deps", "--pull", "never", "--force-recreate", "receiver", "prometheus")
+		if e = progress.Stage(ctx, progress.Host(d.C.Raw), "登记节点并更新主服务器接收与采集配置", func(ctx context.Context) error {
+			_, err := d.compose(ctx, append([]string{"up", "-d", "--no-deps", "--pull", "never", "--force-recreate"}, d.registrationServices()...)...)
 			return err
 		}); e != nil {
 			return e
@@ -344,17 +352,29 @@ func (d *Deploy) waitNodeReady(ctx context.Context, n common.Map, timeout, poll 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		b, e := r.Run(ctx, "docker inspect --format '{{.State.Running}} {{.State.Restarting}} {{.State.StartedAt}}' webscan-agent-go")
-		if e != nil || !strings.HasPrefix(strings.TrimSpace(string(b)), "true false") {
-			return errors.New("node_agent_container_not_running")
-		}
-		fields := strings.Fields(string(b))
-		if len(fields) != 3 {
-			return errors.New("node_agent_start_time_unavailable")
-		}
-		started, e := time.Parse(time.RFC3339Nano, fields[2])
-		if e != nil {
-			return errors.New("node_agent_start_time_unavailable")
+		var started time.Time
+		if nodeMode(n) == "native" {
+			b, e := r.Run(ctx, "set -eu; systemctl is-active --quiet webscan-agent-native; LC_ALL=C TZ=UTC systemctl show webscan-agent-native --property=ExecMainStartTimestamp --value")
+			if e != nil {
+				return errors.New("node_native_service_not_running")
+			}
+			started, e = time.Parse("Mon 2006-01-02 15:04:05 MST", strings.TrimSpace(string(b)))
+			if e != nil {
+				return errors.New("node_native_start_time_unavailable")
+			}
+		} else {
+			b, e := r.Run(ctx, "docker inspect --format '{{.State.Running}} {{.State.Restarting}} {{.State.StartedAt}}' webscan-agent-go")
+			if e != nil || !strings.HasPrefix(strings.TrimSpace(string(b)), "true false") {
+				return errors.New("node_agent_container_not_running")
+			}
+			fields := strings.Fields(string(b))
+			if len(fields) != 3 {
+				return errors.New("node_agent_start_time_unavailable")
+			}
+			started, e = time.Parse(time.RFC3339Nano, fields[2])
+			if e != nil {
+				return errors.New("node_agent_start_time_unavailable")
+			}
 		}
 		status := common.Map{}
 		if b, e := r.Read(ctx, "/var/lib/webscan-v1/rules-status.json"); e == nil {
@@ -457,6 +477,9 @@ func (d *Deploy) InstallNodeSidecars(ctx context.Context, n common.Map) error {
 }
 
 func (d *Deploy) WaitNodeSidecars(ctx context.Context, n common.Map) error {
+	return d.waitUnifiedTransport(ctx, n)
+}
+func (d *Deploy) waitLegacySidecars(ctx context.Context, n common.Map) error {
 	r, err := d.remote(ctx, n)
 	if err != nil {
 		return err
@@ -483,23 +506,35 @@ func (d *Deploy) WaitNodeSidecars(ctx context.Context, n common.Map) error {
 	}
 	return errors.New("node_sidecars_not_ready")
 }
-func (d *Deploy) RollbackNode(ctx context.Context, n common.Map, uninstall bool) error {
+func (d *Deploy) RollbackNode(ctx context.Context, n common.Map, uninstall bool) (err error) {
+	if !uninstall {
+		defer func() { err = errors.Join(err, d.clearNodeMaintenance(context.WithoutCancel(ctx), n)) }()
+	}
 	r, e := d.remote(ctx, n)
 	if e != nil {
 		return e
 	}
 	state := common.M(common.M(d.State["nodes"])[common.S(n["id"])])
 	run := common.S(state["go_run_id"])
+	if pending := common.S(state["backup_pending"]); pending != "" {
+		if _, e = r.Run(ctx, "test -f "+Q("/var/lib/webscan-deploy/runs/"+pending+"/backup-complete")); e != nil {
+			return nil
+		}
+		run = pending
+	}
 	if run == "" {
 		return nil
 	}
-	command := "set -eu; docker stop -t 30 webscan-agent-go >/dev/null 2>&1 || true; /opt/webscan-go/bin/webscan tool --action restore-node --output " + Q("/var/lib/webscan-deploy/runs/"+run)
+	command := stopNodeWriters + "; /opt/webscan-go/bin/webscan tool --action restore-node --output " + Q("/var/lib/webscan-deploy/runs/"+run)
 	if uninstall {
 		command += " --uninstall"
 	}
 	_, e = r.Run(ctx, command)
 	if e == nil {
 		state["phase"] = "go-rolled-back"
+		delete(state, "backup_pending")
+		state["deployment_mode"] = state["previous_deployment_mode"]
+		state["go_release"] = state["previous_go_release"]
 	}
 	return e
 }
@@ -574,7 +609,7 @@ func (d *Deploy) rollbackNodes() []common.Map {
 	out := []common.Map{}
 	for _, n := range d.C.Selected(d.O.Node) {
 		state := common.M(common.M(d.State["nodes"])[common.S(n["id"])])
-		if d.O.Node != "" || common.S(state["go_run_id"]) == common.S(d.State["run_id"]) {
+		if d.O.Node != "" || common.S(state["go_run_id"]) == common.S(d.State["run_id"]) || common.S(state["backup_pending"]) == common.S(d.State["run_id"]) {
 			out = append(out, n)
 		}
 	}

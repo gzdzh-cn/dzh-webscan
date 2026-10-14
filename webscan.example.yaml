@@ -37,6 +37,13 @@ central:
   # 内存较紧张的主机可设 64；组件总预算加此预留仍必须低于可用内存。
   install_memory_reserve_mib: 128
   # 主服务器事件接收接口设置。
+  # native：Go 一体化；legacy：保留旧组件并运行影子采集。
+  monitoring:
+    mode: native
+    raw_hours: 48
+    history_days: 15
+    memory_mib: 384
+    go_memory_mib: 256
   event_service:
     # 宿主机内部 HTTP 监听地址；当前校验要求固定为 127.0.0.1。
     bind_address: 127.0.0.1
@@ -91,6 +98,30 @@ central:
     viewer_password: ''
 
 # 飞书机器人设置；通知由主服务器发送，子服务器不保存机器人密钥。
+# 邮件默认关闭；授权码仅保存在受保护配置中。
+email:
+  enabled: false
+  smtp_host: ''
+  smtp_port: 465
+  tls_mode: tls
+  username: ''
+  password: ''
+  from_address: ''
+  from_name: 网站监控
+  recipients: []
+  timeout_seconds: 15
+  max_per_minute: 30
+  retry:
+    initial_delay_seconds: 30
+    max_delay_seconds: 3600
+  notifications:
+    file_changes: true
+    important_config_changes: true
+    scan_matches: true
+    scan_errors: true
+    health_failures: true
+    health_recoveries: true
+
 feishu:
   # 默认开启飞书；生成或部署前必须填写自己的 Webhook 和签名密钥。
   # true 时必须配置有效 Webhook，启用签名还必须填写 signing_secret。
@@ -162,6 +193,8 @@ optional_components:
 # 全部子服务器默认配置；nodes 下的同名字段覆盖这里。
 # 映射字段合并，列表整体替换；单节点自定义忽略列表时需保留所需公共规则。
 node_defaults:
+  # 新节点默认免 Docker；已有节点未指定方式时沿用部署记录。
+  deployment: {mode: native}
   # Go 版新增的 Agent 容器资源设置；修改后用 --upgrade 应用。
   resources:
     # Agent 容器硬内存上限，单位 MiB，含 Go、YARA 子进程、缓存及监听开销。
@@ -334,6 +367,15 @@ health:
   probe_directory: /var/lib/webscan/probe
   # 主服务器 Prometheus 的健康告警参数；时间均为秒，percent 均为使用率百分比。
   alerts:
+    # CPU 与内存告警默认关闭；恢复阈值须低于触发阈值。
+    cpu_enabled: false
+    cpu_warning_percent: 85
+    cpu_recovery_percent: 80
+    cpu_duration_seconds: 300
+    memory_enabled: false
+    memory_warning_percent: 90
+    memory_recovery_percent: 85
+    memory_duration_seconds: 300
     # 节点指标接口不可达持续多久后告警。
     node_unreachable_seconds: 120
     # Agent 心跳超过 max(60 秒, 两次指标采集间隔) 后，异常还需持续的告警等待时间。
@@ -379,6 +421,12 @@ retention:
   loki_days: 30
   # 主服务器事件 SQLite 历史保留天数；有未完成投递任务的事件不会因此被删除。
   sqlite_events_days: 30
+  # 扫描命中历史独立保留；旧配置缺省沿用事件期限。
+  security_events_days: 30
+  # 已结束的网站故障历史。
+  website_incidents_days: 30
+  # 服务器告警历史，与聚合指标期限独立。
+  server_alerts_days: 15
   # 主服务器投递尝试记录及已完成投递任务保留天数。
   delivery_records_days: 30
   # 子服务器已确认接收的 JSONL 日志保留天数；达到容量阈值时可提前清理。

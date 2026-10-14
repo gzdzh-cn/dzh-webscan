@@ -101,7 +101,7 @@ func TestNodeCompletionIncludesOneAcceptanceSummary(t *testing.T) {
 	if err := d.notifyServer(context.Background(), c.Selected("node-202")[0], false); err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || !strings.Contains(messages[0], "新增、修改、移动、删除 PHP 和可疑代码检测均通过") || !common.B(a["feishu_business_success"]) {
+	if len(messages) != 1 || !strings.Contains(messages[0], "新增、修改、移动、删除 PHP 和可疑代码检测均通过") || !common.B(a["notification_business_success"]) || common.B(a["feishu_business_success"]) != common.B(common.M(c.Raw["feishu"])["enabled"]) {
 		t.Fatal(messages, a)
 	}
 	if err := d.notifyServer(context.Background(), c.Selected("node-202")[0], false); err != nil || len(messages) != 1 {

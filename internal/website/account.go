@@ -60,7 +60,7 @@ func (m *Monitor) migrate() error {
 			return e
 		}
 		if sites > 0 {
-			dir := common.S(m.Config["backup_dir"])
+			dir := common.S(m.Settings()["backup_dir"])
 			if dir == "" {
 				var seq int
 				var name, path string

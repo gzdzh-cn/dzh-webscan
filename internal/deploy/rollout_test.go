@@ -13,7 +13,7 @@ import (
 	"webscan/internal/progress"
 )
 
-func TestCombinedRolloutPreparesAllNodesBeforeMainAndResumesWithoutSecondMainUpdate(t *testing.T) {
+func TestCombinedRolloutUpdatesMainFirstAndResumesWithoutSecondMainUpdate(t *testing.T) {
 	d := additionFixture(t)
 	d.O.Node = ""
 	d.O.Upgrade = true
@@ -37,7 +37,7 @@ func TestCombinedRolloutPreparesAllNodesBeforeMainAndResumesWithoutSecondMainUpd
 	if err := d.runRolloutSteps(ctx, prepare, main, accept); !errors.Is(err, interrupted) {
 		t.Fatal(err)
 	}
-	if strings.Join(calls, ",") != "prepare:node-202,prepare:new-node,main,accept:node-202" {
+	if strings.Join(calls, ",") != "main,prepare:node-202,accept:node-202" {
 		t.Fatal("unsafe ordering", calls)
 	}
 	state, err := common.ReadJSON(stateFile())
@@ -96,14 +96,14 @@ func TestRolloutCrashConfirmationRequiresFilesAndBothServiceIdentities(t *testin
 	}
 }
 
-func TestCombinedRolloutPreparationFailureCannotChangeMainOrStartTransport(t *testing.T) {
+func TestCombinedRolloutPreparationFailureAfterMainCannotStartTransport(t *testing.T) {
 	d := additionFixture(t)
 	d.O.Node = ""
 	d.State["rollout"] = common.Map{"prepared": common.Map{}, "accepted": common.Map{}}
 	blocked := errors.New("baseline-failure")
 	mainCalled, transportCalled := false, false
 	err := d.runRolloutSteps(context.Background(), func(context.Context, common.Map) error { return blocked }, func(context.Context) error { mainCalled = true; return nil }, func(context.Context, common.Map) error { transportCalled = true; return nil })
-	if !errors.Is(err, blocked) || mainCalled || transportCalled {
-		t.Fatal("baseline failure modified main or enabled transmission", err)
+	if !errors.Is(err, blocked) || !mainCalled || transportCalled {
+		t.Fatal("baseline failure enabled transmission or main did not update first", err)
 	}
 }

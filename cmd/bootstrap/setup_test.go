@@ -38,6 +38,8 @@ func testPackage(t *testing.T) (string, packagePaths) {
 	p := packagePaths{filepath.Join(dir, "deploy"), filepath.Join(dir, "state"), filepath.Join(dir, "bin/webscan"), filepath.Join(dir, "profile/webscan.sh")}
 	script := []byte("#!/bin/bash\n# Webscan v2.0.30. Embedded test.\necho test\n")
 	example, _ := assets.Files.ReadFile("configuration-example.yaml")
+	// Existing fixtures represent the released v2.0.30 legacy wizard.
+	example = bytes.Replace(example, []byte("mode: native"), []byte("mode: legacy"), 1)
 	os.WriteFile(filepath.Join(stage, "deploy-webscan.sh"), script, 0600)
 	os.WriteFile(filepath.Join(stage, "webscan.example.yaml"), example, 0600)
 	manifest := "release=v2.0.30\nsource_commit=" + strings.Repeat("a", 40) + "\nscript_sha256=" + common.Hash(script) + "\nexample_sha256=" + common.Hash(example) + "\n"
@@ -193,7 +195,7 @@ func TestNodeWizardAndMenuWithNoConfiguredNodes(t *testing.T) {
 	}
 	common.AtomicJSON(filepath.Join(p.state, "state.json"), common.Map{"central_installed": true})
 	// Password node, custom roots, then save. Secret never appears in terminal output.
-	i := setupReader("\n\n198.51.100.40\n2222\n2\nprivate-password\n1\n/data/sites\n2\n1\n", out)
+	i := setupReader("\n\n198.51.100.40\n2222\n2\nprivate-password\n1\n1\n/data/sites\n2\n1\n", out)
 	args, e := addConfiguredNode(path, p.state, i)
 	if e != nil {
 		t.Fatalf("%v\n%s", e, out.String())
@@ -289,5 +291,28 @@ func TestLocalScriptContinuesWithoutReplacingOtherCommand(t *testing.T) {
 	after, _ := os.ReadFile(p.command)
 	if !bytes.Equal(original, after) || !strings.Contains(out.String(), "本次继续") {
 		t.Fatal("fallback or conflict protection failed")
+	}
+}
+
+func TestNativeWizardSkipsUnusedGrafana(t *testing.T) {
+	stage, p := testPackage(t)
+	raw, _ := os.ReadFile(filepath.Join(stage, "webscan.example.yaml"))
+	raw = bytes.Replace(raw, []byte("mode: legacy"), []byte("mode: native"), 1)
+	os.WriteFile(filepath.Join(stage, "webscan.example.yaml"), raw, 0600)
+	manifest, _ := os.ReadFile(filepath.Join(stage, "install-manifest.txt"))
+	old := common.Hash(bytes.Replace(raw, []byte("mode: native"), []byte("mode: legacy"), 1))
+	manifest = bytes.ReplaceAll(manifest, []byte(old), []byte(common.Hash(raw)))
+	os.WriteFile(filepath.Join(stage, "install-manifest.txt"), manifest, 0600)
+	var out bytes.Buffer
+	if e := preparePackage(stage, p, &out); e != nil {
+		t.Fatal(e)
+	}
+	answers := "\n203.0.113.10\n\n1\n\n\n\n2\n\n2\n2\n1\n"
+	initialized, e := initializeConfig(filepath.Join(p.dir, "webscan.yaml"), p.state, setupReader(answers, &out))
+	if e != nil || !initialized {
+		t.Fatal(e, out.String())
+	}
+	if strings.Contains(out.String(), "Grafana 端口") || !strings.Contains(out.String(), "Go 一体化") {
+		t.Fatal(out.String())
 	}
 }

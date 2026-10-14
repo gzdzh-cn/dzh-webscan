@@ -19,23 +19,32 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"webscan/internal/persist"
+	"webscan/internal/retention"
+	"webscan/internal/telemetry"
 	"webscan/internal/website"
 
 	"github.com/gogf/gf/v2/net/ghttp"
 	"github.com/gogf/gf/v2/os/glog"
 	"webscan/internal/common"
+	"webscan/internal/notify"
 )
 
 type Store struct {
-	Config   common.Map
-	DB       *sql.DB
-	HTTP     *http.Client
-	mu       sync.Mutex
-	slots    chan struct{}
-	history  []float64
-	Websites *website.Monitor
+	Config    common.Map
+	DB        *sql.DB
+	HTTP      *http.Client
+	mu        sync.Mutex
+	slots     chan struct{}
+	history   []float64
+	Websites  *website.Monitor
+	Telemetry *telemetry.Store
+	Retention *retention.Service
+	started   int64
+	runtime   atomic.Pointer[common.Map]
+	emailSend func(context.Context, common.Map, string, string, string, string) error
 }
 
 const Schema = `
@@ -45,14 +54,16 @@ CREATE INDEX IF NOT EXISTS tasks_ready ON tasks(target,done,next_try,lease);
 
 CREATE TABLE IF NOT EXISTS delivery_records(id INTEGER PRIMARY KEY,task_id INTEGER,target TEXT,time REAL,status TEXT);
 CREATE TABLE IF NOT EXISTS probes(node TEXT PRIMARY KEY,received REAL,loki REAL DEFAULT 0,event_id TEXT);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL);`
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS migrated_logs(id TEXT PRIMARY KEY,node TEXT,operation TEXT,time REAL,payload TEXT);
+CREATE INDEX IF NOT EXISTS migrated_logs_time ON migrated_logs(time);`
 
 func New(config common.Map) (*Store, error) {
 	d, e := persist.OpenDB(filepath.Join(common.S(config["data_dir"]), "events-v1.sqlite3"))
 	if e != nil {
 		return nil, e
 	}
-	if _, e = d.Exec(Schema); e != nil {
+	if e = ensureEmailSchema(d, config); e != nil {
 		d.Close()
 		return nil, e
 	}
@@ -109,60 +120,82 @@ func New(config common.Map) (*Store, error) {
 	if common.B(common.M(config["website_monitor"])["enabled"]) {
 		websiteConfig := common.Clone(common.M(config["website_monitor"]))
 		websiteConfig["backup_dir"] = config["backup_dir"]
-		s.Websites, e = website.New(d, websiteConfig, common.M(config["nodes"]), &s.mu, common.B(common.M(config["feishu"])["enabled"]))
+		websiteConfig["notification_config"] = common.Map{"feishu": config["feishu"], "email": config["email"]}
+		s.Websites, e = website.New(d, websiteConfig, common.M(config["nodes"]), &s.mu, notify.Enabled(config))
 		if e != nil {
 			d.Close()
 			return nil, e
 		}
 	}
+	if e = s.initMonitoring(); e != nil {
+		d.Close()
+		return nil, e
+	}
+	var metricsDB *sql.DB
+	if s.Telemetry != nil {
+		metricsDB = s.Telemetry.DB
+	}
+	s.Retention, e = retention.New(d, metricsDB, s.Snapshot)
+	if e != nil {
+		if metricsDB != nil {
+			metricsDB.Close()
+		}
+		d.Close()
+		return nil, e
+	}
+	s.started = time.Now().Unix()
+	if s.Websites != nil {
+		s.Websites.Extra = s.Console
+	}
 	return s, nil
 }
-func (s *Store) Notify(node string, e common.Map) bool {
-	f := common.M(s.Config["feishu"])
-	if !common.B(f["enabled"]) || !common.Contains(common.SS(s.Config["active_nodes"]), node) {
-		return false
+func (s *Store) Snapshot() common.Map {
+	if v := s.runtime.Load(); v != nil {
+		return *v
 	}
-	switches := common.M(f["notifications"])
+	return s.Config
+}
+func eventCategory(e common.Map) string {
 	op := common.S(e["operation"])
-	if common.DeploymentPHPTest(common.S(e["path"])) && op != "scan" {
-		// The registered modify event is explicitly queued by Ingest. Creating
-		// and cleaning up this fixture must not produce extra file alerts.
-		return false
+	if op == "probe" || (common.DeploymentPHPTest(common.S(e["path"])) && op != "scan") {
+		return "skip"
 	}
-	switch op {
-	case "probe":
-		return false
-	case "scan":
+	if op == "scan" {
 		switch common.S(common.M(e["scan"])["status"]) {
 		case "matched":
-			return common.B(switches["scan_matches"])
+			return "scan_matches"
 		case "error":
-			return common.B(switches["scan_errors"])
+			return "scan_errors"
 		}
-		return false
-	case "health":
-		return common.B(switches["health_failures"])
-	case "test":
-		return true
+		return "skip"
+	}
+	if op == "health" {
+		return "health_failures"
+	}
+	if op == "test" {
+		return ""
 	}
 	if common.B(e["important_config"]) {
-		return common.B(switches["important_config_changes"])
+		return "important_config_changes"
 	}
-	return common.B(switches["file_changes"])
+	return "file_changes"
+}
+func (s *Store) Notify(node string, e common.Map) bool {
+	return common.Contains(common.SS(s.Snapshot()["active_nodes"]), node) && notify.Allows(s.Snapshot(), "feishu", eventCategory(e))
 }
 
 var eventID = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 var errEvent = errors.New("invalid_event_or_conflicting_id")
 
 func (s *Store) Ingest(ctx context.Context, node string, events []any) ([]string, error) {
-	if len(events) == 0 || len(events) > common.I(s.Config["max_batch_events"]) {
+	if len(events) == 0 || len(events) > common.I(s.Snapshot()["max_batch_events"]) {
 		return nil, errEvent
 	}
 	stamp := common.Now()
 	normalized := make([]common.Map, 0, len(events))
 	digests := make([]string, 0, len(events))
 	ids := make([]string, 0, len(events))
-	info := common.M(common.M(s.Config["nodes"])[node])
+	info := common.M(common.M(s.Snapshot()["nodes"])[node])
 	for _, value := range events {
 		original, ok := value.(common.Map)
 		if !ok {
@@ -203,7 +236,7 @@ func (s *Store) Ingest(ctx context.Context, node string, events []any) ([]string
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := persist.BeginWrite(ctx, s.DB)
 	if err != nil {
 		return nil, err
 	}
@@ -229,36 +262,37 @@ func (s *Store) Ingest(ctx context.Context, node string, events []any) ([]string
 		if err != nil {
 			return nil, err
 		}
-		deploymentTest = deploymentTest && common.B(common.M(s.Config["feishu"])["enabled"]) && common.Contains(common.SS(s.Config["active_nodes"]), node)
+		deploymentTest = deploymentTest && notify.Enabled(s.Snapshot()) && common.Contains(common.SS(s.Snapshot()["active_nodes"]), node)
 		acceptance, err := acceptanceEvent(ctx, tx, node, e)
 		if err != nil {
 			return nil, err
 		}
-		for _, target := range []string{"loki", "feishu"} {
-			if target == "feishu" && acceptance && !deploymentTest {
-				continue
-			}
-			if target == "feishu" && !deploymentTest && !s.Notify(node, e) {
-				continue
-			}
-			priority := 0
-			if target == "feishu" && deploymentTest {
-				priority = 100
-			}
-			if target == "feishu" {
-				switch common.S(e["operation"]) {
-				case "health", "test":
-					priority = 100
-				case "scan":
-					priority = 90
-				}
-			}
-			if _, err = tx.ExecContext(ctx, "INSERT INTO tasks(node,event_id,target,payload,created,next_try,priority) VALUES(?,?,?,?,?,?,?)", node, ids[i], target, payload, stamp, stamp, priority); err != nil {
+		if !s.native() && !common.B(common.M(s.Snapshot()["monitoring"])["drain_loki"]) {
+			if _, err = tx.ExecContext(ctx, "INSERT INTO tasks(node,event_id,target,payload,created,next_try) VALUES(?,?,'loki',?,?,?)", node, ids[i], payload, stamp, stamp); err != nil {
 				return nil, err
 			}
 		}
+		if (!acceptance || deploymentTest) && common.Contains(common.SS(s.Snapshot()["active_nodes"]), node) {
+			category := eventCategory(e)
+			priority := 0
+			if deploymentTest {
+				category = ""
+				priority = 100
+			}
+			notice := common.Clone(e)
+			notice["message"] = eventNotice(e)
+			if err = notify.Enqueue(ctx, tx, s.Snapshot(), node, ids[i], notice, category, priority); err != nil {
+				return nil, err
+			}
+		}
+
 		if common.S(e["operation"]) == "probe" {
-			if _, err = tx.ExecContext(ctx, "INSERT INTO probes(node,received,event_id) VALUES(?,?,?) ON CONFLICT(node) DO UPDATE SET received=excluded.received,event_id=excluded.event_id", node, stamp, ids[i]); err != nil {
+			if _, err = tx.ExecContext(ctx, "INSERT INTO probes(node,received,loki,event_id) VALUES(?,?,?,?) ON CONFLICT(node) DO UPDATE SET received=excluded.received,loki=CASE WHEN excluded.loki>0 THEN excluded.loki ELSE probes.loki END,event_id=excluded.event_id", node, stamp, func() float64 {
+				if s.native() {
+					return stamp
+				}
+				return 0
+			}(), ids[i]); err != nil {
 				return nil, err
 			}
 		}
@@ -266,14 +300,12 @@ func (s *Store) Ingest(ctx context.Context, node string, events []any) ([]string
 	return ids, tx.Commit()
 }
 func (s *Store) Notice(ctx context.Context, id, message string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, e := s.DB.ExecContext(ctx, "INSERT OR IGNORE INTO tasks(node,event_id,target,payload,created,next_try,priority) VALUES(?,?,?,?,?,?,100)", "central", id, "feishu", string(common.JSON(common.Map{"message": message})), common.Now(), common.Now())
-	return e
+	return s.NoticePayload(ctx, id, common.Map{"message": message})
 }
+
 func (s *Store) identity(r *http.Request) string {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	for node, v := range common.M(s.Config["nodes"]) {
+	for node, v := range common.M(s.Snapshot()["nodes"]) {
 		if token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(common.S(common.M(v)["token"]))) == 1 {
 			return node
 		}
@@ -310,7 +342,7 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		ip := net.ParseIP(ipstr)
 		allowed := false
-		for _, cidr := range common.SS(common.M(s.Config["https"])["allowed_sources"]) {
+		for _, cidr := range common.SS(common.M(s.Snapshot()["https"])["allowed_sources"]) {
 			_, network, e := net.ParseCIDR(cidr)
 			if e == nil && network.Contains(ip) {
 				allowed = true
@@ -326,10 +358,36 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		path = strings.TrimPrefix(path, "/webscan/v1")
 	}
-	if !public && path == "/website-verify" && r.Method == http.MethodPost {
-		admin := common.S(s.Config["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Config["alert_token"]))) == 1
+	if !public && (path == "/website-verify" || path == "/native-verify") && r.Method == http.MethodPost {
+		admin := common.S(s.Snapshot()["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Snapshot()["alert_token"]))) == 1
 		if !admin {
 			write(w, 401, common.Map{})
+			return
+		}
+		if path == "/native-verify" {
+			if s.Telemetry == nil || !s.native() {
+				write(w, 503, common.Map{})
+				return
+			}
+			nodes, e := s.Telemetry.Nodes(r.Context())
+			verified := false
+			for _, n := range nodes {
+				if n.Central && n.Status == "normal" && n.Snapshot.Values["cpu_cores"] > 0 && n.Snapshot.Values["memory_total"] > 0 && n.Snapshot.Time >= int64(common.F(common.M(s.Snapshot()["monitoring"])["verify_after"])) {
+					verified = true
+				}
+			}
+			var events, history int
+			if e == nil {
+				e = s.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM events").Scan(&events)
+			}
+			if e == nil {
+				e = s.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM migrated_logs").Scan(&history)
+			}
+			if e != nil || !verified {
+				write(w, 503, common.Map{})
+				return
+			}
+			write(w, 200, common.Map{"ready": true, "events": events, "migrated_logs": history, "servers": len(nodes)})
 			return
 		}
 		if s.Websites == nil || s.Websites.Verify(r.Context()) != nil {
@@ -365,13 +423,13 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node := s.identity(r)
-	admin := common.S(s.Config["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Config["alert_token"]))) == 1
+	admin := common.S(s.Snapshot()["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Snapshot()["alert_token"]))) == 1
 	deployment := path == "/deployment-notices" || path == "/deployment-tests" || path == "/deployment-acceptance"
-	if deployment && !admin || node == "" && !(admin && (path == "/alerts" || deployment)) {
+	if deployment && !admin || node == "" && !(admin && (path == "/alerts" || path == "/reload-settings" || path == "/node-removal" || deployment)) {
 		write(w, 401, common.Map{})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, int64(common.I(s.Config["max_request_mib"]))*1048576)
+	r.Body = http.MaxBytesReader(w, r.Body, int64(common.I(s.Snapshot()["max_request_mib"]))*1048576)
 	raw, e := io.ReadAll(r.Body)
 	if e != nil {
 		write(w, 413, common.Map{"error": "request_size"})
@@ -425,9 +483,49 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		write(w, 200, common.Map{"accepted": ids})
+	case "/node-removal":
+		if !admin || s.Websites == nil {
+			write(w, 401, common.Map{})
+			return
+		}
+		input := common.M(value)
+		id := common.S(input["node"])
+		if id == "" || id == "central" {
+			write(w, 400, common.Map{"message": "主服务器禁止移除"})
+			return
+		}
+		if common.B(input["detach"]) {
+			e = s.Websites.DetachNode(r.Context(), id)
+			if e != nil {
+				write(w, 503, common.Map{"message": "网站关联备份或调整失败"})
+				return
+			}
+		}
+		sites, e := s.Websites.NodeSites(r.Context(), id)
+		if e != nil {
+			write(w, 503, common.Map{})
+			return
+		}
+		write(w, 200, common.Map{"websites": sites})
+	case "/reload-settings":
+		if !admin || r.Method != "POST" {
+			write(w, 401, common.Map{})
+			return
+		}
+		if e = s.reloadSettings(configPathFrom(s.Snapshot())); e != nil {
+			write(w, 400, common.Map{"message": common.SecretFree(e)})
+			return
+		}
+		write(w, 200, common.Map{"ok": true})
 	case "/alerts":
 		if !admin {
 			write(w, 401, common.Map{})
+			return
+		}
+		// During handoff old Alertmanager may retry after the new owner starts.
+		// Acknowledge those requests without creating duplicate notifications.
+		if s.native() || common.B(common.M(s.Snapshot()["monitoring"])["drain_loki"]) {
+			write(w, 200, common.Map{"ignored": true})
 			return
 		}
 		for _, v := range common.A(common.M(value)["alerts"]) {
@@ -437,7 +535,7 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 			if resolved {
 				key = "health_recoveries"
 			}
-			if !common.B(common.M(common.M(s.Config["feishu"])["notifications"])[key]) {
+			if !common.B(common.M(common.M(s.Snapshot()["feishu"])["notifications"])[key]) {
 				continue
 			}
 			id := "alert:" + common.Hash(common.JSON(a)) + ":" + strconv.FormatInt(time.Now().Unix()/60, 10)
@@ -467,7 +565,7 @@ func (s *Store) claim(ctx context.Context, target string) (*Task, error) {
 	}
 	defer tx.Rollback()
 	t := &Task{}
-	e = tx.QueryRowContext(ctx, "SELECT id,node,event_id,target,payload,attempts FROM tasks WHERE target=? AND done IS NULL AND next_try<=? AND lease<=? AND (node<>'central' OR event_id NOT LIKE 'website:%' OR NOT EXISTS(SELECT 1 FROM tasks earlier WHERE earlier.target=tasks.target AND earlier.node='central' AND earlier.event_id LIKE 'website:%' AND earlier.id<tasks.id AND earlier.done IS NULL)) ORDER BY priority DESC,id LIMIT 1", target, common.Now(), common.Now()).Scan(&t.ID, &t.Node, &t.EventID, &t.Target, &t.Payload, &t.Attempts)
+	e = tx.QueryRowContext(ctx, "SELECT id,node,event_id,target,payload,attempts FROM tasks WHERE target=? AND done IS NULL AND next_try<=? AND lease<=? AND (node<>'central' OR (event_id NOT LIKE 'website:%' AND event_id NOT LIKE 'native:%') OR NOT EXISTS(SELECT 1 FROM tasks earlier WHERE earlier.target=tasks.target AND earlier.node='central' AND (earlier.event_id LIKE 'website:%' OR earlier.event_id LIKE 'native:%') AND earlier.id<tasks.id AND earlier.done IS NULL)) ORDER BY priority DESC,id LIMIT 1", target, common.Now(), common.Now()).Scan(&t.ID, &t.Node, &t.EventID, &t.Target, &t.Payload, &t.Attempts)
 	if e == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -491,14 +589,14 @@ func (s *Store) finish(ctx context.Context, t *Task, result string, failed bool)
 	if _, e = tx.ExecContext(ctx, "INSERT INTO delivery_records(task_id,target,time,status) VALUES(?,?,?,?)", t.ID, t.Target, now, result); e != nil {
 		return e
 	}
-	if t.Target == "feishu" {
+	if t.Target == "feishu" && !s.native() && !common.B(common.M(s.Snapshot()["monitoring"])["drain_loki"]) {
 		record := common.Map{"operation": "delivery", "node_id": t.Node, "related_event_id": t.EventID, "time": common.Stamp(), "target": "feishu", "attempt": t.Attempts + 1, "status": result}
 		if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO tasks(node,event_id,target,payload,created,next_try) VALUES(?,?,?,?,?,?)", t.Node, fmt.Sprintf("delivery:%d:%d", t.ID, t.Attempts), "loki", string(common.JSON(record)), now, now); e != nil {
 			return e
 		}
 	}
 	if failed {
-		retry := common.M(common.M(s.Config["feishu"])["retry"])
+		retry := common.M(common.M(s.Snapshot()["feishu"])["retry"])
 		delay := min(common.F(retry["max_delay_seconds"]), common.F(retry["initial_delay_seconds"])*float64(int64(1)<<min(t.Attempts, 16)))
 		if common.B(retry["jitter"]) {
 			delay *= 0.8 + float64(time.Now().UnixNano()%4000)/10000
@@ -543,13 +641,13 @@ func (s *Store) send(ctx context.Context, t *Task) (string, error) {
 	if t.Target == "loki" {
 		event["log_index_time"] = common.Stamp()
 		payload := common.Map{"streams": []any{common.Map{"stream": common.Map{"job": "webscan-v1", "node_id": t.Node, "operation": common.S(event["operation"])}, "values": [][]string{{strconv.FormatInt(time.Now().UnixNano(), 10), string(common.JSON(event))}}}}}
-		status, _, e := common.Request(ctx, s.HTTP, "POST", common.S(s.Config["loki_url"])+"/loki/api/v1/push", payload, nil)
+		status, _, e := common.Request(ctx, s.HTTP, "POST", common.S(s.Snapshot()["loki_url"])+"/loki/api/v1/push", payload, nil)
 		if e != nil {
 			return "", e
 		}
 		return fmt.Sprintf("http=%d", status), nil
 	}
-	f := common.M(s.Config["feishu"])
+	f := common.M(s.Snapshot()["feishu"])
 	message := common.S(event["message"])
 	if message == "" {
 		message = eventNotice(event)
@@ -574,7 +672,11 @@ func (s *Store) send(ctx context.Context, t *Task) (string, error) {
 func (s *Store) worker(ctx context.Context, target string) {
 	for ctx.Err() == nil {
 		if target == "feishu" {
-			f := common.M(common.M(s.Config["feishu"])["rate_limit"])
+			if !common.B(common.M(s.Snapshot()["feishu"])["enabled"]) {
+				common.Sleep(ctx, time.Second)
+				continue
+			}
+			f := common.M(common.M(s.Snapshot()["feishu"])["rate_limit"])
 			now := common.Now()
 			for len(s.history) > 0 && s.history[0] < now-60 {
 				s.history = s.history[1:]
@@ -641,7 +743,7 @@ func (s *Store) Metrics(ctx context.Context) (string, error) {
 		f, _ := strconv.ParseFloat(val, 64)
 		fmt.Fprintf(&out, "webscan_delivery_last_success_seconds{target=%q} %g\n", target, f)
 	}
-	for node, v := range common.M(s.Config["nodes"]) {
+	for node, v := range common.M(s.Snapshot()["nodes"]) {
 		fmt.Fprintf(&out, "webscan_node_registered{node_id=%q,server_name=%q} 1\n", node, common.S(common.M(v)["name"]))
 		var received, loki float64
 		s.DB.QueryRowContext(ctx, "SELECT received,loki FROM probes WHERE node=?", node).Scan(&received, &loki)
@@ -654,6 +756,9 @@ func (s *Store) Metrics(ctx context.Context) (string, error) {
 	return out.String(), nil
 }
 func (s *Store) QueryProbes(ctx context.Context) error {
+	if s.native() {
+		return nil
+	}
 	rows, e := s.DB.QueryContext(ctx, "SELECT key,value FROM kv WHERE key LIKE 'probe_query_%'")
 	if e != nil {
 		return e
@@ -680,7 +785,7 @@ func (s *Store) QueryProbes(ctx context.Context) error {
 		event := common.M(v)
 		query := fmt.Sprintf("{job=\"webscan-v1\",node_id=%q} |= %q", common.S(event["node_id"]), common.S(event["event_id"]))
 		params := url.Values{"query": {query}, "limit": {"1"}, "start": {strconv.FormatInt(time.Now().Add(-24*time.Hour).UnixNano(), 10)}}
-		_, response, e := common.Request(ctx, s.HTTP, "GET", common.S(s.Config["loki_url"])+"/loki/api/v1/query_range?"+params.Encode(), nil, nil)
+		_, response, e := common.Request(ctx, s.HTTP, "GET", common.S(s.Snapshot()["loki_url"])+"/loki/api/v1/query_range?"+params.Encode(), nil, nil)
 		if e != nil {
 			return e
 		}
@@ -714,12 +819,20 @@ func Run(ctx context.Context, configPath string) error {
 	if e != nil {
 		return e
 	}
+	config["runtime_path"] = configPath
 	s, e := New(config)
 	if e != nil {
 		return e
 	}
-	defer func() { cancel(); workers.Wait(); s.DB.Close() }()
-	if _, e = s.DB.Exec("UPDATE tasks SET lease=0 WHERE done IS NULL"); e != nil {
+	defer func() {
+		cancel()
+		workers.Wait()
+		if s.Telemetry != nil {
+			s.Telemetry.DB.Close()
+		}
+		s.DB.Close()
+	}()
+	if _, e = s.DB.Exec("UPDATE tasks SET lease=0 WHERE done IS NULL AND event_id NOT LIKE 'watchdog:%'"); e != nil {
 		return e
 	}
 	var heartbeat string
@@ -732,11 +845,30 @@ func Run(ctx context.Context, configPath string) error {
 		}
 	}
 	for _, target := range []string{"loki", "feishu"} {
+		if target == "loki" && s.native() {
+			continue
+		}
 		workers.Add(1)
 		go func(target string) { defer workers.Done(); s.worker(ctx, target) }(target)
 	}
 	workers.Add(1)
 	go func() { defer workers.Done(); s.maintenance(ctx) }()
+	workers.Add(1)
+	go func() { defer workers.Done(); s.Retention.Run(ctx) }()
+	workers.Add(1)
+	go func() { defer workers.Done(); s.emailWorker(ctx) }()
+	if s.Telemetry != nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for ctx.Err() == nil {
+				if err := s.Telemetry.Run(ctx, s.monitoringExtra, s.monitoringDelivery); err != nil && ctx.Err() == nil {
+					fmt.Println("采集循环重试：", common.SecretFree(err))
+					common.Sleep(ctx, 5*time.Second)
+				}
+			}
+		}()
+	}
 	// GoFrame's underlying net/http error writer always uses Logger, including
 	// TLS handshake failures. Disabling request/file logs does not make a nil
 	// Logger safe: a browser rejecting our CA must never stop the receiver.

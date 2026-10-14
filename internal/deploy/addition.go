@@ -115,6 +115,15 @@ func (d *Deploy) canAddNode() bool {
 	normalizeRuntime := func(raw common.Map) []byte {
 		m := common.Clone(raw)
 		delete(common.M(m["nodes"]), d.O.Node)
+		monitor := common.M(m["monitoring"])
+		delete(monitor, "maintenance_nodes")
+		list := []any{}
+		for _, v := range common.A(monitor["nodes"]) {
+			if common.S(common.M(v)["id"]) != d.O.Node {
+				list = append(list, v)
+			}
+		}
+		monitor["nodes"] = list
 		sources := []string{}
 		host := common.S(d.C.Selected(d.O.Node)[0]["host"]) + "/32"
 		for _, source := range common.SS(common.M(m["https"])["allowed_sources"]) {
@@ -159,7 +168,7 @@ func (d *Deploy) additionSteps(ctx context.Context, steps []additionStep) error 
 
 func (d *Deploy) deployAddition(ctx context.Context) (err error) {
 	n := d.C.Selected(d.O.Node)[0]
-	progress.Info(ctx, "新增节点流程：节点安装与清单 → 主服务器登记与采集配置 → 启用传输 → 文件和消息验收；沿用主服务器镜像与 Grafana")
+	progress.Info(ctx, "新增节点流程：主服务器登记与采集配置 → 节点安装与清单 → 启用传输 → 文件和消息验收；沿用主服务器运行设置")
 	if err = d.waitReady(ctx); err != nil {
 		return err
 	}
@@ -184,22 +193,18 @@ func (d *Deploy) deployAddition(ctx context.Context) (err error) {
 		}
 	}()
 	err = d.additionSteps(ctx, []additionStep{
+		{"registered", progress.Host(d.C.Raw), "一次更新主服务器节点登记与指标采集配置", d.registerAddition},
 		{"local_ready", progress.Node(n), "安装新节点并建立本地文件清单（暂缓传输）", func(ctx context.Context) error {
 			if err := d.InstallNode(ctx, n); err != nil {
 				return err
 			}
 			return d.waitStagedNode(ctx, n)
 		}},
-		{"registered", progress.Host(d.C.Raw), "一次更新主服务器节点登记与 Prometheus 采集配置", d.registerAddition},
-		{"transport_ready", progress.Node(n), "启用 Vector 传输并确认采集组件正常", func(ctx context.Context) error {
+		{"transport_ready", progress.Node(n), "启用 Go 事件投递并确认采集正常", func(ctx context.Context) error {
 			if e := d.waitStagedNode(ctx, n); e != nil {
 				return e
 			}
-			r, e := d.remote(ctx, n)
-			if e != nil {
-				return e
-			}
-			if _, e = r.ExecVisible(ctx, startVectorCommand, nil, "服务状态"); e != nil {
+			if e := d.enableNodeTransport(ctx, n); e != nil {
 				return e
 			}
 			return d.WaitNodeSidecars(ctx, n)
@@ -211,6 +216,9 @@ func (d *Deploy) deployAddition(ctx context.Context) (err error) {
 	}
 	// Always recheck current health, even when resuming after acceptance.
 	if err = progress.Stage(ctx, progress.Node(n), "核对全部健康指标与待投递队列", func(ctx context.Context) error { return d.WaitHealth(ctx, n) }); err != nil {
+		return err
+	}
+	if err = d.clearNodeMaintenance(ctx, n); err != nil {
 		return err
 	}
 	state := common.M(common.M(d.State["nodes"])[d.O.Node])
@@ -285,12 +293,16 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 		active = append(active, d.O.Node)
 	}
 	if !common.B(s["registration_started"]) {
-		for _, name := range []string{"runtime.json", "prometheus.yml"} {
+		names := []string{"runtime.json"}
+		if !Native(d.C) {
+			names = append(names, "prometheus.yml")
+		}
+		for _, name := range names {
 			if err := d.Journal.Remember(filepath.Join(root, name)); err != nil {
 				return err
 			}
 		}
-		for _, service := range []string{"receiver", "prometheus"} {
+		for _, service := range d.registrationServices() {
 			id, err := d.serviceIdentity(ctx, service)
 			if err != nil {
 				return err
@@ -311,6 +323,20 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 		n := d.C.Selected(d.O.Node)[0]
 		common.M(runtime["nodes"])[d.O.Node] = common.Map{"host": n["host"], "name": n["name"], "token": common.M(common.M(d.Secrets["nodes"])[d.O.Node])["token"]}
 		runtime["active_nodes"] = active
+		common.M(runtime["monitoring"])["maintenance_nodes"] = []string{d.O.Node}
+		monitor := common.M(runtime["monitoring"])
+		list := []any{}
+		for _, v := range common.A(monitor["nodes"]) {
+			if common.S(common.M(v)["id"]) != d.O.Node {
+				list = append(list, v)
+			}
+		}
+		for _, v := range common.A(monitoringRuntime(d.C, active)["nodes"]) {
+			if common.S(common.M(v)["id"]) == d.O.Node {
+				list = append(list, v)
+			}
+		}
+		monitor["nodes"] = list
 		if len(common.SS(common.M(common.M(d.C.Raw["central"])["event_service"])["allowed_source_cidrs"])) == 0 {
 			https := common.M(runtime["https"])
 			sources := common.SS(https["allowed_sources"])
@@ -323,24 +349,26 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 		if err = d.Journal.Write(filepath.Join(root, "runtime.json"), common.JSON(runtime), 0600); err != nil {
 			return err
 		}
-		promBytes, err := os.ReadFile(filepath.Join(d.Journal.Dir, common.S(common.M(d.Journal.Index[filepath.Join(root, "prometheus.yml")])["backup"])))
-		if err != nil {
-			return err
-		}
-		var prom common.Map
-		if err = yaml.Unmarshal(promBytes, &prom); err != nil {
-			return err
-		}
-		mergeScrapeNodes(prom, Prometheus(d.C, active), []string{d.O.Node})
-		if err = d.Journal.Write(filepath.Join(root, "prometheus.yml"), YAML(prom), 0600); err != nil {
-			return err
+		if !Native(d.C) {
+			promBytes, err := os.ReadFile(filepath.Join(d.Journal.Dir, common.S(common.M(d.Journal.Index[filepath.Join(root, "prometheus.yml")])["backup"])))
+			if err != nil {
+				return err
+			}
+			var prom common.Map
+			if err = yaml.Unmarshal(promBytes, &prom); err != nil {
+				return err
+			}
+			mergeScrapeNodes(prom, Prometheus(d.C, active), []string{d.O.Node})
+			if err = d.Journal.Write(filepath.Join(root, "prometheus.yml"), YAML(prom), 0600); err != nil {
+				return err
+			}
 		}
 		s["files_written"] = true
 		if err = d.save(); err != nil {
 			return err
 		}
 	}
-	for _, service := range []string{"receiver", "prometheus"} {
+	for _, service := range d.registrationServices() {
 		if common.B(s[service+"_restarted"]) {
 			continue
 		}
@@ -372,7 +400,7 @@ func (d *Deploy) rollbackAddition(ctx context.Context) error {
 	}
 	nodeState := common.M(common.M(d.State["nodes"])[common.S(n[0]["id"])])
 	// Don't restore a backup from an earlier run if this run failed before backup.
-	if common.S(nodeState["go_run_id"]) == common.S(d.State["run_id"]) {
+	if common.S(nodeState["go_run_id"]) == common.S(d.State["run_id"]) || common.S(nodeState["backup_pending"]) == common.S(d.State["run_id"]) {
 		if err := d.RollbackNode(ctx, n[0], false); err != nil {
 			return err
 		}
@@ -381,7 +409,7 @@ func (d *Deploy) rollbackAddition(ctx context.Context) error {
 		if err := d.Journal.Rollback(); err != nil {
 			return err
 		}
-		if _, err := d.compose(ctx, "up", "-d", "--no-deps", "--force-recreate", "receiver", "prometheus"); err != nil {
+		if _, err := d.compose(ctx, append([]string{"up", "-d", "--no-deps", "--force-recreate"}, d.registrationServices()...)...); err != nil {
 			return err
 		}
 		if err := d.waitReady(ctx); err != nil {

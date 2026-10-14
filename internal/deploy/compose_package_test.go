@@ -18,6 +18,7 @@ func TestComposePackagesKeepIdentitiesAndSecretsSeparated(t *testing.T) {
 	common.M(c.Raw["registry"])["username"] = "publisher-must-not-export"
 	common.M(c.Raw["registry"])["password"] = "registry-must-not-export"
 	for _, n := range c.Nodes {
+		n["deployment"] = common.Map{"mode": "docker"}
 		common.M(n["ssh"])["password"] = "ssh-must-not-export"
 	}
 	before := string(common.JSON(c.Raw))
@@ -72,7 +73,7 @@ func TestComposePackagesKeepIdentitiesAndSecretsSeparated(t *testing.T) {
 		if err := yaml.Unmarshal(b, &compose); err != nil {
 			t.Fatal(err)
 		}
-		if len(common.M(compose["services"])) != 3 {
+		if len(common.M(compose["services"])) != 1 {
 			t.Fatal("missing node transport or exporter")
 		}
 	}

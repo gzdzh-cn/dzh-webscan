@@ -73,6 +73,23 @@ func run() error {
 				return errors.New("local_image_build_failed_" + role)
 			}
 		}
+		// Publish the exact native bundle embedded in the verified agent image.
+		name := "webscan-release-bundle-" + common.ID()
+		if _, err = d.Exec(ctx, nil, "create", "--name", name, "webscan-agent:"+*version, "version"); err != nil {
+			return err
+		}
+		defer d.Exec(context.WithoutCancel(ctx), nil, "rm", "-f", name)
+		archive := filepath.Join("dist", *version, "agent-native.tar.gz")
+		if _, err = d.Exec(ctx, nil, "cp", name+":/usr/local/lib/webscan/agent-native.tar.gz", archive); err != nil {
+			return err
+		}
+		bundle, err := os.ReadFile(archive)
+		if err != nil {
+			return err
+		}
+		if err = common.Atomic(filepath.Join("dist", *version, "agent-native.sha256"), []byte(common.Hash(bundle)+"  agent-native.tar.gz\n"), 0644); err != nil {
+			return err
+		}
 		for _, role := range []string{"central", "agent"} {
 			if _, err = d.Exec(ctx, nil, "tag", "webscan-"+role+":"+*version, "webscan-"+role+":latest"); err != nil {
 				return errors.New("local_latest_tag_failed_" + role)
@@ -130,7 +147,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	report := common.Map{"release": *version, "platform": "linux/amd64", "go": "1.26.3", "goframe": "2.10.3", "binary_sha256": common.Hash(binary), "published_at": common.Stamp(), "images": images, "latest": latest, "base_images": string(base)}
+	bundle, err := os.ReadFile(filepath.Join("dist", *version, "agent-native.tar.gz"))
+	if err != nil {
+		return err
+	}
+	report := common.Map{"release": *version, "platform": "linux/amd64", "go": "1.26.3", "goframe": "2.10.3", "binary_sha256": common.Hash(binary), "native_package_sha256": common.Hash(bundle), "published_at": common.Stamp(), "images": images, "latest": latest, "base_images": string(base)}
 	if err = common.AtomicJSON(filepath.Join("dist", *version, "release.json"), report); err != nil {
 		return err
 	}

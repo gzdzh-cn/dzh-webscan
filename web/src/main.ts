@@ -1,6 +1,6 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
-import { ElAlert, ElButton, ElCard, ElDialog, ElForm, ElFormItem, ElInput, ElOption, ElPagination, ElSelect, ElSwitch, ElTable, ElTableColumn, ElTag } from 'element-plus'
+import { installElements } from './elements'
 import 'element-plus/es/components/alert/style/css'
 import 'element-plus/es/components/button/style/css'
 import 'element-plus/es/components/card/style/css'
@@ -15,9 +15,14 @@ import 'element-plus/es/components/switch/style/css'
 import 'element-plus/es/components/table/style/css'
 import 'element-plus/es/components/table-column/style/css'
 import 'element-plus/es/components/tag/style/css'
+import 'element-plus/es/components/empty/style/css'
+import 'element-plus/es/components/icon/style/css'
+import 'element-plus/es/components/checkbox/style/css'
+import 'element-plus/es/components/date-picker/style/css'
+import 'element-plus/es/components/loading/style/css'
 import App from './App.vue'
 import './style.css'
-const router = createRouter({ history: createWebHistory(), routes: ['/login', '/', '/websites', '/websites/:id', '/incidents', '/backups'].map(path => ({ path, component: { render: () => null } })) })
+const router = createRouter({ history: createWebHistory(), routes: [{path:'/config-backups',redirect:{path:'/backups',query:{tab:'deployment'}}}, { path:'/health', redirect: to => ({ path: `/servers/${encodeURIComponent(String(to.query.node || 'central'))}`, query: { tab: to.query.node ? 'health' : 'system' } }) }, { path:'/incidents', redirect: { path:'/alerts', query:{ tab:'history',source:'website' } } }, ...['/login', '/', '/websites', '/websites/:id', '/backups', '/servers', '/servers/:id', '/events', '/alerts', '/settings', '/deployments', '/deployments/:id'].map(path => ({ path, component: { render: () => null } }))] })
 const app = createApp(App)
-for (const component of [ElAlert, ElButton, ElCard, ElDialog, ElForm, ElFormItem, ElInput, ElOption, ElPagination, ElSelect, ElSwitch, ElTable, ElTableColumn, ElTag]) app.component(component.name!, component)
+installElements(app)
 app.use(router).mount('#app')

@@ -148,7 +148,7 @@ func (d *Deploy) Uninstall(ctx context.Context) error {
 			if e != nil {
 				return e
 			}
-			_, e = r.Exec(ctx, "bash -se", strings.NewReader(nodeUninstallScript(filepath.Join(StateRoot, "maintenance", id))))
+			_, e = r.Exec(ctx, "bash -se", strings.NewReader(nodeUninstallScript(filepath.Join(StateRoot, "maintenance", id), nodeMode(n))))
 			return e
 		}); err != nil {
 			return err
@@ -265,9 +265,13 @@ func (d *Deploy) restoreRetainedPKI() error {
 	return copyPKI(source, filepath.Join(d.C.CentralRoot(), "pki"))
 }
 
-func nodeUninstallScript(backup string) string {
+func nodeUninstallScript(backup string, mode ...string) string {
 	body, _ := assets.Files.ReadFile("uninstall-node.sh")
-	return "TASK_BACKUP=" + Q(backup) + "\n" + string(body)
+	selected := "docker"
+	if len(mode) > 0 {
+		selected = mode[0]
+	}
+	return "TASK_MODE=" + Q(selected) + "\nTASK_BACKUP=" + Q(backup) + "\n" + string(body)
 }
 func centralUninstallScript(backup, root, data, project, externalNetwork string) string {
 	body, _ := assets.Files.ReadFile("uninstall-central.sh")

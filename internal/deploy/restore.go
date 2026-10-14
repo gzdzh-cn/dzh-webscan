@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"webscan/internal/common"
@@ -36,13 +37,34 @@ func (d *Deploy) restoreCentral(ctx context.Context, j *Journal, uninstall bool)
 	if err := j.Rollback(); err != nil {
 		return err
 	}
+	if previous && !uninstall {
+		path := filepath.Join(d.C.CentralRoot(), "runtime.json")
+		if runtime, e := common.ReadJSON(path); e == nil {
+			if common.S(common.M(runtime["monitoring"])["mode"]) != "native" {
+				delete(common.M(runtime["monitoring"]), "drain_loki")
+				if e = common.AtomicJSON(path, runtime); e != nil {
+					return e
+				}
+			}
+		}
+	}
 	if previous && !uninstall && accountErr == nil {
 		if err := preserveWebsiteAccount(filepath.Join(d.C.CentralRoot(), "runtime.json"), account); err != nil {
 			return err
 		}
 	}
 	if previous && !uninstall {
-		args := []string{"up", "-d", "--no-deps", "receiver"}
+		args := []string{"up", "-d", "--no-deps", "--force-recreate", "receiver"}
+		// A migration may have stopped old project services after receiver validation.
+		raw, _ := os.ReadFile(composePath)
+		var restored common.Map
+		if yaml.Unmarshal(raw, &restored) == nil {
+			for _, name := range []string{"host-exporter", "prometheus", "alertmanager", "grafana", "loki"} {
+				if _, ok := common.M(restored["services"])[name]; ok {
+					args = append(args, name)
+				}
+			}
+		}
 		for _, name := range common.SS(d.State["central_image_services"]) {
 			args = append(args, name)
 		}

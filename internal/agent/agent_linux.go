@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+	"webscan/internal/hostmetrics"
 	"webscan/internal/persist"
 
 	"golang.org/x/sys/unix"
@@ -67,6 +68,7 @@ type Agent struct {
 	statusMu                                sync.Mutex
 	readDue                                 time.Time
 	fd                                      int
+	processLock                             *os.File
 	watches                                 map[int]string
 	byPath                                  map[string]int
 	coverage                                atomic.Int32
@@ -92,6 +94,20 @@ func New(c common.Map, path string) (*Agent, error) {
 			return nil, e
 		}
 	}
+	lock, e := os.OpenFile(filepath.Join(data, "agent.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if e != nil {
+		return nil, e
+	}
+	if e = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); e != nil {
+		lock.Close()
+		return nil, errors.New("agent_already_running")
+	}
+	success := false
+	defer func() {
+		if !success {
+			lock.Close()
+		}
+	}()
 	yara, e := os.ReadFile(common.S(c["yara_rules"]))
 	if e != nil {
 		return nil, e
@@ -158,13 +174,28 @@ func New(c common.Map, path string) (*Agent, error) {
 		return nil, e
 	}
 	a := &Agent{C: common.Clone(c), ConfigPath: path, Data: data, Logs: logs, Probe: common.S(c["probe_directory"]), Instance: common.ID(), DB: d, HTTP: client, fd: fd, watches: map[int]string{}, byPath: map[string]int{}}
+	a.processLock = lock
+	if a.direct() {
+		if e = a.directSchema(); e != nil {
+			unix.Close(fd)
+			d.Close()
+			return nil, e
+		}
+	}
 	a.rules.Store(&Rules{policy, yara, policy.Version(yara)})
 	if raw, e := os.ReadFile(path); e == nil {
 		a.signature = common.Hash(append(raw, yara...))
 	}
+	success = true
 	return a, nil
 }
-func (a *Agent) Close() { unix.Close(a.fd); a.DB.Close() }
+func (a *Agent) Close() {
+	unix.Close(a.fd)
+	a.DB.Close()
+	if a.processLock != nil {
+		a.processLock.Close()
+	}
+}
 func (a *Agent) counter(key string, value float64, set bool) error {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
@@ -929,7 +960,7 @@ func (a *Agent) validateYara(ctx context.Context, rules []byte) error {
 	f.Close()
 	check, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if e = exec.CommandContext(check, "yara", "-w", name, "/dev/null").Run(); e != nil {
+	if e = exec.CommandContext(check, a.scanner("yara"), "-w", name, "/dev/null").Run(); e != nil {
 		return errors.New("invalid_yara_rules")
 	}
 	return nil
@@ -1108,9 +1139,25 @@ func (a *Agent) initializeStartup() error {
 	return a.status("initializing", nil)
 }
 
+func (a *Agent) scanner(tool string) string {
+	if path := common.S(common.M(a.C["scanner_tools"])[tool]); path != "" {
+		return path
+	}
+	if tool == "clamav" {
+		return "clamdscan"
+	}
+	return tool
+}
+func (a *Agent) hostMetrics() string {
+	p := common.M(a.C["host_metrics"])
+	return hostmetrics.Collect(hostmetrics.Paths{Proc: common.S(p["proc"]), Sys: common.S(p["sys"]), Root: common.S(p["root"])})
+}
 func (a *Agent) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer func() { cancel(); a.worker.Wait() }()
+	if e := a.startMetrics(ctx); e != nil {
+		return e
+	}
 	if e := a.validateYara(ctx, a.rules.Load().Yara); e != nil {
 		return e
 	}

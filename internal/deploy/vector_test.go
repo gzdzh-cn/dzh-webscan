@@ -60,7 +60,7 @@ func TestSidecarConfigErrorStopsBeforeFileAcceptance(t *testing.T) {
 	c := fixture(t)
 	n := c.Selected("node-202")[0]
 	d := &Deploy{C: c, Remotes: map[string]*Remote{"node-202": testRemoteResult(t, "false 78\nfalse 143\n", false)}}
-	if err := d.WaitNodeSidecars(context.Background(), n); err == nil || err.Error() != "node_vector_config_invalid" {
+	if err := d.waitLegacySidecars(context.Background(), n); err == nil || err.Error() != "node_vector_config_invalid" {
 		t.Fatal("configuration failure not detected immediately", err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"webscan/internal/common"
+	"webscan/internal/persist"
 )
 
 func acceptanceKey(node, path string) string {
@@ -27,7 +28,7 @@ func acceptanceSignature(e common.Map) string {
 func (s *Store) registerAcceptance(w http.ResponseWriter, r *http.Request, value common.Map) {
 	node := common.S(value["node"])
 	items := common.A(value["events"])
-	if !common.Contains(common.SS(s.Config["active_nodes"]), node) || len(items) == 0 || len(items) > 32 {
+	if !common.Contains(common.SS(s.Snapshot()["active_nodes"]), node) || len(items) == 0 || len(items) > 32 {
 		write(w, 400, common.Map{"error": "invalid_acceptance_registration"})
 		return
 	}
@@ -67,7 +68,7 @@ func (s *Store) registerAcceptance(w http.ResponseWriter, r *http.Request, value
 	write(w, 200, common.Map{"registered": true})
 }
 
-func acceptanceEvent(ctx context.Context, tx *sql.Tx, node string, e common.Map) (bool, error) {
+func acceptanceEvent(ctx context.Context, tx persist.SQLWriter, node string, e common.Map) (bool, error) {
 	if !common.DeploymentPHPTest(common.S(e["path"])) {
 		return false, nil
 	}

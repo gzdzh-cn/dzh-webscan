@@ -7,9 +7,16 @@ import (
 	"net/http"
 	"strings"
 	"webscan/internal/common"
+	"webscan/internal/notify"
+	"webscan/internal/persist"
 )
 
 func (s *Store) deliveryDone(ctx context.Context, node, id, target string) (bool, error) {
+	if target == "loki" && s.native() {
+		var count int
+		e := s.DB.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE node=? AND id=?", node, id).Scan(&count)
+		return count == 1, e
+	}
 	var done sql.NullFloat64
 	var result sql.NullString
 	err := s.DB.QueryRowContext(ctx, "SELECT done,result FROM tasks WHERE node=? AND event_id=? AND target=?", node, id, target).Scan(&done, &result)
@@ -17,6 +24,9 @@ func (s *Store) deliveryDone(ctx context.Context, node, id, target string) (bool
 		return false, nil
 	}
 	want := "http=200,business=0"
+	if target == "email" {
+		want = "已提交邮件服务器"
+	}
 	if target == "loki" {
 		want = "http=204"
 	}
@@ -30,7 +40,7 @@ func (s *Store) deploymentRequest(w http.ResponseWriter, r *http.Request, path s
 		s.registerAcceptance(w, r, value)
 		return
 	}
-	if !common.B(common.M(s.Config["feishu"])["enabled"]) {
+	if !notify.Enabled(s.Snapshot()) {
 		write(w, 409, common.Map{"error": "deployment_feishu_disabled"})
 		return
 	}
@@ -50,7 +60,7 @@ func (s *Store) deploymentRequest(w http.ResponseWriter, r *http.Request, path s
 			write(w, 503, common.Map{"error": "persistence_unavailable"})
 			return
 		}
-		done, err := s.deliveryDone(ctx, "central", id, "feishu")
+		done, err := s.deliveryDone(ctx, "central", id, s.deploymentChannel())
 		if err != nil {
 			write(w, 503, common.Map{})
 			return
@@ -59,7 +69,7 @@ func (s *Store) deploymentRequest(w http.ResponseWriter, r *http.Request, path s
 		return
 	}
 	node, fixture, hash := common.S(value["node"]), common.S(value["path"]), common.S(value["sha256"])
-	if !common.Contains(common.SS(s.Config["active_nodes"]), node) || !common.DeploymentPHPTest(fixture) || len(hash) != 64 || strings.Trim(hash, "0123456789abcdef") != "" {
+	if !common.Contains(common.SS(s.Snapshot()["active_nodes"]), node) || !common.DeploymentPHPTest(fixture) || len(hash) != 64 || strings.Trim(hash, "0123456789abcdef") != "" {
 		write(w, 400, common.Map{"error": "invalid_deployment_test"})
 		return
 	}
@@ -80,7 +90,7 @@ func (s *Store) deploymentRequest(w http.ResponseWriter, r *http.Request, path s
 	}
 	v, _ := common.Decode([]byte(raw))
 	event := common.S(common.M(v)["event_id"])
-	feishu, err := s.deliveryDone(ctx, node, event, "feishu")
+	feishu, err := s.deliveryDone(ctx, node, event, s.deploymentChannel())
 	if err != nil {
 		write(w, 503, common.Map{})
 		return
@@ -125,7 +135,7 @@ func (s *Store) registerDeploymentTest(ctx context.Context, key string, test com
 // Select the first real modify event matching a registered fixture and content.
 // Registration and its event pointer survive process restarts. The canonical
 // event and its legacy digest are left unchanged.
-func deploymentModify(ctx context.Context, tx *sql.Tx, node string, e common.Map) (bool, error) {
+func deploymentModify(ctx context.Context, tx persist.SQLWriter, node string, e common.Map) (bool, error) {
 	path := common.S(e["path"])
 	if !common.DeploymentPHPTest(path) || common.S(e["operation"]) != "modify" {
 		return false, nil
@@ -150,4 +160,11 @@ func deploymentModify(ctx context.Context, tx *sql.Tx, node string, e common.Map
 	test["event_id"] = e["event_id"]
 	_, err = tx.ExecContext(ctx, "UPDATE kv SET value=? WHERE key=?", string(common.JSON(test)), key)
 	return true, err
+}
+
+func (s *Store) deploymentChannel() string {
+	if common.B(common.M(s.Snapshot()["feishu"])["enabled"]) {
+		return "feishu"
+	}
+	return "email"
 }

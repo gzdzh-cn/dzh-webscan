@@ -89,3 +89,17 @@ bash scripts/package-install.sh "$VERSION" "$(git rev-parse HEAD)"
 ```
 
 向对应 GitHub Release 上传 `install.sh`、`deploy-webscan.sh`、`install-manifest.txt` 和 `release.json`。清单包含发布版本、源码提交、脚本及示例 YAML 的 SHA256；示例从该提交的仓库下载，不发布实际 `webscan.yaml`。验证匿名下载及文件一致后将 Release 设为最新。
+
+## 一体化模块
+
+`internal/telemetry` 实现固定指标采集、基线、聚合、健康状态机和历史迁移；`internal/management` 实现宿主机配置、持久化任务、Unix Socket 和看门狗；`internal/central/console.go` 提供登录保护的查询与管理代理。前端图表在 `charts.ts`，页面按路由懒加载。
+
+Go 嵌入使用 `all:ui`，确保 Vite 的下划线辅助模块也打包。正式发布按 `npm ci → typecheck → 前端测试 → Vite build → Go 测试 → Linux amd64 编译 → 镜像验证 → 版本与 latest 推送` 顺序；不能并发构建前端和编译嵌入资源。
+
+新增历史迁移、配置冲突、看门狗及 50 主机采集测试；1000 网站全超时测试同时验证并发和内存。隔离测试飞书必须关闭，不能使用业务机器人做压力测试。生产升级由管理员手动执行，开发测试不连接业务 SSH 或修改防火墙。
+
+## Native 工具包（v2.0.35）
+
+镜像构建从相同扫描工具层生成 `agent-native.tar.gz`，含静态 Go 程序、YARA／clamdscan、独立 ELF 加载器、依赖库、许可证、VERSION 和 SHA256SUMS。central 与 agent 镜像均带同一归档；`cmd/release --action build` 额外提取至 dist，生成 `agent-native.sha256`。发布记录包含程序和归档校验值。程序与归档版本必须一致，不允许在同版本目录替换另一套校验值。
+
+Linux 专属采集／Agent 测试须交叉编译后在 Linux 容器运行；macOS 的 `go test ./...` 不包含它们。真实 systemd 与单容器测试只使用隔离节点，通知渠道关闭；生产包同步只替换引导脚本和 README，核对 YAML、凭据、部署状态与运行身份保持不变。

@@ -20,6 +20,9 @@ func freshInstallMemory(c *Config) installMemoryBudget {
 	if value, exists := center["install_memory_reserve_mib"]; exists {
 		reserve = common.I(value)
 	}
+	if Native(c) {
+		return installMemoryBudget{Components: common.I(common.M(center["monitoring"])["memory_mib"]) + 32 + 128, Reserve: reserve}
+	}
 	b := installMemoryBudget{Components: common.I(center["new_components_memory_budget_mib"]), Website: websiteMemory(c), Reserve: reserve}
 	if !common.B(common.M(center["reuse_existing"])["grafana"]) {
 		b.Grafana = 192

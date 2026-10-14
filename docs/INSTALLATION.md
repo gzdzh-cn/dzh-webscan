@@ -2,6 +2,8 @@
 
 [返回 README](../README.md) · [SH 安装](INSTALLATION.md) · [网站后台](WEBSITE.md) · [日常维护](OPERATIONS.md)
 
+新安装使用 Go 一体化模式；旧 YAML 默认保留旧组件，升级后按[迁移教程](MIGRATION.md)导入历史。统一后台用法见[监控后台](CONSOLE.md)。
+
 ## 一行安装（推荐）
 
 在 Linux amd64 主服务器的 root SSH 交互终端执行：
@@ -30,13 +32,13 @@ bash -o pipefail -c 'curl -fsSL https://github.com/gzdzh-cn/dzh-webscan/releases
 
 ## 首次配置向导
 
-依次填写主服务器名称和 IP、指标采集来源 IP（默认主服务器 IP）、SSL 模式、网站后台和 Grafana 端口与账号、飞书设置、公共监控目录、子服务器。
+依次填写主服务器名称和 IP、指标采集来源 IP（默认主服务器 IP）、SSL 模式、统一后台端口与账号（legacy 模式另配置 Grafana）、飞书设置、公共监控目录、子服务器。
 
 | 顺序 | 填写内容 | 默认与说明 |
 |---|---|---|
 | 1 主服务器 | 名称、公网 IPv4、指标采集来源 IP | 采集来源默认主服务器 IP |
 | 2 SSL | HTTPS 或 HTTP | 默认 HTTPS，统一控制通信、采集与网站后台 |
-| 3 管理入口 | 是否启用网站后台、端口、管理员名称 | 网站后台默认开启、19444；Grafana 3000；账号 admin，初始密码随机生成 |
+| 3 管理入口 | 是否启用网站后台、端口、管理员名称 | 统一后台默认开启、19444；账号 admin，初始密码随机生成；旧 legacy 才询问 Grafana |
 | 4 飞书 | 是否启用、Webhook、加签开关与密钥 | 默认开启；Webhook、密钥隐藏输入，也可明确关闭 |
 | 5 公共目录 | 一个或多个绝对路径 | 默认 `/www/wwwroot` |
 | 6 子服务器 | 唯一 ID、名称、IP、SSH 端口、私钥或密码、独立目录 | 可不添加；SSH 用户 root，端口 22，指纹自动记录 |
@@ -303,3 +305,11 @@ deployment:
 - 飞书：核对部署完成和独立测试目录的修改通知。[部署通知说明](OPERATIONS.md#部署通知与验收)。
 
 后台与 Grafana 账号独立；端口修改后以实际 YAML 和部署结束提示为准。
+
+## v2.0.35 节点部署方式
+
+首次向导与菜单 4 录入节点增加方式选择，默认 native。新 YAML 的 `node_defaults.deployment.mode: native` 对新节点生效。旧 YAML 省略字段时，已有节点沿用部署记录（旧三容器为 Docker），全新节点默认 native。已有节点可显式填写 `nodes[].deployment.mode`，优先于默认。
+
+完整升级使用 `webscan --upgrade`，中心先更新，再逐台切换节点；旧 Docker 节点合并为单容器。native 节点通过 SSH 接收同版本工具包并由 systemd 启动，不安装 Docker。菜单、后台任务和命令调用同一个部署引擎。仅下载部署脚本不自动升级运行服务。
+
+[无 Docker 环境、单容器、资源限制与回退](NODE-DEPLOYMENT.md)。

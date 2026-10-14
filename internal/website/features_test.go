@@ -10,14 +10,17 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"golang.org/x/crypto/bcrypt"
+	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -491,5 +494,32 @@ func TestManualBackupSupportsAllSitesBeyondImportLimit(t *testing.T) {
 	loaded, _, e := m.loadBackup(context.Background(), b.ID)
 	if e != nil || len(loaded.Sites) != 1000 {
 		t.Fatal("complete server backup failed", e)
+	}
+}
+
+// Vite emits helpers whose names start with '_'; plain directory embedding
+// excludes them and makes every lazy page blank in a release binary.
+func TestEmbeddedLazyModuleDependencies(t *testing.T) {
+	entries, e := fs.ReadDir(UI, "ui/assets")
+	if errors.Is(e, fs.ErrNotExist) {
+		t.Skip("pure Go placeholder, release build verifies assets")
+	}
+	if e != nil {
+		t.Fatal(e)
+	}
+	pattern := regexp.MustCompile(`(?:from\s*|import\s*\()?["']\./([^"']+\.(?:js|css))["']`)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".js") {
+			continue
+		}
+		raw, e := UI.ReadFile("ui/assets/" + entry.Name())
+		if e != nil {
+			t.Fatal(e)
+		}
+		for _, match := range pattern.FindAllSubmatch(raw, -1) {
+			if _, e = fs.Stat(UI, "ui/assets/"+string(match[1])); e != nil {
+				t.Fatalf("%s references missing embedded module %s", entry.Name(), match[1])
+			}
+		}
 	}
 }

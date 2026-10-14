@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"webscan/internal/common"
 	"webscan/internal/persist"
 )
@@ -175,5 +176,43 @@ func TestWebsiteRecoveryWaitsForOutageRetryWithoutBlockingFileAlerts(t *testing.
 	next, e = s.claim(ctx, "feishu")
 	if e != nil || next.EventID != "website:2:0" {
 		t.Fatal("recovery not released", next, e)
+	}
+}
+
+// An independent cleanup/notification writer must not invalidate ingestion's
+// read-before-insert snapshot. Reserve the writer before reading dedup state.
+func TestIngestWaitsForIndependentWriter(t *testing.T) {
+	s := testStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	writer, err := persist.BeginWrite(ctx, s.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err = writer.ExecContext(ctx, "INSERT INTO kv(key,value) VALUES('concurrent-test','1')"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, e := s.Ingest(ctx, "node", []any{fixture()}); done <- e }()
+	select {
+	case err := <-done:
+		t.Fatalf("ingestion did not wait for writer: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err = writer.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	var count int
+	if err = s.DB.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE id='fixture-1'").Scan(&count); err != nil || count != 1 {
+		t.Fatal(count, err)
 	}
 }

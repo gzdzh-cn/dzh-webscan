@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 	"webscan/internal/common"
+	"webscan/internal/recordops"
 )
 
 const backupLimit = 2 * 1024 * 1024
@@ -37,13 +38,15 @@ type BackupDocument struct {
 	Sites   []SiteConfig `json:"websites"`
 }
 type Backup struct {
-	ID       string `json:"id"`
-	Created  int64  `json:"created"`
-	Source   string `json:"source"`
-	Count    int    `json:"count"`
-	Digest   string `json:"-"`
-	Restored int64  `json:"restored"`
-	Result   string `json:"result"`
+	CanDelete    bool   `json:"can_delete"`
+	DeleteReason string `json:"delete_reason"`
+	ID           string `json:"id"`
+	Created      int64  `json:"created"`
+	Source       string `json:"source"`
+	Count        int    `json:"count"`
+	Digest       string `json:"-"`
+	Restored     int64  `json:"restored"`
+	Result       string `json:"result"`
 }
 type RestorePreview struct {
 	Added     int      `json:"added"`
@@ -105,7 +108,7 @@ func parseBackupDocument(data []byte, limit int) (BackupDocument, error) {
 	return doc, nil
 }
 func (m *Monitor) backupDir() string {
-	dir := common.S(m.Config["backup_dir"])
+	dir := common.S(m.Settings()["backup_dir"])
 	if dir == "" {
 		var seq int
 		var name, path string
@@ -131,7 +134,7 @@ func (m *Monitor) storeBackup(ctx context.Context, doc BackupDocument, source st
 	}
 	b := Backup{ID: common.ID(), Created: time.Now().Unix(), Source: source, Count: len(doc.Sites), Digest: common.Hash(data)}
 	dir := m.backupDir()
-	if e := os.MkdirAll(dir, 0700); e != nil {
+	if e := recordops.PrivateDirectory(dir); e != nil {
 		return b, e
 	}
 	if e := os.Chmod(dir, 0700); e != nil {
@@ -148,6 +151,9 @@ func (m *Monitor) storeBackup(ctx context.Context, doc BackupDocument, source st
 	return b, nil
 }
 func (m *Monitor) loadBackup(ctx context.Context, id string) (BackupDocument, Backup, error) {
+	if m.Operations.Busy(ctx, "website-backup", id) {
+		return BackupDocument{}, Backup{}, errors.New("备份正在删除，请稍后刷新")
+	}
 	b := Backup{}
 	e := m.DB.QueryRowContext(ctx, "SELECT id,created,source,count,digest,restored,result FROM website_backups WHERE id=?", id).Scan(&b.ID, &b.Created, &b.Source, &b.Count, &b.Digest, &b.Restored, &b.Result)
 	if e != nil {
@@ -342,6 +348,10 @@ func (m *Monitor) backups(w http.ResponseWriter, r *http.Request) {
 				m.dbError(w, e)
 				return
 			}
+			rows.Close()
+			for i := range items {
+				items[i].CanDelete, items[i].DeleteReason = m.backupDeletable(r.Context(), items[i].ID)
+			}
 			respond(w, 200, common.Map{"items": items, "total": total})
 			return
 		case "POST":
@@ -399,6 +409,9 @@ func (m *Monitor) backups(w http.ResponseWriter, r *http.Request) {
 			if r.Method == "POST" {
 				m.WriteMu.Lock()
 				p, e := m.preview(r.Context(), doc, b)
+				if e == nil {
+					_, e = m.DB.ExecContext(r.Context(), `INSERT INTO website_backup_pins VALUES(?,?,?,?) ON CONFLICT(backup,owner) DO UPDATE SET token=excluded.token,expires=excluded.expires`, b.ID, AuthenticatedUsername(r), p.Token, time.Now().Unix()+600)
+				}
 				m.WriteMu.Unlock()
 				if e != nil {
 					backupError(w, e)
@@ -413,6 +426,11 @@ func (m *Monitor) backups(w http.ResponseWriter, r *http.Request) {
 					Token string `json:"token"`
 				}
 				if !decode(w, r, &input) {
+					return
+				}
+				var pin int
+				if e = m.DB.QueryRowContext(r.Context(), "SELECT count(*) FROM website_backup_pins WHERE backup=? AND owner=? AND token=? AND expires>?", b.ID, AuthenticatedUsername(r), input.Token, time.Now().Unix()).Scan(&pin); e != nil || pin != 1 {
+					backupError(w, errors.New("恢复预览过期或不属于当前账号，请重新预览"))
 					return
 				}
 				p, e := m.restore(r.Context(), doc, b, input.Token)

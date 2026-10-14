@@ -6,14 +6,17 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"webscan/internal/common"
+	"webscan/internal/notify"
+	"webscan/internal/recordops"
 )
 
-//go:embed ui
+//go:embed all:ui
 var UI embed.FS
 
 const schema = `
@@ -66,8 +69,10 @@ type attempt struct {
 	Until time.Time
 }
 type Monitor struct {
+	Operations     *recordops.Service
 	DB             *sql.DB
 	Config         common.Map
+	settings       atomic.Pointer[common.Map]
 	Nodes          common.Map
 	WriteMu        *sync.Mutex
 	mu             sync.Mutex
@@ -82,7 +87,9 @@ type Monitor struct {
 	PasswordHash   string
 	Username       string
 	ConsoleURL     string
+	Extra          func(http.ResponseWriter, *http.Request) bool
 	Notify         bool
+	notifySetting  atomic.Pointer[bool]
 }
 
 func New(db *sql.DB, config, nodes common.Map, writeMu *sync.Mutex, notify bool) (*Monitor, error) {
@@ -91,6 +98,16 @@ func New(db *sql.DB, config, nodes common.Map, writeMu *sync.Mutex, notify bool)
 	}
 	m := &Monitor{DB: db, Config: config, Nodes: nodes, WriteMu: writeMu, active: map[int64]context.CancelFunc{}, sessions: map[string]session{}, attempts: map[string]attempt{}, probe: newProber(), PasswordHash: common.S(config["password_hash"]), Username: common.S(config["admin_username"]), ConsoleURL: common.S(config["console_url"]), Notify: notify}
 	if e := m.migrate(); e != nil {
+		return nil, e
+	}
+	ops, e := recordops.New(db, m.backupDir())
+	if e != nil {
+		return nil, e
+	}
+	ops.Gate = m.WriteMu
+	m.Operations = ops
+	ops.Apply = m.applyRecordOperation
+	if _, e = db.Exec(`CREATE TABLE IF NOT EXISTS website_incident_origins(id INTEGER PRIMARY KEY,node TEXT,name TEXT); CREATE TABLE IF NOT EXISTS website_backup_pins(backup TEXT,owner TEXT,token TEXT,expires INTEGER,PRIMARY KEY(backup,owner));`); e != nil {
 		return nil, e
 	}
 	return m, nil
@@ -133,6 +150,8 @@ func (m *Monitor) cancel(id int64) {
 	}
 }
 func (m *Monitor) Run(ctx context.Context) {
+	m.workers.Add(1)
+	go func() { defer m.workers.Done(); m.Operations.Run(ctx) }()
 	m.pulse.Store(time.Now().Unix())
 	m.workers.Add(1)
 	go func() {
@@ -189,7 +208,7 @@ func (m *Monitor) Run(ctx context.Context) {
 				pending++
 				m.start(ctx, s, now)
 			}
-			if pending > max(1, common.I(m.Config["max_concurrent"])) {
+			if pending > max(1, common.I(m.Settings()["max_concurrent"])) {
 				if m.backlogSince.Load() == 0 {
 					m.backlogSince.Store(now)
 				}
@@ -209,11 +228,7 @@ func (m *Monitor) Run(ctx context.Context) {
 			if e := m.flush(ctx, now); e != nil {
 				fmt.Println("website_notification_flush_failed")
 			}
-			if now%3600 == 0 {
-				m.WriteMu.Lock()
-				_, _ = m.DB.ExecContext(ctx, "DELETE FROM website_incidents WHERE ended IS NOT NULL AND ended<?", now-30*86400)
-				m.WriteMu.Unlock()
-			}
+
 		}
 	}
 }
@@ -223,7 +238,7 @@ func (m *Monitor) Run(ctx context.Context) {
 func (m *Monitor) start(ctx context.Context, s Site, now int64) {
 	m.mu.Lock()
 	_, busy := m.active[s.ID]
-	full := len(m.active) >= max(1, common.I(m.Config["max_concurrent"]))
+	full := len(m.active) >= max(1, common.I(m.Settings()["max_concurrent"]))
 	m.mu.Unlock()
 	if busy || full {
 		return
@@ -234,10 +249,10 @@ func (m *Monitor) start(ctx context.Context, s Site, now int64) {
 	if e != nil || current.Paused || current.State.Next > now {
 		return
 	}
-	current.State.Next = now + int64(max(1, common.I(m.Config["interval_seconds"])))
+	current.State.Next = now + int64(max(1, common.I(m.Settings()["interval_seconds"])))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, busy = m.active[s.ID]; busy || len(m.active) >= max(1, common.I(m.Config["max_concurrent"])) {
+	if _, busy = m.active[s.ID]; busy || len(m.active) >= max(1, common.I(m.Settings()["max_concurrent"])) {
 		return
 	}
 	if _, e = m.DB.ExecContext(ctx, "UPDATE websites SET state=? WHERE id=?", string(common.JSON(current.State)), s.ID); e != nil {
@@ -249,7 +264,7 @@ func (m *Monitor) start(ctx context.Context, s Site, now int64) {
 	go func() {
 		defer m.workers.Done()
 		defer func() { m.mu.Lock(); delete(m.active, s.ID); m.mu.Unlock(); cancel() }()
-		r := m.probe.check(task, current, time.Duration(max(1, common.I(m.Config["timeout_seconds"])))*time.Second)
+		r := m.probe.check(task, current, time.Duration(max(1, common.I(m.Settings()["timeout_seconds"])))*time.Second)
 		if task.Err() == nil {
 			if e := m.apply(task, current, r); e != nil {
 				fmt.Println("website_result_persist_failed")
@@ -258,17 +273,31 @@ func (m *Monitor) start(ctx context.Context, s Site, now int64) {
 	}()
 }
 func (m *Monitor) healthNotice(ctx context.Context, message string) error {
-	if !m.Notify {
+	if !m.notificationsEnabled() {
 		return nil
 	}
 	m.WriteMu.Lock()
 	defer m.WriteMu.Unlock()
-	_, e := m.DB.ExecContext(ctx, "INSERT INTO tasks(node,event_id,target,payload,created,next_try) VALUES('central',?,'feishu',?,?,?)", "website:health:"+common.ID(), string(common.JSON(common.Map{"message": message})), common.Now(), common.Now())
-	return e
+	tx, e := m.DB.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	config := common.M(m.Settings()["notification_config"])
+	if len(config) == 0 {
+		config = common.Map{"feishu": common.Map{"enabled": m.notificationsEnabled(), "notifications": common.Map{"health_failures": true, "health_recoveries": true}}}
+	}
+	if e = notify.Enqueue(ctx, tx, config, "central", "website:health:"+common.ID(), common.Map{"message": message}, "", 100); e != nil {
+		return e
+	}
+	return tx.Commit()
 }
 func (m *Monitor) apply(ctx context.Context, s Site, r Result) error {
 	m.WriteMu.Lock()
 	defer m.WriteMu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	tx, e := m.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return e
@@ -300,9 +329,9 @@ func (m *Monitor) apply(ctx context.Context, s Site, r Result) error {
 	st.Last = r
 	st.Checks++
 	now := r.Time
-	st.Next = now + int64(max(1, common.I(m.Config["interval_seconds"])))
+	st.Next = now + int64(max(1, common.I(m.Settings()["interval_seconds"])))
 	notice := func(kind, message string) error {
-		if !m.Notify {
+		if !m.notificationsEnabled() {
 			return nil
 		}
 		_, e := tx.ExecContext(ctx, "INSERT INTO website_outbox(site,node,kind,message,created) VALUES(?,?,?,?,?)", s.ID, s.Node, kind, m.message(s, message, r), now)
@@ -453,7 +482,7 @@ func (m *Monitor) message(s Site, text string, r Result) string {
 	return fmt.Sprintf("网站可用性提醒\n网站：%s\n地址：%s\n关联服务器：%s\n情况：%s\n发生时间：%s（北京时间）", s.Name, s.URL, node, text, time.Unix(r.Time, 0).In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05"))
 }
 func (m *Monitor) flush(ctx context.Context, now int64) error {
-	if !m.Notify {
+	if !m.notificationsEnabled() {
 		return nil
 	}
 	m.WriteMu.Lock()
@@ -479,6 +508,7 @@ func (m *Monitor) flush(ctx context.Context, now int64) error {
 		node, kind string
 		ids        []int64
 		messages   []string
+		sites      []int64
 	}
 	groups := []group{}
 	index := map[string]int{}
@@ -501,6 +531,7 @@ func (m *Monitor) flush(ctx context.Context, now int64) error {
 		lastGroup[site] = idx
 		groups[idx].ids = append(groups[idx].ids, id)
 		groups[idx].messages = append(groups[idx].messages, msg)
+		groups[idx].sites = append(groups[idx].sites, site)
 	}
 	e = rows.Err()
 	rows.Close()
@@ -513,7 +544,15 @@ func (m *Monitor) flush(ctx context.Context, now int64) error {
 			messages = []string{fmt.Sprintf("网站可用性批量提醒：共 %d 个网站\n%s\n其余网站请查看管理后台：%s", len(g.ids), strings.Join(messages[:5], "\n\n"), m.ConsoleURL)}
 		}
 		for i, msg := range messages {
-			if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO tasks(node,event_id,target,payload,created,next_try) VALUES('central',?,'feishu',?,?,?)", fmt.Sprintf("website:%d:%d", g.ids[0], i), string(common.JSON(common.Map{"message": msg})), float64(now), float64(now)); e != nil {
+			config := common.M(m.Settings()["notification_config"])
+			if len(config) == 0 {
+				config = common.Map{"feishu": common.Map{"enabled": m.notificationsEnabled(), "notifications": common.Map{"health_failures": true, "health_recoveries": true}}}
+			}
+			category := "health_failures"
+			if strings.HasSuffix(g.kind, "recovery") || strings.Contains(g.kind, "recover") {
+				category = "health_recoveries"
+			}
+			if e = notify.Enqueue(ctx, tx, config, "central", fmt.Sprintf("website:%d:%d", g.ids[0], i), common.Map{"message": msg, "source": "website", "node_id": g.node, "notice_kind": g.kind, "site_ids": g.sites}, category, 0); e != nil {
 				return e
 			}
 		}
@@ -568,4 +607,9 @@ func (m *Monitor) backlog() int64 {
 		return time.Now().Unix()
 	}
 	return m.backlogSince.Load()
+}
+
+// HealthSnapshot exposes scheduler state without fetching website history.
+func (m *Monitor) HealthSnapshot() common.Map {
+	return common.Map{"heartbeat": m.pulse.Load(), "healthy": time.Now().Unix()-m.pulse.Load() < 10, "backlog_seconds": max(0, time.Now().Unix()-m.backlog())}
 }

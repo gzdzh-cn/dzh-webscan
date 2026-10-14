@@ -57,18 +57,24 @@ func CentralRuntime(c *Config, secrets common.Map, active []string) common.Map {
 	nodes := common.Map{}
 	sources := common.SS(event["allowed_source_cidrs"])
 	for _, n := range c.Nodes {
-		if !common.B(n["enabled"]) {
-			continue
-		}
 		id := common.S(n["id"])
-		nodes[id] = common.Map{"host": n["host"], "name": n["name"], "token": common.M(common.M(secrets["nodes"])[id])["token"]}
+		nodes[id] = common.Map{"host": n["host"], "name": n["name"], "token": common.M(common.M(secrets["nodes"])[id])["token"], "yara_enabled": common.B(common.M(common.M(n["scan"])["yara"])["enabled"]), "clamav_enabled": common.B(common.M(common.M(n["scan"])["clamav"])["enabled"])}
 		if len(common.SS(event["allowed_source_cidrs"])) == 0 {
 			sources = append(sources, common.S(n["host"])+"/32")
 		}
 	}
+	enabledActive := []string{}
+	for _, id := range active {
+		for _, n := range c.Nodes {
+			if common.S(n["id"]) == id && common.B(n["enabled"]) {
+				enabledActive = append(enabledActive, id)
+			}
+		}
+	}
+	active = enabledActive
 	sources = append(sources, "127.0.0.1/32", u.Hostname()+"/32")
 	f := common.Clone(common.M(c.Raw["feishu"]))
-	runtime := common.Map{"runtime_dir": "/backup-config", "bind": "0.0.0.0", "port": event["port"], "https": common.Map{"bind": "0.0.0.0", "port": event["https_port"], "cert_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".crt", "key_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".key", "allowed_sources": sources}, "max_request_mib": event["max_request_mib"], "max_batch_events": event["max_batch_events"], "data_dir": center["data_dir"], "backup_dir": center["backup_dir"], "backup": c.Raw["backup"], "retention": c.Raw["retention"], "website_monitor": websiteRuntime(c, secrets), "feishu": f, "loki_url": "http://loki:3100", "alert_token": secrets["alert_token"], "nodes": nodes, "active_nodes": active}
+	runtime := common.Map{"release": Release, "runtime_dir": "/backup-config", "bind": "0.0.0.0", "port": event["port"], "https": common.Map{"bind": "0.0.0.0", "port": event["https_port"], "cert_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".crt", "key_file": "/backup-config/pki/central-" + strings.ReplaceAll(u.Hostname(), ".", "-") + ".key", "allowed_sources": sources}, "max_request_mib": event["max_request_mib"], "max_batch_events": event["max_batch_events"], "data_dir": center["data_dir"], "backup_dir": center["backup_dir"], "backup": c.Raw["backup"], "retention": c.Raw["retention"], "website_monitor": websiteRuntime(c, secrets), "feishu": f, "email": common.Clone(common.M(c.Raw["email"])), "loki_url": "http://loki:3100", "monitoring": monitoringRuntime(c, active), "management_socket": "/run/webscan-management/control.sock", "alert_token": secrets["alert_token"], "nodes": nodes, "active_nodes": active}
 	if !c.SSLEnabled() {
 		common.M(runtime["https"])["port"] = 0
 		common.M(runtime["https"])["cert_file"], common.M(runtime["https"])["key_file"] = "", ""
@@ -79,6 +85,12 @@ func CentralRuntime(c *Config, secrets common.Map, active []string) common.Map {
 func NodeRuntime(c *Config, n, secrets common.Map) common.Map {
 	health := common.M(c.Raw["health"])
 	runtime := common.Map{"node_id": n["id"], "monitor": n["monitor"], "scan": n["scan"], "transport": n["transport"], "data_dir": "/var/lib/webscan-v1", "log_dir": "/var/log/webscan-v1", "probe_directory": health["probe_directory"], "probe_seconds": health["filesystem_probe_seconds"], "metrics_file": "/var/lib/webscan-v1/textfile/agent.prom", "yara_rules": "/etc/webscan-v1/php-webshell.yar", "retention_days": common.M(c.Raw["retention"])["local_logs_days"], "token": common.M(common.M(secrets["nodes"])[common.S(n["id"])])["token"], "public_url": strings.TrimRight(common.S(common.M(c.Raw["central"])["public_url"]), "/"), "central_ca_file": "/etc/webscan-v1/pki/ca.crt"}
+	runtime["direct_transport"] = true
+	runtime["release"] = Release
+	runtime["max_request_mib"] = common.M(common.M(c.Raw["central"])["event_service"])["max_request_mib"]
+	runtime["deployment_mode"] = common.S(common.M(n["deployment"])["mode"])
+	runtime["host_metrics"] = common.Map{"proc": "/host/proc", "sys": "/host/sys", "root": "/rootfs"}
+	runtime["metrics"] = common.Merge(common.M(n["metrics"]), common.Map{"ca_file": "/etc/webscan-v1/pki/ca.crt", "cert_file": "/etc/webscan-v1/pki/server.crt", "key_file": "/etc/webscan-v1/pki/server.key"})
 	if !c.SSLEnabled() {
 		runtime["central_ca_file"] = ""
 	}
@@ -113,6 +125,15 @@ func ReceiverService(c *Config, image string) common.Map {
 		s["mem_limit"] = strconv.Itoa(common.I(center["new_components_memory_budget_mib"])-common.I(center["new_components_memory_budget_mib"])*5/12-96+extra) + "m"
 		common.M(s["environment"])["GOMEMLIMIT"] = strconv.Itoa(96+extra*3/4) + "MiB"
 	}
+	if Native(c) {
+		m := common.M(center["monitoring"])
+		s["mem_limit"] = strconv.Itoa(common.I(m["memory_mib"])) + "m"
+		common.M(s["environment"])["GOMEMLIMIT"] = strconv.Itoa(common.I(m["go_memory_mib"])) + "MiB"
+	}
+	s["volumes"] = append(common.SS(s["volumes"]), "/run/webscan-management:/run/webscan-management:ro")
+	if Native(c) {
+		s["volumes"] = append(common.SS(s["volumes"]), "/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro,rslave")
+	}
 	s["tmpfs"] = []string{"/tmp:size=16m"}
 	s["networks"] = common.Map{"monitor": common.Map{"aliases": []string{"webscan-v1-receiver"}}}
 	return s
@@ -129,6 +150,9 @@ func ComposeCentral(c *Config, images common.Map) common.Map {
 		"loki":          {"command": []string{"-config.file=/etc/loki/config.yml"}, "volumes": []string{root + "/loki.yml:/etc/loki/config.yml:ro", data + "/loki:/loki"}, "ports": []string{"127.0.0.1:3100:3100"}, "user": "0:0", "mem_limit": "256m"},
 		"grafana":       {"volumes": []string{data + "/grafana:/var/lib/grafana", root + "/grafana.ini:/etc/grafana/grafana.ini:ro", root + "/provisioning:/etc/grafana/provisioning:ro", root + "/grafana-admin-password:/etc/grafana/admin-password:ro"}, "env_file": []string{root + "/grafana.env"}, "ports": []string{common.S(common.M(center["grafana"])["bind_address"]) + ":" + strconv.Itoa(common.I(common.M(center["grafana"])["host_port"])) + ":3000"}, "user": "0:0", "mem_limit": "192m"}}
 	for name, values := range definitions {
+		if Native(c) {
+			continue
+		}
 		key := name
 		if name == "host-exporter" {
 			key = "exporter"
@@ -158,7 +182,7 @@ func ComposeAgent(c *Config, n common.Map, image string) common.Map {
 	s["cpus"] = common.F(resources["cpus"])
 	s["environment"] = common.Map{"GOMEMLIMIT": strconv.Itoa(common.I(resources["go_memory_mib"])) + "MiB", "GOMAXPROCS": strconv.Itoa(common.I(resources["gomaxprocs"]))}
 	s["tmpfs"] = []string{"/tmp:size=16m"}
-	volumes := []string{"/etc/webscan-v1:/etc/webscan-v1:ro", "/var/lib/webscan-v1:/var/lib/webscan-v1", "/var/log/webscan-v1:/var/log/webscan-v1"}
+	volumes := []string{"/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro,rslave", "/etc/webscan-v1:/etc/webscan-v1:ro", "/var/lib/webscan-v1:/var/lib/webscan-v1", "/var/log/webscan-v1:/var/log/webscan-v1"}
 	probe := common.S(common.M(c.Raw["health"])["probe_directory"])
 	volumes = append(volumes, probe+":"+probe)
 	p, _ := common.NewPolicy(common.M(n["monitor"]))

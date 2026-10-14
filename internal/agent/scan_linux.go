@@ -154,9 +154,14 @@ func (a *Agent) scanEngine(ctx context.Context, t scanTask, tool string, spec co
 			return nil, e
 		}
 		rules.Close()
-		cmd = exec.CommandContext(run, "yara", "-w", rules.Name(), name)
+		cmd = exec.CommandContext(run, a.scanner("yara"), "-w", rules.Name(), name)
 	} else {
-		cmd = exec.CommandContext(run, "clamdscan", "--fdpass", "--no-summary", name)
+		args := []string{"--fdpass", "--no-summary"}
+		if conf := common.S(a.C["clamav_config"]); conf != "" {
+			args = append(args, "--config-file="+conf)
+		}
+		args = append(args, name)
+		cmd = exec.CommandContext(run, a.scanner("clamav"), args...)
 	}
 	output := &limitedOutput{Limit: 65536}
 	cmd.Stdout = output

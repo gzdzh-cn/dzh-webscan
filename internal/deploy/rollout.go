@@ -52,8 +52,8 @@ func (d *Deploy) plannedActive() []string {
 	return active
 }
 
-// Current Go installations and fresh installations stage their nodes before
-// one main update. Legacy Python migration keeps its main-first compatibility check.
+// Current Go and fresh installations update main once, then stage and accept
+// one node at a time. Legacy migration retains its compatibility checks.
 func (d *Deploy) canStageRollout() bool {
 	return !d.O.AddNode && !d.addingNode() && !d.O.CentralOnly && len(d.C.Selected(d.O.Node)) > 0 && (!common.B(d.State["central_installed"]) || common.S(d.State["go_release"]) != "" || strings.HasPrefix(common.S(d.State["central_runtime_release"]), "v2."))
 }
@@ -91,20 +91,19 @@ func (d *Deploy) deployRollout(ctx context.Context) (err error) {
 			return d.waitStagedNode(ctx, n)
 		}, d.Central,
 		func(ctx context.Context, n common.Map) error {
-			r, e := d.remote(ctx, n)
-			if e != nil {
+			if e := d.enableNodeTransport(ctx, n); e != nil {
 				return e
 			}
-			if _, e = r.ExecVisible(ctx, startVectorCommand, nil, "服务状态"); e != nil {
+			if e := d.WaitNodeSidecars(ctx, n); e != nil {
 				return e
 			}
-			if e = d.WaitNodeSidecars(ctx, n); e != nil {
+			if e := d.AcceptNode(ctx, n); e != nil {
 				return e
 			}
-			if e = d.AcceptNode(ctx, n); e != nil {
+			if e := d.WaitHealth(ctx, n); e != nil {
 				return e
 			}
-			return d.WaitHealth(ctx, n)
+			return d.clearNodeMaintenance(ctx, n)
 		})
 }
 
@@ -112,22 +111,9 @@ func (d *Deploy) deployRollout(ctx context.Context) (err error) {
 // let isolated tests prove that an interrupted run cannot restart main twice.
 func (d *Deploy) runRolloutSteps(ctx context.Context, prepare func(context.Context, common.Map) error, main func(context.Context) error, accept func(context.Context, common.Map) error) error {
 	s := common.M(d.State["rollout"])
-	for _, n := range d.C.Selected(d.O.Node) {
-		id := common.S(n["id"])
-		if common.B(common.M(s["prepared"])[id]) {
-			continue
-		}
-		if err := progress.Stage(ctx, progress.Node(n), "准备节点监控、扫描和清单（暂缓传输）", func(ctx context.Context) error { return prepare(ctx, n) }); err != nil {
-			return err
-		}
-		common.M(s["prepared"])[id] = true
-		if err := d.save(); err != nil {
-			return err
-		}
-	}
 	if !common.B(s["main_ready"]) {
 		if !common.B(s["main_started"]) {
-			for _, service := range []string{"receiver", "prometheus"} {
+			for _, service := range d.registrationServices() {
 				identity, _ := d.serviceIdentity(ctx, service)
 				s[service+"_before"] = identity
 			}
@@ -148,6 +134,15 @@ func (d *Deploy) runRolloutSteps(ctx context.Context, prepare func(context.Conte
 		id := common.S(n["id"])
 		if common.B(common.M(s["accepted"])[id]) {
 			continue
+		}
+		if !common.B(common.M(s["prepared"])[id]) {
+			if err := progress.Stage(ctx, progress.Node(n), "准备节点监控、扫描和清单（暂缓传输）", func(ctx context.Context) error { return prepare(ctx, n) }); err != nil {
+				return err
+			}
+			common.M(s["prepared"])[id] = true
+			if err := d.save(); err != nil {
+				return err
+			}
 		}
 		if err := progress.Stage(ctx, progress.Node(n), "启用节点传输并验收文件、扫描和消息投递", func(ctx context.Context) error { return accept(ctx, n) }); err != nil {
 			return err
@@ -177,7 +172,7 @@ func (d *Deploy) rolloutMainApplied(ctx context.Context) bool {
 			return false
 		}
 	}
-	services := []string{"receiver", "prometheus"}
+	services := d.registrationServices()
 	changedImages := common.SS(d.State["central_image_services"])
 	for _, name := range changedImages {
 		if !common.Contains(services, name) {
@@ -207,7 +202,7 @@ func (d *Deploy) rollbackRollout(ctx context.Context) error {
 			}
 			continue
 		}
-		if common.S(common.M(common.M(d.State["nodes"])[id])["go_run_id"]) == d.RunID {
+		if state := common.M(common.M(d.State["nodes"])[id]); common.S(state["go_run_id"]) == d.RunID || common.S(state["backup_pending"]) == d.RunID {
 			if e := progress.Stage(ctx, progress.Node(n), "恢复未通过验收的节点（保留数据）", func(ctx context.Context) error { return d.RollbackNode(ctx, n, false) }); e != nil {
 				return e
 			}
@@ -220,7 +215,7 @@ func (d *Deploy) rollbackRollout(ctx context.Context) error {
 				if e := d.restoreCentral(ctx, d.Journal, false); e != nil {
 					return e
 				}
-				if _, e := os.Stat(filepath.Join(d.C.CentralRoot(), "compose.yml")); e == nil {
+				if _, e := os.Stat(filepath.Join(d.C.CentralRoot(), "compose.yml")); e == nil && !Native(d.C) {
 					_, e = d.compose(ctx, "up", "-d", "--no-deps", "--pull", "never", "prometheus")
 					return e
 				}
@@ -236,6 +231,20 @@ func (d *Deploy) rollbackRollout(ctx context.Context) error {
 					return e
 				}
 				runtime["active_nodes"] = active
+				common.M(runtime["monitoring"])["maintenance_nodes"] = []string{}
+				if Native(d.C) {
+					for _, v := range common.A(common.M(runtime["monitoring"])["nodes"]) {
+						n := common.M(v)
+						n["active"] = common.Contains(active, common.S(n["id"])) || common.B(n["central"])
+					}
+					if e = common.AtomicJSON(filepath.Join(root, "runtime.json"), runtime); e != nil {
+						return e
+					}
+					if _, e = d.compose(ctx, "up", "-d", "--no-deps", "--force-recreate", "receiver"); e != nil {
+						return e
+					}
+					return d.waitReady(ctx)
+				}
 				b, e := os.ReadFile(filepath.Join(root, "prometheus.yml"))
 				if e != nil {
 					return e

@@ -143,7 +143,7 @@ func alertDescription(name string) string {
 
 func (s *Store) alertNotice(alert common.Map) string {
 	labels := common.M(alert["labels"])
-	info := common.M(common.M(s.Config["nodes"])[common.S(labels["node_id"])])
+	info := common.M(common.M(s.Snapshot()["nodes"])[common.S(labels["node_id"])])
 	name := common.S(info["name"])
 	if name == "" {
 		name = "监控中心"

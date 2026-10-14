@@ -63,7 +63,7 @@ func execute(args []string, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(out, "Compose 部署包已生成。主服务器使用 central，子服务器使用各自节点目录。")
-	fmt.Fprintln(out, "包内包含运行凭据，请通过 SSH 上传；Grafana 账号密码见 central/grafana-credentials.json，网站后台账号见 central/website-credentials.json。")
+	fmt.Fprintln(out, "包内包含运行凭据，请通过 SSH 上传；网站后台初始账号见 central/website-credentials.json。旧组件模式另提供 Grafana 凭据；新 Go 模式统一使用网站后台。")
 	return nil
 }
 

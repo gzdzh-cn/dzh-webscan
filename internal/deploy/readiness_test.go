@@ -53,6 +53,7 @@ func TestNodeReadyRejectsRetainedStatusAndPriorBaseline(t *testing.T) {
 func TestNodeReadyWaitsThroughStaleStatusAndCurrentInventory(t *testing.T) {
 	d := additionFixture(t)
 	n := d.C.Selected(d.O.Node)[0]
+	n["deployment"] = common.Map{"mode": "docker"}
 	started := time.Now().Add(-2 * time.Second)
 	var mu sync.Mutex
 	polls := 0

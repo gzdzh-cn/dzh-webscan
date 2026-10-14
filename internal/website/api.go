@@ -87,6 +87,25 @@ func (m *Monitor) Handler(w http.ResponseWriter, r *http.Request) {
 			apiError(w, 403, "csrf_invalid", "页面验证已失效，请刷新后重试", "")
 			return
 		}
+		r = withIdentity(r, account.Username)
+		if r.URL.Path == "/api/backups/delete" || r.URL.Path == "/api/websites/delete" {
+			kind := "website-backup"
+			if r.URL.Path == "/api/websites/delete" {
+				kind = "website"
+			}
+			m.Operations.Handler(w, r, account.Username, kind)
+			return
+		}
+		if r.URL.Path == "/api/record-operations" && r.Method == "GET" && r.URL.Query().Get("source") != "host" {
+			p, _ := page(r)
+			v, e := m.Operations.List(r.Context(), account.Username, p)
+			if e != nil {
+				m.dbError(w, e)
+			} else {
+				respond(w, 200, v)
+			}
+			return
+		}
 		switch r.URL.Path {
 		case "/api/session":
 			if r.Method != "GET" {
@@ -162,6 +181,9 @@ func (m *Monitor) Handler(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
+		}
+		if m.Extra != nil && m.Extra(w, withIdentity(r, account.Username)) {
+			return
 		}
 		apiError(w, 404, "api_not_found", "接口不存在", "")
 		return
@@ -266,7 +288,7 @@ func (m *Monitor) login(w http.ResponseWriter, r *http.Request) {
 // A plain HTTP backend may be served through a trusted HTTPS reverse proxy.
 // These hints only make the cookie stricter; they never bypass Origin or CSRF.
 func (m *Monitor) secureCookie(r *http.Request) bool {
-	enabled, exists := m.Config["ssl_enabled"]
+	enabled, exists := m.Settings()["ssl_enabled"]
 	if !exists || common.B(enabled) || r.TLS != nil {
 		return true
 	}
@@ -400,7 +422,7 @@ func (m *Monitor) saveSite(w http.ResponseWriter, r *http.Request, id int64) {
 		apiError(w, 409, "duplicate_url", "这个首页地址已经添加，请编辑已有网站", "url")
 		return
 	}
-	st := State{Status: "pending", Next: time.Now().Unix() + int64(time.Now().UnixNano()%int64(max(1, common.I(m.Config["interval_seconds"]))))}
+	st := State{Status: "pending", Next: time.Now().Unix() + int64(time.Now().UnixNano()%int64(max(1, common.I(m.Settings()["interval_seconds"]))))}
 	if id == 0 {
 		var count int
 		if e = tx.QueryRow("SELECT count(*) FROM websites WHERE deleted=0").Scan(&count); e != nil {
@@ -430,6 +452,11 @@ func (m *Monitor) saveSite(w http.ResponseWriter, r *http.Request, id int64) {
 		st = old.State
 		if old.URL != u || old.Keyword != input.Keyword || input.Paused {
 			_, e = tx.Exec("UPDATE website_incidents SET ended=? WHERE site=? AND ended IS NULL", time.Now().Unix(), id)
+			if e == nil {
+				now := time.Now().Unix()
+				audit := common.ID()
+				_, e = tx.Exec("INSERT INTO record_operations(id,owner,kind,request_key,created,updated,status,ids,cursor,results) VALUES(?,?,?,?,?,?,'complete',?,1,?)", audit, AuthenticatedUsername(r), "website", audit, now, now, string(common.JSON([]string{strconv.FormatInt(id, 10)})), string(common.JSON([]common.Map{{"id": strconv.FormatInt(id, 10), "status": "deleted", "reason": "已软删除，历史保留"}})))
+			}
 			if e != nil {
 				m.dbError(w, e)
 				return

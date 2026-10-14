@@ -52,6 +52,29 @@ func explainOperation(err error) (string, bool) {
 }
 
 var operationInstructions = map[string]string{
+	"consistent_backup_disk_full":                            "一致性数据库备份失败：备份磁盘空间不足。原服务已保留或恢复；请释放备份空间后按原范围重试，不能跳过备份。",
+	"consistent_database_backup_failed":                      "一致性数据库备份失败，未提交迁移；请检查备份目录权限、磁盘空间和数据库状态。原数据保持不变。",
+	"native_resource_limits_not_effective":                   "systemd 实际内存、CPU 或文件句柄限制与配置不一致，验收停止；请核对 cgroup 和服务属性后恢复。",
+	"node_disk_insufficient_for_bundle_and_database_backups": "节点磁盘不足：需要当前数据库两倍空间用于一致性备份，另加至少 256 MiB 工具包及预留空间。尚未切换服务，请释放空间后重试。",
+	"old_node_docker_daemon_unavailable":                     "旧节点 Docker 服务不可用，无法保证原写入者已停止。请先恢复现有引擎；本次不会重装或重启业务容器。",
+	"native_systemd_version_unavailable":                     "无法识别 systemd 版本，请检查节点 systemctl --version。",
+	"native_requires_systemd_231":                            "直接运行 Go 需要 systemd 231 或更高版本，以落实 MemoryMax。当前版本过旧；请升级系统或选择 Docker 单容器。",
+
+	"native_requires_root_linux_amd64_systemd_and_tools":             "直接运行 Go 需要 root、Linux amd64、systemd、Bash、tar、sha256sum 和 sync。请补齐环境；当前未切换服务。",
+	"native_cpu_memory_cgroup_limits_unavailable":                    "宿主机缺少可用的 CPU 或内存 cgroup 控制器，无法落实资源限制。请启用相关控制器后重试。",
+	"docker_installed_but_daemon_unavailable_not_reinstalled":        "Docker 已安装但服务不可用。本次不会重装或重启业务容器；请修复 Docker，或选择直接运行 Go。",
+	"node_docker_missing_choose_native_or_install":                   "此节点没有 Docker。请选择直接运行 Go，或执行部署让受支持的系统自动安装 Docker。",
+	"node_docker_bootstrap_failed_choose_native_or_install_manually": "Docker 自动安装未完成。请查看该阶段输出；可改用直接运行 Go，或手动安装 Docker 后重试。",
+	"agent_native_package_missing_upgrade_image":                     "目标 Agent 镜像没有新版 native 工具包。请将镜像更新为 v2.0.35 或更高版本。",
+	"native_bundle_transfer_or_verification_failed":                  "native 工具包传输、版本或 SHA256 校验失败。尚未切换节点服务；请检查磁盘、连接与该阶段输出后重试。",
+	"native_bundle_not_prepared":                                     "节点 native 工具包尚未准备，请按原部署范围恢复任务。",
+	"node_go_transport_not_ready":                                    "Go 投递工作器或指标接口尚未就绪，请检查节点服务日志、19100 端口、来源地址及证书。",
+	"node_native_service_not_running":                                "节点 systemd 服务没有正常运行，请查看 systemctl status webscan-agent-native 和对应 journal。",
+	"node_native_start_time_unavailable":                             "无法读取节点 systemd 本次启动时间，请检查 systemctl 输出和服务状态。",
+	"node_clamav_service_unavailable":                                "已开启 ClamAV，但节点扫描服务或 /run/clamav/clamd.ctl 不可用；请恢复现有服务。本次不会静默关闭扫描。",
+	"docker_cpu_limits_unavailable":                                  "Docker 不支持所要求的 CPU 配额，未启动新容器。请修复 cgroup 控制器或选择 native 模式。",
+	"node_maintenance_release_failed":                                "节点已验收，但中心维护状态解除失败。请保持原范围恢复部署任务，检查中心管理接口及日志。",
+
 	"bootstrap_tool_image_lock_failed":                        "无法记录 latest 部署工具的实际镜像摘要。请检查 Docker 镜像缓存及仓库响应，修复后重试；未开始部署。",
 	"runtime_image_alias_lock_invalid":                        "容器短标签对应的锁定镜像记录无效。请检查 Compose 的 io.webscan.locked-image 记录；不要手动改写摘要，使用部署脚本重新生成。",
 	"runtime_locked_image_unavailable":                        "本次启动或回退所需的锁定镜像在本机不存在。请恢复该镜像缓存或按部署记录中的摘要下载；不会改用仓库当前 latest 代替旧版本。",

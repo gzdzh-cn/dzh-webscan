@@ -270,7 +270,20 @@ func (i setupInput) node(existing []common.Map) (common.Map, error) {
 		}
 		ssh["auth_method"], ssh["password"], ssh["private_key_path"] = "password", pass, ""
 	}
-	node := common.Map{"id": id, "name": name, "host": host, "enabled": true, "ssh": ssh}
+	runMode, e := i.line("部署方式（1 直接运行 Go，无需 Docker；2 Docker 单容器）", "1", func(v string) error {
+		if v != "1" && v != "2" {
+			return errors.New("请选择 1 或 2")
+		}
+		return nil
+	})
+	if e != nil {
+		return nil, e
+	}
+	runtimeMode := "native"
+	if runMode == "2" {
+		runtimeMode = "docker"
+	}
+	node := common.Map{"id": id, "name": name, "host": host, "enabled": true, "ssh": ssh, "deployment": common.Map{"mode": runtimeMode}}
 	override, e := i.yes("为此节点设置独立监控目录（否则继承公共目录）", false)
 	if e != nil {
 		return nil, e
@@ -419,6 +432,11 @@ func initializeConfig(path, stateDir string, i setupInput) (bool, error) {
 	}
 	fmt.Fprintln(i.out, "\n首次配置向导：填写必要数据，0 取消；秘密输入不回显。保存后进入部署菜单，不会立即安装。")
 	root := doc.Content[0]
+	var initial common.Map
+	if e = yaml.Unmarshal(before, &initial); e != nil {
+		return false, e
+	}
+	nativeMode := common.S(common.M(common.M(initial["central"])["monitoring"])["mode"]) == "native"
 	name, e := i.line("主服务器名称", "网站监控中心", validName)
 	if e != nil {
 		return false, e
@@ -456,25 +474,30 @@ func initializeConfig(path, stateDir string, i setupInput) (bool, error) {
 			return false, e
 		}
 	}
-	grafanaPort, e := i.line("Grafana 端口", "3000", func(v string) error {
-		if e := managementPort(v); e != nil {
-			return e
+	grafanaPort, gaccount := "3000", "admin"
+	if !nativeMode {
+		grafanaPort, e = i.line("Grafana 端口", "3000", func(v string) error {
+			if e := managementPort(v); e != nil {
+				return e
+			}
+			if website && v == websitePort {
+				return errors.New("不能与网站后台端口相同")
+			}
+			return nil
+		})
+		if e != nil {
+			return false, e
 		}
-		if website && v == websitePort {
-			return errors.New("不能与网站后台端口相同")
-		}
-		return nil
-	})
-	if e != nil {
-		return false, e
 	}
 	account, e := i.line("网站后台管理员（密码留空自动生成）", "admin", validAccount)
 	if e != nil {
 		return false, e
 	}
-	gaccount, e := i.line("Grafana 管理员（密码留空自动生成）", "admin", validAccount)
-	if e != nil {
-		return false, e
+	if !nativeMode {
+		gaccount, e = i.line("Grafana 管理员（密码留空自动生成）", "admin", validAccount)
+		if e != nil {
+			return false, e
+		}
 	}
 	feishu, e := i.yes("开启飞书通知", true)
 	if e != nil {
@@ -550,7 +573,11 @@ func initializeConfig(path, stateDir string, i setupInput) (bool, error) {
 			return false, e
 		}
 	}
-	fmt.Fprintf(i.out, "\n配置摘要：主服务器 %s（%s），协议 %s，后台 %t / %d，Grafana %d；飞书 %t（凭据隐藏），子服务器 %d 台，监控目录 %s。\n", name, ip, strings.ToUpper(scheme), website, wp, gp, feishu, len(nodes), strings.Join(roots, ", "))
+	if nativeMode {
+		fmt.Fprintf(i.out, "\n配置摘要：主服务器 %s（%s），协议 %s，统一后台 %t / %d；Go 一体化；飞书 %t（凭据隐藏），子服务器 %d 台，监控目录 %s。\n", name, ip, strings.ToUpper(scheme), website, wp, feishu, len(nodes), strings.Join(roots, ", "))
+	} else {
+		fmt.Fprintf(i.out, "\n配置摘要：主服务器 %s（%s），协议 %s，后台 %t / %d，Grafana %d；飞书 %t（凭据隐藏），子服务器 %d 台，监控目录 %s。\n", name, ip, strings.ToUpper(scheme), website, wp, gp, feishu, len(nodes), strings.Join(roots, ", "))
+	}
 	save, e := i.yes("保存配置并进入部署菜单", true)
 	if e != nil {
 		return false, e
@@ -564,7 +591,7 @@ func initializeConfig(path, stateDir string, i setupInput) (bool, error) {
 	if e = os.Remove(markerPath); e != nil {
 		return false, e
 	}
-	fmt.Fprintln(i.out, "配置已保存为 webscan.yaml（0600），原模板已备份。请放行事件 19443、后台端口及 Grafana 端口；节点需允许主服务器访问 SSH 和 19100。云安全组需自行设置。")
+	fmt.Fprintln(i.out, "配置已保存为 webscan.yaml（0600），原模板已备份。请放行事件 19443 和后台端口；节点需允许主服务器访问 SSH 和 19100。云安全组需自行设置。")
 	return true, nil
 }
 func addConfiguredNode(path, stateDir string, i setupInput) ([]string, error) {

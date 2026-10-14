@@ -18,12 +18,19 @@ COPY config/bootstrap-ca.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates=20250419~deb12u1 tzdata=2026c-0+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/local/bin/webscan"]
-FROM runtime AS central
-# The shared binary provides both the central service and the deploy CLI.
-COPY --from=builder /webscan /usr/local/bin/webscan
-CMD ["central", "--config", "/etc/webscan-v1/runtime.json"]
-FROM runtime AS agent
+FROM runtime AS agent-base
 RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends yara=4.2.3-4 clamdscan=1.4.3+dfsg-1~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /webscan /usr/local/bin/webscan
 CMD ["agent", "--config", "/etc/webscan-v1/runtime.json"]
+
+FROM agent-base AS native-bundle
+COPY scripts/native-tools.sh /native-tools.sh
+RUN /bin/sh /native-tools.sh
+FROM agent-base AS agent
+COPY --from=native-bundle /usr/local/lib/webscan/agent-native.tar.gz /usr/local/lib/webscan/agent-native.tar.gz
+FROM runtime AS central
+# The shared binary provides both the central service and the deploy CLI.
+COPY --from=builder /webscan /usr/local/bin/webscan
+CMD ["central", "--config", "/etc/webscan-v1/runtime.json"]
+COPY --from=native-bundle /usr/local/lib/webscan/agent-native.tar.gz /usr/local/lib/webscan/agent-native.tar.gz

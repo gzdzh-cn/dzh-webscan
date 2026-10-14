@@ -1,169 +1,164 @@
-# DZH Webscan · 网站文件与可用性监控
+# DZH Webscan · 网站与服务器统一监控
 
-集中监控多台服务器的网站文件变化、可疑代码、网站访问故障和 SSL 证书到期情况，通过飞书发送提醒，在网站后台和 Grafana 中查看状态与历史。
+监控多台服务器的网站文件变化、可疑代码、首页访问故障、证书到期和服务器资源，通过飞书和邮箱发送提醒，在自己的中文后台查询状态与历史。
 
-项目仓库：[GitHub · gzdzh-cn/dzh-webscan](https://github.com/gzdzh-cn/dzh-webscan)。默认使用 Docker Hub 公开镜像 `latest`，支持 **Linux amd64（x86_64）**。服务器无需安装 Go、Python 或 Node.js。
+[GitHub · gzdzh-cn/dzh-webscan](https://github.com/gzdzh-cn/dzh-webscan) · [Docker Hub central](https://hub.docker.com/r/gzdzh/webscan-central) · [Docker Hub agent](https://hub.docker.com/r/gzdzh/webscan-agent)
 
-## 能做什么
+支持 **Linux amd64（x86_64）**。前端 Vue 3 + Vite + TypeScript + Element Plus + ECharts，构建后嵌入 GoFrame；服务器无需 Go、Python、Node.js 或前端容器。默认使用 Docker Hub 公开镜像 `latest`。
 
-| 功能 | 用途 |
+## 功能与文档
+
+| 功能 | 用途与详细教程 |
 |---|---|
-| 文件安全监控 | 监听新增、修改、删除及移动；支持多个目录、自定义后缀、忽略规则和单节点配置 |
-| 可疑代码扫描 | 文件变化后异步执行 YARA；配置 ClamAV 服务后可启用对应扫描 |
-| 网站可用性 | 主服务器定时检查网站首页、HTTP 状态和关键词，记录故障并通知恢复 |
-| SSL 证书提醒 | 列表显示剩余有效期；不超过 7 天提醒，进入过期状态补发通知，续签后通知恢复 |
-| 网站管理后台 | 中文概览、筛选分页、增删改、暂停／恢复、立即检查、故障历史 |
-| 账号与配置备份 | 后台修改管理员密码；一键备份网站配置、查看历史、导出／导入 JSON、预览后合并恢复 |
-| 网址操作 | 点击网址在新标签打开；旁边的复制图标复制完整地址，兼容 HTTP 后台 |
-| Grafana 与飞书 | 查看节点资源、监听覆盖、传输队列及日志；通过持久化队列发送告警与重试 |
+| 统一监控后台 | [总览、服务器切换、17 个图表、链路与中心健康](docs/CONSOLE.md) |
+| 服务器资源 | CPU、内存、Swap、负载、磁盘／inode、读写速率、IOPS、网络与丢包；主服务器及子服务器可切换 |
+| 文件与安全事件 | [多目录、单节点规则、自定义后缀与忽略路径](docs/MONITOR-RULES.md)；变化后异步 YARA，可选 ClamAV |
+| 网站与证书 | [首页、关键词、连续故障／恢复、7 天证书提醒](docs/WEBSITE.md) |
+| 告警与通知历史 | 当前异常、网站／服务器历史、飞书与邮箱投递结果；[邮箱配置教程](docs/EMAIL.md) |
+| 可视化配置与部署 | [添加子服务器、编辑必要 YAML 参数、预览与应用、任务日志](docs/CONSOLE.md#添加和修改子服务器) |
+| 账号与备份 | [修改管理员密码、网站 JSON 备份及合并恢复](docs/WEBSITE.md)；部署 YAML 另有受保护的备份与恢复 |
+| Go 一体化 | [中心组件迁移](docs/MIGRATION.md)；[子服务器单服务、无 Docker 安装与方式切换](docs/NODE-DEPLOYMENT.md) |
 
-添加或修改网站即时生效，无需重建容器。网站检查由**主服务器**执行；关联子服务器只用于分类和通知。文件监听由各子服务器执行。
+网站关联节点只用于分类，首页检查由主服务器执行；文件监听与扫描在子服务器执行。目标规模为 **50 台服务器（含主服务器）、1000 个网站**。
 
-## v2.0.30 新增功能
+## 统一监控面板
 
-- **一行安装**：自动创建部署目录、下载固定发布版本并校验 SHA256，设置文件权限。
-- **首次配置向导**：填写主服务器、SSL、后台、飞书和监控目录，支持隐藏输入凭据及多台子服务器。
-- **全局管理命令**：安装入口注册宿主机 `webscan`，以后在主服务器任意目录打开菜单或执行维护命令。
-- **重复执行保护**：保留已有 YAML，脚本有新版时备份后更新；同版跳过重复下载，未完成任务保留原版本。
-- **先安装主服务器**：可不添加子服务器；以后从菜单 **4 → N** 录入新节点并直接安装验收。
+![网站配置、证书及网址操作](docs/image/website-console.png)
 
-[版本更新说明](docs/CHANGELOG.md#v2030) · [首次配置向导](docs/INSTALLATION.md#首次配置向导) · [重复执行说明](docs/INSTALLATION.md#再次执行安装命令)。下载入口和镜像发布不会自动升级运行中的容器，安装或升级仍由管理员在菜单中选择。
+新系统把服务器资源、文件事件、网站检查和飞书／邮箱记录放在同一个后台。后台左侧选择服务器管理，点击服务器进入详情；顶部切换主／子服务器，保留所选时间范围。[页面和图表说明 →](docs/CONSOLE.md)
 
-## 网站监控面板
+### 如何打开，需要什么端口
 
-![网站监控后台：网站管理、证书有效期与网址复制](docs/image/website-console.png)
+开启 `central.website_monitor.enabled`，部署完成后按实际 SSL 设置访问：
 
-后台采用 **Vue 3 + Vite + TypeScript + Element Plus**，构建后嵌入 GoFrame 程序，随 `webscan-central` 镜像运行，无需额外前端容器。
-
-- **监控概览与网站管理**：查看正常／异常网站、响应时间、最近检查和证书有效期，添加网站或立即检查。
-- **故障历史**：查看故障原因、开始时间与恢复情况。
-- **备份管理**：备份全部网站配置，导出或导入 JSON；恢复按网址合并，保留其他网站及原故障历史。配置备份不包含密码、历史或通知队列。
-- **修改密码**：右上角操作，成功后全部会话退出；重启、升级和保留数据的重装沿用新密码。
-
-操作步骤见 **[网站后台使用指南](docs/WEBSITE.md)**，包括登录、宝塔反代、备份恢复、证书判断与访问排查。
-
-### 怎么打开面板
-
-开启 YAML 中的 `central.website_monitor.enabled`，部署成功后按 SSL 设置访问：
-
-| 访问方式 | 地址示例 | 网络要求 |
+| 方式 | 地址 | 开放要求 |
 |---|---|---|
-| 直接访问，SSL 开启 | `https://主服务器IP:19444/login` | 主服务器云安全组及宝塔／系统防火墙允许管理来源访问 TCP `19444`；需信任部署 CA |
-| 直接访问，SSL 关闭 | `http://主服务器IP:19444/login` | 同上；使用 HTTP 协议 |
-| 同机宝塔域名反代 | `https://monitor.example.com/login` | 对外开放 TCP `443`；后台绑定 `127.0.0.1` 时无需公网开放 `19444` |
+| HTTPS 直接访问 | `https://主服务器IP:19444/login` | 云安全组与宝塔／系统防火墙放行 TCP 19444，需信任部署 CA |
+| HTTP 直接访问 | `http://主服务器IP:19444/login` | 同上，协议使用 HTTP |
+| 宝塔 HTTPS 域名反代 | `https://monitor.example.com/login` | 对外开放 443；同机后台绑定 127.0.0.1 时不开放公网 19444 |
 
-端口以 `central.website_monitor.host_port` 为准。**网站后台默认 19444，Grafana 默认 3000，节点事件接口默认 19443，三者用途不同。** 网站后台账号与 Grafana 分开；初始密码见部署完成提示，后台改密后使用新密码。
+端口以 `central.website_monitor.host_port` 为准。反代保留原域名 Host，并设置 `X-Forwarded-Proto $scheme`。[登录及宝塔配置 →](docs/WEBSITE.md#宝塔域名反向代理)
 
-旧 YAML 未配置网站后台时默认关闭；新示例默认开启。[如何开启与登录](docs/WEBSITE.md#开启与登录) · [宝塔反向代理配置](docs/WEBSITE.md#宝塔域名反向代理)。SSL 总开关同时控制节点通信、指标采集和网站后台；切换协议需更新全部启用节点，不能仅升级主服务器。
+管理员初始凭据见安装结果；修改密码后新密码在升级、重启和保留数据的重装后保持。后台旧配置省略时默认关闭，新示例开启。
 
 ## 安装方式
 
-**推荐第 1 种 SH 自动部署**：在主服务器操作一次，统一配置和部署各子服务器，并完成验收、通知与回退。两种方式选一种使用。
+**推荐 SH 自动部署**，统一配置各服务器并完成验收。选择其中一种：
 
-1. **[SH 自动部署（推荐）](#1sh-自动部署推荐)**：主服务器执行脚本，适合首次安装和日常集中维护。
-2. **[Docker Compose 手动部署](#2docker-compose-手动部署)**：本地生成配置包，再分别上传各台服务器执行 Compose。
+1. **[SH 自动部署（推荐）](#1sh-自动部署推荐)**：首次一行安装，以后输入 `webscan` 管理。
+2. **[Docker Compose 手动部署](#2docker-compose-手动部署)**：本地生成包，各服务器执行 Compose。
 
 ### 1、SH 自动部署（推荐）
 
-在 **Linux amd64 主服务器的 root SSH 终端**执行：
+在 Linux amd64 主服务器 root SSH 终端执行：
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://github.com/gzdzh-cn/dzh-webscan/releases/latest/download/install.sh | bash'
 ```
 
-入口自动创建 `/root/webscan-deploy`，下载并验证部署脚本与示例配置，设置权限。首次向导引导填写主服务器 IP、SSL、飞书和监控目录，可先不添加子服务器；保存后进入菜单，选择 **1、安装**。服务器无需安装 Go、Python 或 Node.js。
+入口自动创建 `/root/webscan-deploy`，下载固定发布版本并校验 SHA256。填写首次向导、保存后选择菜单 **1、安装**。可先不加子服务器，以后从菜单 **4** 或后台添加。
 
-安装后，在任意目录输入：
+以后在主服务器任意目录输入：
 
 ```bash
 webscan
 ```
 
-即可打开菜单。菜单 **4** 支持选择已有节点或交互录入新节点；菜单 **5** 完成 SSL 设置及完整部署。也可直接执行 `bash /root/webscan-deploy/deploy-webscan.sh`。
-
-**再次输入一行安装命令**会保留已有 `webscan.yaml`、账号和数据，仅有新版本时更新脚本，然后进入菜单，不自动升级容器。已有部署但配置丢失时停止并提示恢复；存在未完成任务时保留原版本。[重复执行与文件保护](docs/INSTALLATION.md#再次执行安装命令)。
-
-**[完整 SH 安装教程 →](docs/INSTALLATION.md)**：配置填写、飞书设置、端口、检查命令、菜单、SSL 设置及安装验收。
+再次执行一行命令保留已有 YAML、账号和数据；有新版时只更新入口，进入菜单，不自动升级容器。配置丢失或有未完成任务时先恢复原任务。[完整 SH 教程、权限与重复执行处理 →](docs/INSTALLATION.md)
 
 ### 2、Docker Compose 手动部署
 
-本地完整源码目录生成各服务器的配置包；运行服务器只需要 Docker 和 Compose：
+本地完整源码目录先配置并生成身份、证书和运行配置：
 
 ```bash
 cp webscan.example.yaml webscan.compose.yaml
 chmod 600 webscan.compose.yaml
-# 编辑实际服务器、路径和飞书凭据后检查、生成
+# 填写真实服务器及飞书信息
 go run ./cmd/compose --config webscan.compose.yaml --check
 go run ./cmd/compose --config webscan.compose.yaml --output compose-deploy
 ```
 
-将生成的对应目录上传到每台服务器。主服务器在自己的包目录执行 `docker compose pull` 和 `docker compose up -d`；子服务器先启动 Agent 与 exporter，确认清单和监听覆盖，再启用 Vector。
+把各服务器对应目录上传。主服务器在包目录执行 `docker compose pull`、`docker compose up -d`；Docker 节点只启动一个 Agent；native 节点生成 systemd 安装包。Go 一体化主服务器只启动 receiver，内部采集宿主机指标。[完整 Compose 教程与可视化接管 →](docs/COMPOSE.md)
 
-**[完整 Compose 教程 →](docs/COMPOSE.md)**。根目录 [compose.yaml](compose.yaml) 加载生成的服务配置；首次使用需先生成身份、运行配置及必要证书。
-
-## 需要开放哪些端口
-
-修改过端口时以 YAML 为准。**云安全组和宝塔／系统防火墙都需要允许连接**，只设置其中一处可能仍无法访问。
-
-| 所在服务器 | 默认 TCP 端口 | 允许谁访问 | 用途 |
-|---|---|---|---|
-| 主服务器 | `19443` | 各子服务器 IP | 文件事件上报与接收确认 |
-| 子服务器 | `19100` | 主服务器 IP | 节点健康指标采集 |
-| 子服务器 | 自定义 SSH 端口 | 主服务器 IP | 部署、更新和维护 |
-| 主服务器 | `19444` | 管理人员地址 | 网站管理后台；同机反代并绑定回环地址时不向公网开放 |
-| 主服务器 | `3000` | 管理人员地址 | Grafana；使用反代时按实际绑定和代理配置设置 |
-| 宝塔反代服务器 | `443` | 需要访问后台的地址 | HTTPS 域名入口；需要 HTTP 跳转时另外开放 `80` |
-
-主服务器还需出站访问被监控网站与飞书；部署时各服务器需能下载镜像，子服务器需能访问主服务器事件接口。[安装网络要求](docs/INSTALLATION.md#放行网络端口) · [面板访问配置](docs/WEBSITE.md#面板端口与访问方式)。
-
-## 架构与执行顺序
+## 新架构与旧系统升级
 
 ```text
-文件监控：子服务器文件变化 → Agent 过滤与扫描 → Vector 传输
-         → 主服务器保存事件 → 飞书通知 / Loki 日志 → Grafana 查询
-
-网站监控：后台添加网站 → 主服务器定时检查首页、关键词和证书
-         → 保存状态与历史 → 判断故障或恢复 → 飞书通知 / 后台与 Grafana 展示
+文件变化 → 节点 Agent／扫描／SQLite → Go 批量投递与确认 → 中心 SQLite → 飞书＋邮箱／后台
+主机指标 → 共享 Go Linux 采集 → 指标 SQLite／聚合 → Go 告警 → 飞书＋邮箱／资源图表
+网站配置 → Go 定时首页与证书检查 → 故障历史 → 飞书＋邮箱／后台
+后台设置 → Unix Socket 宿主机管理服务 → YAML 备份／部署引擎 → SSH 与验收
 ```
 
-默认网站检测间隔 60 秒，连续 **3 次失败**发送故障通知，连续 **2 次成功**发送恢复通知。404、超时、连接错误、HTTPS 校验失败或关键词缺失均可判为失败；未执行的检查不算故障。返回 200 的错误页面应设置关键词辅助识别；不抓取内页或执行 JavaScript。
+**新示例采用 Go 一体化模式**，不启动 Prometheus、Alertmanager、Grafana、Loki；子服务器整合为一个 Agent，主服务器内部采集主机指标。旧 YAML 默认 legacy，先升级主服务器，然后后台迁入项目历史并验收，再停用本项目的四个旧容器；不直接删除旧数据。[迁移与回退教程 →](docs/MIGRATION.md)
 
-证书剩余时间 **不超过 7×24 小时**独立提醒，不等待首页连续失败；每日最多提醒一次，首次过期补发，续签到超过 7 天后通知恢复。[检测与告警规则](docs/WEBSITE.md#检测与通知如何判断) · [详细架构与部署顺序](docs/ARCHITECTURE.md)。
+这是固定项目指标和事件查询，不提供任意 PromQL／LogQL 或 Grafana 插件。旧系统仍在 legacy 时，可继续使用[Grafana 指南](docs/GRAFANA.md)。[详细执行顺序 →](docs/ARCHITECTURE.md)
 
-## 常用维护命令
+## v2.0.37 统一备份与记录删除
 
-以下命令在主服务器任意目录执行，按需要选择：
+“备份管理”统一为 **网站配置／部署配置** 两个页签。部署 YAML 支持手动备份、脱敏导出、age 密码加密导入导出及恢复预览；恢复只保存为待应用配置。网站、历史、通知、部署任务及备份支持明确选择的单条／批量删除；服务器先卸载监控并验收，再移除配置，保留业务与历史数据。
+
+近期历史、当前异常、未完成任务和回退依赖受保护；系统设置不新增删除按钮。[备份、恢复、删除及保护规则 →](docs/BACKUPS.md)
+
+普通升级只更新中心，无需升级子服务器：
 
 ```bash
-# 完整升级主、子服务器
-webscan --upgrade
-# 仅升级主服务器／应用网站后台配置（不能用于切换总 SSL 协议）
 webscan --upgrade --central-only
-# YAML 添加节点后，安装或更新这个节点
-webscan --add-node --node node-example
-# 只改支持热更新的过滤规则或 YARA 时
-webscan --reload-rules
 ```
 
-`latest` 不会自动更新正在运行的容器，需执行部署更新。未完成任务按日志使用原版本、配置和范围恢复或回退；[维护、恢复、卸载与重装](docs/OPERATIONS.md)。
+子服务器卸载仅在主动确认“卸载并移除”后执行。同步部署包不会自动切换生产容器。
 
-## 文档导航
+## v2.0.36 总览与历史管理
 
-| 想了解什么 | 详细文档 |
-|---|---|
-| 新增功能与版本变化 | [版本更新说明](docs/CHANGELOG.md) |
-| 从零安装、飞书和 SSL 菜单 | [SH 自动部署教程](docs/INSTALLATION.md) |
-| 按服务器手动安装 | [Docker Compose 教程](docs/COMPOSE.md) |
-| 网站后台、登录、宝塔反代、改密、备份及证书 | [网站后台使用指南](docs/WEBSITE.md) |
-| 各节点是否正常、日志与指标查询 | [Grafana 使用指南](docs/GRAFANA.md) |
-| 多目录、自定义后缀、排除隐藏文件、单节点规则 | [文件监控规则](docs/MONITOR-RULES.md) |
-| 全部 YAML 参数、填写要求与错误提示 | [参数说明](docs/PARAMETERS.md) |
-| 镜像、升级、增加节点、恢复、卸载与重装 | [日常维护](docs/OPERATIONS.md) |
-| 无法访问、内存不足、SSH 或通知失败 | [问题排查](docs/TROUBLESHOOTING.md) |
-| 文件、网站、健康及部署执行顺序 | [架构说明](docs/ARCHITECTURE.md) |
-| 本地 Vue / Go 开发、目录和镜像构建 | [开发指南](docs/DEVELOPMENT.md) |
-| 仓库认证与镜像拉取 | [镜像仓库说明](docs/REGISTRY.md) |
+监控总览增加 **13 类组件状态**，同时展示资源排名、当前异常、网站与双通道通知摘要。正常、异常、停用和未知分别显示，缺失数据不会当成零。
 
-Docker Hub 公开镜像：[gzdzh/webscan-central](https://hub.docker.com/r/gzdzh/webscan-central) · [gzdzh/webscan-agent](https://hub.docker.com/r/gzdzh/webscan-agent)。每次发布提供版本标签及 `latest`，第三方组件使用固定版本；需要回退时保留部署记录。
+**文件与安全事件打开后不自动查询**：设置条件后点击“查询”，链路探针默认隐藏。查询成功后可手动开启自动刷新，选择 10／30／60／120／300 秒或自定义 10～3600 秒；筛选未提交或浏览器标签处于后台时暂停。刷新间隔只影响页面查询。
 
-文档中的 IP、域名及凭据为示例，使用时替换为自己的配置。历史验收记录描述当时的结果，当前操作以本页、专题指南及实际代码为准。
+系统设置 → 历史与备份可独立设置事件、安全命中、网站故障、服务器告警及通知的保留天数，并查看存储、预览、导出和手动清理。未完成投递、当前异常与未结束故障受保护。缩短期限会自动删除超期历史，调大无法恢复。
+
+```bash
+webscan --upgrade --central-only
+```
+
+![v2.0.36 监控总览（隔离演示数据）](docs/image/dashboard-v36.png)
+
+本版只需升级主服务器，现有 v2.0.35 子服务器继续运行。[操作说明与数据保护 →](docs/RETENTION.md)
+
+## v2.0.35 子服务器单服务
+
+新增节点默认 **直接运行 Go（native）**，主服务器通过 SSH 下发校验过的程序、YARA 和扫描客户端，由 systemd 管理，子服务器无需 Docker。也可以选择 **Docker 单容器**；已有三容器节点未明确修改方式时，完整升级后保留 Docker，合并为一个 `webscan-agent` 容器。
+
+后台服务器管理 → 添加／编辑配置 → 选择部署方式 → 预览 → 保存并部署。仅保存会标记待应用。列表和详情显示方式、版本及部署状态。主服务器仍需要 Docker。启用 ClamAV 需节点已有扫描服务，不自动安装扫描守护进程。[部署要求、数据保护与回退 →](docs/NODE-DEPLOYMENT.md)
+
+```bash
+webscan --upgrade
+```
+
+**本版本需要升级子服务器**：先升级中心，再逐台升级启用节点。`--central-only` 只升级中心，旧节点暂时继续兼容运行。下载更新部署包不会自动切换生产服务。
+
+## 网络与维护
+
+| 服务器 | 默认 TCP 端口 | 谁访问、做什么 |
+|---|---|---|
+| 主服务器 | 19443 | 子服务器上报文件事件 |
+| 子服务器 | 19100 | 仅主服务器采集指标 |
+| 子服务器 | SSH 端口，默认 22 | 主服务器部署和维护 |
+| 主服务器 | 19444 | 管理后台，限制管理来源；同机反代可绑定回环地址 |
+| 宝塔反代 | 443 | HTTPS 域名后台 |
+| 旧 legacy 主服务器 | 3000 | Grafana；迁移完成后无需开放 |
+
+云安全组和系统防火墙都要放行；主服务器需出站访问被监控网站、飞书和镜像仓库。SSL 总开关统一控制通信、采集和面板，切换协议需部署所有启用节点。
+
+```bash
+webscan --upgrade                        # 完整升级
+webscan --upgrade --central-only         # 仅升级主服务器，不切换协议
+webscan --add-node --node node-example   # 单节点添加或更新
+webscan --reload-rules                   # 支持的过滤规则热更新
+```
+
+`latest` 不会自动更新运行容器。恢复／回退要保持原版本、配置及范围，按任务日志操作。[维护与回退](docs/OPERATIONS.md) · [问题排查](docs/TROUBLESHOOTING.md)
+
+## 其他文档
+
+[配置参数](docs/PARAMETERS.md) · [版本记录](docs/CHANGELOG.md) · [v2.0.36 验证记录](docs/ACCEPTANCE-v2.0.36.md) · [本地开发与发布](docs/DEVELOPMENT.md) · [镜像仓库](docs/REGISTRY.md)
+
+文档 IP、域名、凭据均为示例。下载命令以已发布 Release 为准；源码构建中的新功能需发布相应镜像后才在线上可用。发布或同步部署包不自动切换生产容器。

@@ -3,12 +3,15 @@ module webscan
 go 1.26.3
 
 require (
+	filippo.io/age v1.3.2
 	github.com/gogf/gf/contrib/drivers/sqlite/v2 v2.10.3
 	github.com/gogf/gf/v2 v2.10.3
-	golang.org/x/crypto v0.51.0
-	golang.org/x/sys v0.46.0
+	golang.org/x/crypto v0.55.0
+	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+require filippo.io/hpke v0.4.0 // indirect
 
 require (
 	github.com/BurntSushi/toml v1.5.0 // indirect
@@ -37,9 +40,9 @@ require (
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
-	golang.org/x/net v0.55.0
-	golang.org/x/term v0.43.0
-	golang.org/x/text v0.38.0
+	golang.org/x/net v0.57.0
+	golang.org/x/term v0.45.0
+	golang.org/x/text v0.41.0
 	modernc.org/libc v1.22.5 // indirect
 	modernc.org/mathutil v1.5.0 // indirect
 	modernc.org/memory v1.5.0 // indirect

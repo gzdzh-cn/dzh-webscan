@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 	"webscan/internal/common"
+	"webscan/internal/notify"
 	"webscan/internal/persist"
 	"webscan/internal/progress"
 )
@@ -85,12 +86,14 @@ func (d *Deploy) notifyServer(ctx context.Context, n common.Map, central bool) e
 	if _, err := d.waitDeploymentDelivery(ctx, "/deployment-notices", payload); err != nil {
 		return err
 	}
-	entry["notified"], entry["feishu_business_success"] = true, true
+	entry["notified"], entry["notification_business_success"] = true, true
+	entry["feishu_business_success"] = common.B(common.M(d.C.Raw["feishu"])["enabled"])
 	if !central {
 		a := common.M(common.M(common.M(d.State["nodes"])[id])["go_acceptance"])
-		a["feishu_business_success"] = true
+		a["feishu_business_success"] = common.B(entry["feishu_business_success"])
+		a["notification_business_success"] = true
 	}
-	progress.Info(ctx, "飞书已确认部署完成通知发送成功")
+	progress.Info(ctx, "通知通道已确认部署完成通知提交成功")
 	return d.save()
 }
 
@@ -98,8 +101,8 @@ func (d *Deploy) notifyServer(ctx context.Context, n common.Map, central bool) e
 // test. A retry uses the same task IDs and test registration, without replacing
 // healthy containers just because Feishu was temporarily unreachable.
 func (d *Deploy) DeploymentNotifications(ctx context.Context) error {
-	if !common.B(common.M(d.C.Raw["feishu"])["enabled"]) {
-		progress.Warn(ctx, "feishu.enabled 已关闭：跳过部署完成通知和 PHP 修改通知测试")
+	if !notify.Enabled(d.C.Raw) {
+		progress.Warn(ctx, "飞书及邮箱均关闭：跳过部署完成通知和 PHP 修改通知测试")
 		return nil
 	}
 	if err := progress.Stage(ctx, progress.Host(d.C.Raw), "发送主服务器部署完成通知并确认飞书成功", func(ctx context.Context) error { return d.notifyServer(ctx, nil, true) }); err != nil {
@@ -208,6 +211,6 @@ func (d *Deploy) DeploymentPHPTest(ctx context.Context, n common.Map) error {
 		return err
 	}
 	entry["php_complete"], entry["php_event_id"], entry["php_completed_at"] = true, status["event_id"], common.Stamp()
-	progress.Info(ctx, "真实 PHP 修改告警：飞书业务响应成功，Loki 可查询，测试文件已清理")
+	progress.Info(ctx, "真实 PHP 修改告警：通知通道提交成功，Loki 可查询，测试文件已清理")
 	return d.save()
 }

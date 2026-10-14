@@ -6,6 +6,9 @@ export interface Session { username: string; csrf_token: string; nodes: Node[] }
 export interface Page<T> { items: T[]; total: number }
 export interface Overview { total: number; normal: number; down: number; pending: number; paused: number; scheduler_healthy: boolean }
 let csrf = ''
+let accountName = ''
+export function setAccountName(value: string) { accountName = value }
+export function currentAccountName() { return accountName }
 export function setCSRF(value: string) { csrf = value }
 export class APIError extends Error { constructor(public status: number, message: string, public field = '') { super(message) } }
 export async function api<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
@@ -22,3 +25,15 @@ export async function api<T>(url: string, method = 'GET', body?: unknown): Promi
 export function beijingTime(value: number) { return value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(value * 1000) : '尚未检查' }
 export function stateLabel(site: Site) { return site.paused ? '已暂停' : ({ normal: '正常', down: '无法访问', pending: '等待检查' }[site.state.status] || '等待检查') }
 export function siteInput(site: Site) { return { name: site.name, url: site.url, node: site.node, keyword: site.keyword, slow_alert: site.slow_alert, paused: site.paused } }
+
+// Empty UI values mean no filter. Keep meaningful zero and boolean values.
+export function queryParams(values: Record<string, unknown>): URLSearchParams {
+ const query = new URLSearchParams()
+ for (const [key,value] of Object.entries(values)) if (value !== undefined && value !== null && value !== '') query.set(key,String(value))
+ return query
+}
+export function durationText(value: unknown): string {
+ if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—'
+ const seconds = Math.max(0, Math.floor(Number(value)))
+ return [seconds >= 86400 ? `${Math.floor(seconds/86400)}天` : '', seconds >= 3600 ? `${Math.floor(seconds%86400/3600)}小时` : '', seconds >= 60 ? `${Math.floor(seconds%3600/60)}分` : '', `${seconds%60}秒`].filter(Boolean).join('')
+}

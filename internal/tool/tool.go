@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"webscan/internal/agent"
 	"webscan/internal/common"
 	"webscan/internal/deploy"
 	"webscan/internal/persist"
@@ -14,6 +16,39 @@ import (
 
 func Run(ctx context.Context, action, input, output string, uninstall bool) error {
 	switch action {
+	case "validate-native-service":
+		b, err := os.ReadFile("/etc/systemd/system/webscan-agent-native.service")
+		if err != nil {
+			return err
+		}
+		r := common.Map{}
+		for _, line := range strings.Split(string(b), "\n") {
+			if key, value, ok := strings.Cut(line, "="); ok {
+				if key == "MemoryMax" {
+					v, e := strconv.Atoi(strings.TrimSuffix(value, "M"))
+					if e != nil {
+						return e
+					}
+					r["agent_memory_mib"] = v
+				}
+				if key == "CPUQuota" {
+					v, e := strconv.ParseFloat(strings.TrimSuffix(value, "%"), 64)
+					if e != nil {
+						return e
+					}
+					r["cpus"] = v / 100
+				}
+			}
+		}
+		b, err = deploy.RunCommand(ctx, nil, "systemctl", "show", "webscan-agent-native", "-p", "MemoryMax", "-p", "CPUQuotaPerSecUSec", "-p", "LimitNOFILE")
+		if err != nil {
+			return err
+		}
+		return deploy.VerifyNativeLimits(string(b), r)
+	case "import-agent-logs":
+		return agent.ImportLegacyLogs(ctx, "/var/lib/webscan-v1", "/var/log/webscan-v1")
+	case "legacy-agent-delivery":
+		return agent.PrepareLegacyDelivery(ctx, "/var/lib/webscan-v1", "/var/log/webscan-v1")
 	case "inspect-db":
 		db, err := persist.OpenDB(input)
 		if err != nil {
@@ -65,7 +100,7 @@ func Run(ctx context.Context, action, input, output string, uninstall bool) erro
 		return errors.New("unknown_tool_action")
 	}
 }
-func backupNode(ctx context.Context, dir string) error {
+func backupNode(ctx context.Context, dir string) (err error) {
 	if !strings.HasPrefix(dir, "/var/lib/webscan-deploy/runs/go-") {
 		return errors.New("invalid_node_backup_directory")
 	}
@@ -73,9 +108,9 @@ func backupNode(ctx context.Context, dir string) error {
 	if e != nil {
 		return e
 	}
-	files := []string{"/etc/webscan-v1/runtime.json", "/etc/webscan-v1/php-webshell.yar", "/etc/webscan-v1/compose.yml", "/etc/webscan-v1/vector.yml", "/etc/webscan-v1/exporter.yml", "/etc/webscan-v1/pki/ca.crt", "/etc/webscan-v1/pki/server.crt", "/etc/webscan-v1/pki/server.key", "/opt/webscan-agent-v1/agent.py", "/opt/webscan-agent-v1/common.py"}
-	services := []string{"webscan-agent-v1", "webscan-vector-v1", "webscan-exporter-v1", "webscan-firewall-v1"}
-	state := common.Map{"services": common.Map{}, "agent_go_active": false}
+	files := []string{"/var/lib/webscan-v1/transport-paused", "/etc/webscan-v1/clamd.conf", "/etc/webscan-v1/runtime.json", "/etc/webscan-v1/php-webshell.yar", "/etc/webscan-v1/compose.yml", "/etc/webscan-v1/vector.yml", "/etc/webscan-v1/exporter.yml", "/etc/webscan-v1/pki/ca.crt", "/etc/webscan-v1/pki/server.crt", "/etc/webscan-v1/pki/server.key", "/opt/webscan-agent-v1/agent.py", "/opt/webscan-agent-v1/common.py"}
+	services := []string{"webscan-agent-native", "webscan-agent-v1", "webscan-vector-v1", "webscan-exporter-v1", "webscan-firewall-v1"}
+	state := common.Map{"services": common.Map{}, "agent_go_active": false, "containers": common.Map{}}
 	for _, name := range services {
 		path := "/etc/systemd/system/" + name + ".service"
 		files = append(files, path)
@@ -83,14 +118,71 @@ func backupNode(ctx context.Context, dir string) error {
 		active, _ := deploy.RunCommand(ctx, nil, "systemctl", "is-active", name)
 		common.M(state["services"])[name] = common.Map{"enabled": strings.TrimSpace(string(enabled)) == "enabled", "active": strings.TrimSpace(string(active)) == "active"}
 	}
-	if b, e := deploy.RunCommand(ctx, nil, "docker", "inspect", "--format", "{{.State.Running}}", "webscan-agent-go"); e == nil && strings.TrimSpace(string(b)) == "true" {
-		state["agent_go_active"] = true
+	if _, err := os.Stat("/etc/webscan-v1/compose.yml"); err == nil {
+		if _, e = deploy.RunCommand(ctx, nil, "docker", "info"); e != nil {
+			return errors.New("old_node_docker_daemon_unavailable")
+		}
+		for _, name := range []string{"webscan-agent-go", "webscan-vector-v1", "webscan-exporter-v1"} {
+			if b, err := deploy.RunCommand(ctx, nil, "docker", "inspect", "--format", "{{json .}}", name); err == nil {
+				value, err := common.Decode(b)
+				if err != nil {
+					return err
+				}
+				m := common.M(value)
+				active := common.B(common.M(m["State"])["Running"])
+				policy := common.M(common.M(m["HostConfig"])["RestartPolicy"])
+				restart := common.S(policy["Name"])
+				if restart == "" {
+					restart = "no"
+				}
+				if restart == "on-failure" && common.I(policy["MaximumRetryCount"]) > 0 {
+					restart += fmt.Sprintf(":%d", common.I(policy["MaximumRetryCount"]))
+				}
+				common.M(state["containers"])[name] = common.Map{"active": active, "restart": restart}
+				if name == "webscan-agent-go" {
+					state["agent_go_active"] = active
+				}
+			}
+		}
 	}
+
 	for _, path := range files {
 		if e = j.Remember(path); e != nil {
 			return e
 		}
 	}
+	if e = common.AtomicJSON(filepath.Join(dir, "node-state.json"), state); e != nil {
+		return e
+	}
+	defer func() {
+		if err != nil {
+			for name, value := range common.M(state["services"]) {
+				if common.B(common.M(value)["active"]) {
+					deploy.RunCommand(context.WithoutCancel(ctx), nil, "systemctl", "start", name)
+				}
+			}
+			for name, value := range common.M(state["containers"]) {
+				if common.B(common.M(value)["active"]) {
+					deploy.RunCommand(context.WithoutCancel(ctx), nil, "docker", "start", name)
+				}
+			}
+		}
+	}()
+	for name, value := range common.M(state["services"]) {
+		if common.B(common.M(value)["active"]) {
+			if _, e = deploy.RunCommand(ctx, nil, "systemctl", "stop", name); e != nil {
+				return e
+			}
+		}
+	}
+	for name, value := range common.M(state["containers"]) {
+		if common.B(common.M(value)["active"]) {
+			if _, e = deploy.RunCommand(ctx, nil, "docker", "stop", "-t", "30", name); e != nil {
+				return e
+			}
+		}
+	}
+
 	dbPath := "/var/lib/webscan-v1/agent.sqlite3"
 	if _, e = os.Stat(dbPath); e == nil {
 		db, e := persist.OpenDB(dbPath)
@@ -108,7 +200,10 @@ func backupNode(ctx context.Context, dir string) error {
 			return e
 		}
 	}
-	return common.AtomicJSON(filepath.Join(dir, "node-state.json"), state)
+	if e = common.AtomicJSON(filepath.Join(dir, "node-state.json"), state); e != nil {
+		return e
+	}
+	return common.Atomic(filepath.Join(dir, "backup-complete"), []byte("complete\n"), 0600)
 }
 func restoreNode(ctx context.Context, dir string, uninstall bool) error {
 	if !strings.HasPrefix(dir, "/var/lib/webscan-deploy/runs/go-") {
@@ -126,6 +221,13 @@ func restoreNode(ctx context.Context, dir string, uninstall bool) error {
 		if _, err := deploy.RunCommand(ctx, nil, "systemctl", "cat", name); err == nil {
 			if _, err = deploy.RunCommand(ctx, nil, "systemctl", "disable", "--now", name); err != nil {
 				return err
+			}
+		}
+	}
+	if !uninstall {
+		if _, err := os.Stat("/var/lib/webscan-v1/agent.sqlite3"); err == nil {
+			if e = agent.PrepareLegacyDelivery(ctx, "/var/lib/webscan-v1", "/var/log/webscan-v1"); e != nil {
+				return e
 			}
 		}
 	}
@@ -161,6 +263,17 @@ func restoreNode(ctx context.Context, dir string, uninstall bool) error {
 		}
 		if _, e = deploy.RunCommand(ctx, nil, "docker", "compose", "-f", "/etc/webscan-v1/compose.yml", "up", "-d", "--pull", "never", "--no-deps", "agent"); e != nil {
 			return e
+		}
+	}
+	for name, value := range common.M(state["containers"]) {
+		info := common.M(value)
+		if _, e = deploy.RunCommand(ctx, nil, "docker", "update", "--restart="+common.S(info["restart"]), name); e != nil {
+			return e
+		}
+		if common.B(info["active"]) {
+			if _, e = deploy.RunCommand(ctx, nil, "docker", "start", name); e != nil {
+				return e
+			}
 		}
 	}
 	fmt.Println("previous monitoring restored; databases and queues retained")
