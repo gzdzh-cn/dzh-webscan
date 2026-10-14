@@ -32,7 +32,14 @@ func Redact(m common.Map) common.Map {
 	walk = func(v any) {
 		switch x := v.(type) {
 		case common.Map:
-			for k, value := range x {
+			// Snapshot original fields before adding *_configured metadata.
+			// Iterating newly inserted fields could erase their boolean values.
+			keys := make([]string, 0, len(x))
+			for k := range x {
+				keys = append(keys, k)
+			}
+			for _, k := range keys {
+				value := x[k]
 				if secret(k) || strings.Contains(k, "private_key") {
 					x[k] = ""
 					x[k+"_configured"] = common.S(value) != ""
@@ -141,11 +148,12 @@ type Change struct {
 	Effect string `json:"effect"`
 }
 type Edit struct {
-	Revision string     `json:"revision"`
-	Patch    common.Map `json:"patch"`
-	Clear    []string   `json:"clear_fields"`
-	Node     common.Map `json:"node,omitempty"`
-	NodeID   string     `json:"node_id,omitempty"`
+	Revision             string     `json:"revision"`
+	Patch                common.Map `json:"patch"`
+	Clear                []string   `json:"clear_fields"`
+	Node                 common.Map `json:"node,omitempty"`
+	NodeID               string     `json:"node_id,omitempty"`
+	SSHPrivateKeyContent string     `json:"ssh_private_key_content,omitempty"`
 }
 type Preview struct {
 	Revision string   `json:"revision"`
@@ -190,6 +198,10 @@ func publicValue(path string, v any) any {
 	return v
 }
 func prepare(path string, edit Edit) ([]byte, Preview, error) {
+	return prepareWithKeyPath(path, edit, "/var/lib/webscan-deploy/ssh-keys/preview.key")
+}
+
+func prepareWithKeyPath(path string, edit Edit, keyPath string) ([]byte, Preview, error) {
 	preview := Preview{Changes: []Change{}, Nodes: []string{}, Scope: "runtime"}
 	info, e := os.Lstat(path)
 	if e != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
@@ -259,6 +271,13 @@ func prepare(path string, edit Edit) ([]byte, Preview, error) {
 		}
 		preview.Changes = append(preview.Changes, Change{field, "已配置", "清空", "热加载"})
 	}
+	if edit.SSHPrivateKeyContent != "" {
+		if e := validatePrivateKeyEdit(edit); e != nil {
+			return nil, preview, e
+		}
+		edit.Node = common.Clone(edit.Node)
+		common.M(edit.Node["ssh"])["private_key_path"] = keyPath
+	}
 	if edit.Node != nil {
 		nodes := common.A(c.Raw["nodes"])
 		id := common.S(edit.Node["id"])
@@ -302,6 +321,14 @@ func prepare(path string, edit Edit) ([]byte, Preview, error) {
 				if common.S(common.M(next["ssh"])["password"]) == "" {
 					common.M(next["ssh"])["password"] = common.M(old["ssh"])["password"]
 				}
+				if common.S(common.M(next["ssh"])["private_key_path"]) == "" {
+					for _, effective := range c.Nodes {
+						if common.S(effective["id"]) == id {
+							common.M(next["ssh"])["private_key_path"] = common.M(effective["ssh"])["private_key_path"]
+							break
+						}
+					}
+				}
 				if common.S(old["host"]) != common.S(next["host"]) {
 					return nil, preview, userError("更换主机请添加新节点")
 				}
@@ -331,6 +358,16 @@ func prepare(path string, edit Edit) ([]byte, Preview, error) {
 		}
 		if e = set(&doc, []string{"nodes"}, nodes); e != nil {
 			return nil, preview, e
+		}
+		if common.S(ssh["auth_method"]) == "key" {
+			change := "新增"
+			if found {
+				change = "保留"
+				if edit.SSHPrivateKeyContent != "" || common.S(ssh["private_key_path"]) != "" {
+					change = "替换"
+				}
+			}
+			preview.Changes = append(preview.Changes, Change{"nodes." + id + ".ssh.private_key", nil, change, "私钥认证"})
 		}
 		preview.Scope = "node"
 		preview.Nodes = []string{id}

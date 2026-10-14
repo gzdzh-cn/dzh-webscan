@@ -24,7 +24,6 @@ function queryRange() { if (hours.value !== 0) return rangeQuery(hours.value); c
 let inputTimer:ReturnType<typeof setTimeout>|undefined, previousID='', generation = 0, disposed = false, timer: ReturnType<typeof setInterval> | undefined
 async function load() {if(disposed||document.hidden||busy.value)return;busy.value=true;const current=generation;try{const list=await servers();if(current!==generation||disposed)return;items.value=list.items;const id=selected.value?.id;if(id&&tab.value==='system'){try{const state=await api<typeof systemHealth.value>('/api/system/health');if(current===generation&&!disposed){systemHealth.value=state;systemError.value=''}}catch(e){if(current===generation&&!disposed)systemError.value=errorMessage(e)}}else if(id){const trend=await api<Trend>(`/api/servers/${encodeURIComponent(id)}/metrics?${queryRange()}`);if(current===generation&&!disposed)data.value=trend}if(current===generation&&!disposed)error.value=''}catch(e){if(current===generation&&!disposed)error.value=errorMessage(e)}finally{busy.value=false;if(!disposed&&current!==generation)void load()}}
 function detail(id:string){return {path:`/servers/${encodeURIComponent(id)}`,query:{return_q:q.value||undefined,return_status:status.value||undefined}}}
-function back(){void router.push({path:'/servers',query:Object.fromEntries(queryParams({q:route.query.return_q,status:route.query.return_status}))})}
 function delayedList(){clearTimeout(inputTimer);inputTimer=setTimeout(saveList,300)}
 function saveList(){clearTimeout(inputTimer);void router.replace({path:'/servers',query:Object.fromEntries(queryParams({q:q.value,status:status.value}))})}
 function change(id:string){void router.push({path:`/servers/${encodeURIComponent(id)}`,query:{...route.query,tab:tab.value==='system'&&id!=='central'?'health':tab.value,device:undefined,network:undefined}})}
@@ -40,7 +39,6 @@ onUnmounted(() => { disposed = true; generation++; clearTimeout(inputTimer);clea
 </script>
 <template>
  <el-alert v-if="error" :title="error" type="error" :closable="false" />
- <el-button v-if="route.params.id" class="back-button" @click="back">← 返回服务器列表</el-button>
  <el-alert v-if="route.params.id && !selected && !busy" title="服务器不存在或已移除，请返回服务器列表。" type="warning" :closable="false"/>
  <template v-if="!route.params.id">
  <el-card shadow="never"><div class="filters"><el-input v-model="q" placeholder="搜索名称、IP、节点 ID" clearable @input="delayedList" @clear="saveList" @keyup.enter="saveList" /><el-select v-model="status" placeholder="全部状态" clearable :value-on-clear="''" @change="saveList"><el-option v-for="s in ['normal','unreachable','stale','unknown','disabled']" :key="s" :label="statusLabel(s)" :value="s" /></el-select><el-button type="primary" @click="edit()">添加子服务器</el-button><el-button @click="load">刷新</el-button></div>
@@ -54,5 +52,3 @@ onUnmounted(() => { disposed = true; generation++; clearTimeout(inputTimer);clea
  </template>
  <el-dialog v-model="removing" title="卸载监控并移除子服务器" width="min(700px,96vw)" :close-on-click-modal="false"><el-alert v-if="error" :title="error" type="error" :closable="false"/><p>仅处理明确选择的 {{removalIDs.length}} 台服务器。逐台卸载并验收后移除配置；失败时暂停后续节点，保留失败节点配置，已完成节点不会重复卸载。</p><p>远端数据、业务目录、Docker 引擎及其他容器保留；关联网站转由主服务器检测，原故障与通知历史保留。</p><div v-for="node in removalPreview?.nodes" :key="node.node"><strong>{{node.node}}</strong><p>关联网站：{{node.websites.map(w=>w.name+' '+w.url).join('、')||'无'}}</p></div><template #footer><el-button :disabled="removalBusy" @click="removing=false">取消</el-button><el-button type="danger" :loading="removalBusy" :disabled="!removalPreview" @click="removeNodes">确认卸载并移除</el-button></template></el-dialog><NodeDialog v-model="nodeDialog" :node-id="editing" @saved="load" />
 </template>
-
-<style scoped>.back-button{margin-bottom:16px;max-width:100%}</style>

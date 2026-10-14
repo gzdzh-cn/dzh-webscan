@@ -165,4 +165,4 @@ nodes:
 
 `retention.security_events_days`、`retention.website_incidents_days`、`retention.server_alerts_days` 新增独立保留期限；与 `sqlite_events_days`、`delivery_records_days` 一样要求 1～3650 天整数。缺失安全期限沿用事件期限，缺失服务器期限沿用原聚合期限，网站缺省 30 天。所有旧值保留，不进行数据重新导入。[清理行为、保护及导出](RETENTION.md)。
 
-文件事件的页面自动刷新间隔是浏览器偏好，不属于 YAML；后台默认不开启，查询后手动开启，范围 10～3600 秒。
+文件事件的页面自动刷新间隔是浏览器偏好，不属于 YAML；后台默认不开启，查询后手动开启，可选 10、30、60、120、300 秒。

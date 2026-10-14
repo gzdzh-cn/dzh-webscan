@@ -66,6 +66,10 @@ func Open(configPath, state string) (*Service, error) {
 	if _, e = config.Load(p); e != nil {
 		return nil, e
 	}
+	state, e = filepath.Abs(state)
+	if e != nil {
+		return nil, e
+	}
 	db, e := persist.OpenDB(filepath.Join(state, "management.sqlite3"))
 	if e != nil {
 		return nil, e
@@ -244,17 +248,15 @@ func (s *Service) Handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer unlock()
-		raw, preview, e := prepare(s.ConfigPath, edit)
+		keyPath := s.newPrivateKeyPath(edit)
+		raw, preview, e := prepareWithKeyPath(s.ConfigPath, edit, keyPath)
 		if e != nil {
 			failure(w, e)
 			return
 		}
 		old, e := os.ReadFile(s.ConfigPath)
 		if e == nil {
-			_, e = s.backup(old, "编辑前")
-		}
-		if e == nil {
-			e = common.Atomic(s.ConfigPath, raw, 0600)
+			e = s.commitConfig(old, raw, edit, keyPath, "编辑前")
 		}
 		if e != nil {
 			failure(w, e)
@@ -405,12 +407,14 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := raw
+	keyPath := ""
 	if input.Edit != nil {
 		if input.Kind != "apply" && input.Kind != "add-node" {
 			failure(w, userError("恢复或迁移任务不能同时修改配置"))
 			return
 		}
-		next, _, e = prepare(s.ConfigPath, *input.Edit)
+		keyPath = s.newPrivateKeyPath(*input.Edit)
+		next, _, e = prepareWithKeyPath(s.ConfigPath, *input.Edit, keyPath)
 		if e != nil {
 			failure(w, e)
 			return
@@ -439,9 +443,7 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 		input.Node = original
 	}
 	if input.Edit != nil {
-		if _, e = s.backup(raw, "部署前"); e == nil {
-			e = common.Atomic(s.ConfigPath, next, 0600)
-		}
+		e = s.commitConfig(raw, next, *input.Edit, keyPath, "部署前")
 		if e != nil {
 			failure(w, e)
 			return

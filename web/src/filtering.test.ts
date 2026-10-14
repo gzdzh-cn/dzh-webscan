@@ -68,6 +68,10 @@ it('timer refreshes submitted filters, preserves page and stops in background',a
  Object.defineProperty(document,'hidden',{configurable:true,value:false});document.dispatchEvent(new Event('visibilitychange'));await vi.advanceTimersByTimeAsync(1);expect(calls.filter(v=>v.startsWith('/api/events'))).toHaveLength(3)
  }finally{vi.useRealTimers()}
 })
-it('custom invalid interval pauses timer with a Chinese validation message',async()=>{
- mock();await mount('/events');const input=host.querySelector('[aria-label="自定义刷新间隔（秒）"]') as HTMLInputElement;input.value='1.5';input.dispatchEvent(new Event('input',{bubbles:true}));await settle();expect(host.textContent).toContain('刷新间隔须为 10～3600 秒整数')
+it('refresh uses one preset dropdown and resets an old custom preference to 30 seconds',async()=>{
+ mock();localStorage.setItem('webscan:event-refresh:', '45');await mount('/events');
+ expect(host.querySelector('input[type="number"]')).toBeNull();expect(host.querySelector('[aria-label="自定义刷新间隔（秒）"]')).toBeNull();
+ const select=host.querySelector('[data-testid="refresh-interval"]') as HTMLElement;expect(select.textContent).toContain('30 秒');select.click();await settle();
+ const option=Array.from(document.querySelectorAll('.el-select-dropdown__item')).find(v=>v.textContent==='60 秒') as HTMLElement;expect(option).toBeTruthy();option.click();await settle();
+ expect(select.textContent).toContain('60 秒');expect(localStorage.getItem('webscan:event-refresh:')).toBe('60');localStorage.clear()
 })

@@ -32,7 +32,7 @@ onMounted(()=>{void load();timer=setInterval(load,30000);document.addEventListen
 onUnmounted(()=>{disposed=true;generation++;clearInterval(timer);document.removeEventListener('visibilitychange',visibility)})
 </script>
 <template>
-<div class="dashboard-heading"><div><h2>监控总览 <el-tag>{{data.release||'版本未知'}}</el-tag></h2><p class="muted">{{data.updated?`最近更新：${beijingTime(data.updated)}`:'等待加载'}} · 页面每 30 秒刷新，后台标签暂停</p></div><el-button :loading="loading" @click="load">立即刷新</el-button></div>
+<div class="dashboard-heading"><div><el-tag>{{data.release||'版本未知'}}</el-tag><p class="muted">{{data.updated?`最近更新：${beijingTime(data.updated)}`:'等待加载'}} · 页面每 30 秒刷新，后台标签暂停</p></div><el-button :loading="loading" @click="load">立即刷新</el-button></div>
 <el-alert v-if="error" :title="error+'；已有内容可能已过期'" type="error" :closable="false"/>
 <el-alert v-for="[key,message] in Object.entries(data.errors)" :key="key" :title="message+'；对应分区显示上次结果或未知'" type="warning" :closable="false"/>
 <div class="stats dashboard-stats"><router-link v-for="item in summaries" :key="item.label" :to="item.href"><el-card shadow="never"><span class="muted">{{item.label}}</span><strong>{{item.value}}</strong><small>{{item.hint}}</small></el-card></router-link></div>

@@ -26,3 +26,24 @@ it('old nodes retain docker and explicit change is saved',async()=>{
  button('校验并预览').click();await settle();button('仅保存').click();await settle()
  const args=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/settings'&&c[1]==='PUT')!;expect((args[2] as {node:{deployment:{mode:string}}}).node.deployment.mode).toBe('native')
 })
+
+async function contentMode(){(document.body.querySelector('input[value="content"]') as HTMLInputElement).click();await settle()}
+function keyText(){return document.body.querySelector('textarea[data-testid="private-key-content"], [data-testid="private-key-content"] textarea') as HTMLTextAreaElement}
+function changeText(text:string){const input=keyText();input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}))}
+it('private key file fills the textarea, does not save automatically and is sent only as edit content',async()=>{
+ await open(false);await contentMode();const input=document.body.querySelector('[data-testid="private-key-file"]') as HTMLInputElement
+ const text='-----BEGIN OPENSSH PRIVATE KEY-----\r\nfixture\r\n-----END OPENSSH PRIVATE KEY-----\r\n'
+ const file=new File([text],'without-extension');Object.defineProperty(file,'text',{value:async()=>text});Object.defineProperty(input,'files',{configurable:true,value:[file]});input.dispatchEvent(new Event('change',{bubbles:true}));await settle()
+ expect(keyText().value).toBe(text.replaceAll('\r\n','\n'));expect(vi.mocked(api).mock.calls).toHaveLength(1)
+ button('校验并预览').click();await settle();button('仅保存').click();await settle();const args=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/settings'&&c[1]==='PUT')!
+ const edit=args[2] as {ssh_private_key_content:string;node:{ssh:{private_key_path:string}}};expect(edit.ssh_private_key_content).toBe(text);expect(edit.node.ssh.private_key_path).toBe('')
+})
+it('drop prevents file navigation, retains text on invalid files and mode changes clear content',async()=>{
+ await open(true);await contentMode();changeText('previous');await settle();const event=new Event('drop',{bubbles:true,cancelable:true});Object.defineProperty(event,'dataTransfer',{value:{files:[new File([],'empty')]}});document.body.querySelector('.private-key-entry')!.dispatchEvent(event);await settle()
+ expect(event.defaultPrevented).toBe(true);expect(keyText().value).toBe('previous');expect(document.body.textContent).toContain('私钥文件内容为空');expect(document.body.textContent).toContain('已配置，留空保留')
+ ;(document.body.querySelector('input[value="path"]') as HTMLInputElement).click();await settle();await contentMode();expect(keyText().value).toBe('')
+})
+it('pasted content reaches save-and-deploy without entering the node SSH object',async()=>{
+ await open(true);await contentMode();changeText('fixture pasted key');await settle();button('校验并预览').click();await settle();button('保存并部署').click();await settle()
+ const args=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/deployments')!;expect(args).toBeTruthy();expect((args[2] as {edit:{ssh_private_key_content:string}}).edit.ssh_private_key_content).toBe('fixture pasted key')
+})
