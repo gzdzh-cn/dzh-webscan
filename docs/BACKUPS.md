@@ -1,5 +1,7 @@
 # 备份、恢复与删除
 
+[返回 README](../README.md) · [后台指南](CONSOLE.md) · [历史保留与清理](RETENTION.md)
+
 从侧栏 **备份管理** 进入；网站配置、部署配置分别分页。旧 `/config-backups` 地址自动进入部署配置页签。
 
 | 类型 | 内容 | 恢复方式 |
@@ -45,6 +47,6 @@
 
 当前异常、监控总览不增加删除。**系统设置没有新增单条／批量删除按钮**，原有保留期限和“存储与清理”继续使用。清理、导出与删除审计只读，保留 365 天；删除记录不意味着 SQLite 文件立即缩小，空闲页可复用，不执行在线 VACUUM。
 
-![部署配置备份界面（隔离数据）](image/backups-deployment-v37.png)
+[![部署配置备份界面（v2.0.38 隔离演示数据，点击查看原图）](image/console-backups.png)](image/console-backups.png)
 
 ![历史删除范围预览（隔离数据）](image/events-delete-preview-v37.png)

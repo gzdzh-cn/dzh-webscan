@@ -19,6 +19,12 @@ webscan --upgrade --central-only     # 仅升级主服务器
 
 详细保护规则见[重复执行说明](INSTALLATION.md#再次执行安装命令)，命令问题见[入口排查](TROUBLESHOOTING.md#安装入口与全局命令)。
 
+## 当前版本升级范围
+
+已完成 v2.0.35 节点整合的系统，v2.0.36～v2.0.38 的后台更新只需 `webscan --upgrade --central-only`，账号、网站、历史与通知队列沿用。旧三容器节点尚未整合时用 `webscan --upgrade`，先更新中心，再逐台更新启用节点。旧 legacy 中心先按[迁移教程](MIGRATION.md)迁入历史和切换架构。
+
+添加节点或主动切换 native／Docker，可在后台节点表单预览后保存并部署；保存 YAML、拉取 `latest` 或下载部署包不会自动切换运行服务。统一 SSL 变化必须走完整协议切换，不能只更新中心。
+
 ## 增加或更新单个节点
 
 v2.0.30 起可直接输入 `webscan`，选择菜单 **4 → N**，填写节点信息，查看脱敏摘要并保存，随后自动执行该节点安装和验收；无需先编辑 YAML。没有节点时也可使用此入口。节点 ID 必须唯一；SSH 用户固定 root，端口默认 22，私钥路径必须位于主服务器，密码隐藏输入。可设置独立监控目录，否则继承公共目录。保存前备份 YAML，并同步追加部署顺序。
@@ -64,11 +70,11 @@ bash deploy-webscan.sh --add-node --node node-29
 
 1. **主服务器及所选子服务器**：检查环境，准备镜像、证书和回退记录。
 2. **所选子服务器**：备份旧状态，启动监听及扫描，建立清单，暂缓传输。
-3. **主服务器**：登记节点身份和采集目标，使接收服务及 Prometheus 配置生效。
-4. **所选子服务器**：启用 Vector，补传本地事件。
+3. **主服务器**：登记节点身份和采集目标；新架构由 Go 采集，legacy 才更新 Prometheus 配置。
+4. **所选子服务器**：启动 Go 投递器，补传本地事件；旧部署按原流程使用 Vector。
 5. **子服务器与主服务器**：验收检测、扫描、投递和健康指标，清理测试文件。
 
-这项操作沿用主服务器当前运行的镜像和设置，仅更新所选节点的登记及采集目标。接收服务和 Prometheus 可能因配置生效而重建，正常流程各最多一次；Grafana、Loki、Alertmanager 和其他节点继续运行。
+这项操作沿用主服务器当前运行的镜像和设置，仅更新所选节点的登记及采集目标；其他节点继续运行。旧 legacy 的接收服务和 Prometheus 可能因配置生效而重建，正常流程各最多一次；其 Grafana、Loki 和 Alertmanager 保持运行。
 
 YAML 中尚未应用的主服务器镜像、端口、账号等修改，不随“增加子服务器”生效。更新主服务器另用 `--upgrade --central-only`。
 
@@ -81,7 +87,7 @@ YAML 中尚未应用的主服务器镜像、端口、账号等修改，不随“
 | `webscan-central` | 主服务器接收服务，同时包含部署工具 |
 | `webscan-agent` | 子服务器监听和扫描程序 |
 
-不再需要单独的 `webscan-deployer` 镜像。Grafana、Loki、Prometheus、Alertmanager、Vector 和 exporter 使用固定版本的官方镜像。
+不再需要单独的 `webscan-deployer` 镜像。当前 Go 一体化模式不启动 Grafana、Loki、Prometheus、Alertmanager、Vector 和 exporter；以下第三方镜像表仅用于尚未迁移的 legacy 系统。native 节点使用同版本校验工具包，不拉取 Agent 容器。
 
 “Docker 官方仓库”在这里指 Docker Hub。`gzdzh/webscan-central` 和 `gzdzh/webscan-agent` 是本项目在 Docker Hub 发布的公开镜像；第三方组件使用各上游项目发布的镜像。仓库地址如下：
 
