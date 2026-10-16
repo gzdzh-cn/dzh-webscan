@@ -307,3 +307,31 @@ func TestHostKeysOpenSSHIPv6Syntax(t *testing.T) {
 		t.Fatal("IPv6 pin failed", err)
 	}
 }
+
+func TestReadOnlyConnectionDoesNotTrustNewHost(t *testing.T) {
+	node, rotate, _ := automaticHostFixture(t)
+	store := filepath.Join(t.TempDir(), "ssh_known_hosts")
+	remote, err := CheckConnection(context.Background(), node, store, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.Close()
+	if _, err = os.Stat(store); !os.IsNotExist(err) {
+		t.Fatal("preflight persisted first-use host key", err)
+	}
+	remote, err = connectWithHostKeys(context.Background(), node, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote.Close()
+	before, _ := os.ReadFile(store)
+	rotate(testHostSigner(t))
+	if remote, err = CheckConnection(context.Background(), node, store, ""); err == nil {
+		remote.Close()
+		t.Fatal("changed host key accepted")
+	}
+	after, _ := os.ReadFile(store)
+	if string(before) != string(after) {
+		t.Fatal("preflight altered trust store")
+	}
+}

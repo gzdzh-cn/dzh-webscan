@@ -12,7 +12,13 @@ command -v npm >/dev/null || { echo '前端构建需要本地 Node.js 和 npm' >
 go test ./...
 cp config/bootstrap-ca.crt "dist/$TASK_VERSION/bootstrap-ca.crt"
 printf "*\n!webscan\n!bootstrap-ca.crt\n!native-tools.sh\n" > "dist/$TASK_VERSION/.dockerignore"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X webscan/internal/deploy.Release=$TASK_VERSION" -o "dist/$TASK_VERSION/webscan" ./cmd/webscan
+TASK_BUILD_COMMIT=$(git rev-parse HEAD)
+if [[ -n $(git status --porcelain -- internal cmd scripts web/src go.mod go.sum Dockerfile.release) ]]; then TASK_BUILD_COMMIT="$TASK_BUILD_COMMIT-dirty"; fi
+TASK_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TASK_BUILD_SOURCE=$(git ls-files -z --cached --others --exclude-standard -- internal cmd scripts web/src go.mod go.sum Dockerfile.release config | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
+export WEBSCAN_BUILD_FLAGS="-X webscan/internal/deploy.BuildCommit=$TASK_BUILD_COMMIT -X webscan/internal/deploy.BuildTime=$TASK_BUILD_TIME -X webscan/internal/deploy.BuildSource=$TASK_BUILD_SOURCE"
+printf '{"release":"%s","commit":"%s","built_at":"%s","source_digest":"%s"}\n' "$TASK_VERSION" "$TASK_BUILD_COMMIT" "$TASK_BUILD_TIME" "$TASK_BUILD_SOURCE" > "dist/$TASK_VERSION/build-info.json"
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X webscan/internal/deploy.Release=$TASK_VERSION $WEBSCAN_BUILD_FLAGS" -o "dist/$TASK_VERSION/webscan" ./cmd/webscan
 bash scripts/package-bootstrap.sh "$TASK_VERSION"
 cp scripts/native-tools.sh "dist/$TASK_VERSION/native-tools.sh"
 cp install.sh "dist/$TASK_VERSION/install.sh"

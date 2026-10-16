@@ -67,19 +67,17 @@ func (m *Monitor) Handler(w http.ResponseWriter, r *http.Request) {
 			apiError(w, 401, "login_required", "请先登录网站监控后台", "")
 			return
 		}
-		m.mu.Lock()
-		sess, ok := m.sessions[tokenHash(cookie.Value)]
-		if ok && time.Now().After(sess.Expires) {
-			delete(m.sessions, tokenHash(cookie.Value))
-			ok = false
+		sess, sessionErr := m.readSession(r.Context(), tokenHash(cookie.Value))
+		if sessionErr != nil && sessionErr != sql.ErrNoRows {
+			m.dbError(w, sessionErr)
+			return
 		}
-		m.mu.Unlock()
 		account, accountErr := ReadAccount(m.DB)
 		if accountErr != nil {
 			m.dbError(w, accountErr)
 			return
 		}
-		if !ok || sess.Revision != account.Revision {
+		if sessionErr == sql.ErrNoRows || sess.Revision != account.Revision {
 			apiError(w, 401, "session_expired", "登录已失效，请重新登录", "")
 			return
 		}
@@ -119,9 +117,10 @@ func (m *Monitor) Handler(w http.ResponseWriter, r *http.Request) {
 				apiError(w, 405, "method_not_allowed", "请使用退出登录按钮", "")
 				return
 			}
-			m.mu.Lock()
-			delete(m.sessions, tokenHash(cookie.Value))
-			m.mu.Unlock()
+			if _, e := m.DB.ExecContext(r.Context(), "DELETE FROM website_sessions WHERE token_hash=?", tokenHash(cookie.Value)); e != nil {
+				m.dbError(w, e)
+				return
+			}
 			http.SetCookie(w, &http.Cookie{Name: "webscan_session", Path: "/", MaxAge: -1, Secure: m.secureCookie(r), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 			respond(w, 200, common.Map{"ok": true})
 			return
@@ -268,17 +267,19 @@ func (m *Monitor) login(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 401, "invalid_credentials", "账号或密码不正确", "账号/密码")
 		return
 	}
-	for k, s := range m.sessions {
-		if now.After(s.Expires) {
-			delete(m.sessions, k)
-		}
-	}
-	if len(m.sessions) >= 100 {
-		m.sessions = map[string]session{}
-	}
 	token := common.ID() + common.ID()
 	csrf := common.ID() + common.ID()
-	m.sessions[tokenHash(token)] = session{Revision: account.Revision, CSRF: csrf, Expires: now.Add(12 * time.Hour)}
+	ok, e := m.storeSession(r.Context(), tokenHash(token), session{Revision: account.Revision, CSRF: csrf, Expires: now.Add(sessionLifetime)})
+	if e != nil {
+		m.mu.Unlock()
+		m.dbError(w, e)
+		return
+	}
+	if !ok {
+		m.mu.Unlock()
+		apiError(w, 401, "session_expired", "账号已修改，请重新登录", "")
+		return
+	}
 	delete(m.attempts, ip)
 	m.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "webscan_session", Value: token, Path: "/", MaxAge: 43200, Secure: m.secureCookie(r), HttpOnly: true, SameSite: http.SameSiteStrictMode})
@@ -301,7 +302,7 @@ func (m *Monitor) secureCookie(r *http.Request) bool {
 
 func (m *Monitor) publicNodes() []common.Map {
 	out := []common.Map{}
-	for id, v := range m.Nodes {
+	for id, v := range m.NodeRegistry() {
 		n := common.M(v)
 		out = append(out, common.Map{"id": id, "name": n["name"]})
 	}
@@ -399,7 +400,7 @@ func (m *Monitor) saveSite(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	if input.Node != "" {
-		if _, ok := m.Nodes[input.Node]; !ok {
+		if _, ok := m.NodeRegistry()[input.Node]; !ok {
 			apiError(w, 400, "invalid_node", "关联服务器不存在，请重新选择", "node")
 			return
 		}

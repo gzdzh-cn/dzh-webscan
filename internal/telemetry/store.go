@@ -27,28 +27,33 @@ CREATE TABLE IF NOT EXISTS alert_batches(id TEXT PRIMARY KEY,node TEXT,kind TEXT
 CREATE TABLE IF NOT EXISTS alert_members(event TEXT PRIMARY KEY,batch TEXT);`
 
 type Node struct {
-	CanRemove       bool     `json:"can_remove"`
-	RemoveReason    string   `json:"remove_reason"`
-	DeploymentState string   `json:"deployment_state,omitempty"`
-	ConfiguredMode  string   `json:"configured_mode,omitempty"`
-	ActualMode      string   `json:"actual_mode,omitempty"`
-	AgentVersion    string   `json:"agent_version,omitempty"`
-	PendingMode     bool     `json:"pending_mode"`
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Host            string   `json:"host"`
-	URL             string   `json:"-"`
-	Central         bool     `json:"central"`
-	Active          bool     `json:"active"`
-	Snapshot        Snapshot `json:"snapshot"`
-	Status          string   `json:"status"`
+	generation         uint64
+	ConfigurationState string     `json:"configuration_state"`
+	Recovery           common.Map `json:"recovery,omitempty"`
+	CanRemove          bool       `json:"can_remove"`
+	RemoveReason       string     `json:"remove_reason"`
+	DeploymentState    string     `json:"deployment_state,omitempty"`
+	ConfiguredMode     string     `json:"configured_mode,omitempty"`
+	ActualMode         string     `json:"actual_mode,omitempty"`
+	AgentVersion       string     `json:"agent_version,omitempty"`
+	PendingMode        bool       `json:"pending_mode"`
+	ID                 string     `json:"id"`
+	Name               string     `json:"name"`
+	Host               string     `json:"host"`
+	URL                string     `json:"-"`
+	Central            bool       `json:"central"`
+	Active             bool       `json:"active"`
+	Snapshot           Snapshot   `json:"snapshot"`
+	Status             string     `json:"status"`
 }
 type Store struct {
-	DB       *sql.DB
-	mu       sync.Mutex
-	alertsMu sync.Mutex
-	nodes    []Node
-	config   common.Map
+	collectMu  sync.RWMutex
+	generation uint64
+	DB         *sql.DB
+	mu         sync.Mutex
+	alertsMu   sync.Mutex
+	nodes      []Node
+	config     common.Map
 }
 
 func Open(dir string, nodes []Node, config common.Map) (*Store, error) {
@@ -73,11 +78,15 @@ func (s *Store) Settings() common.Map {
 	return common.Clone(s.config)
 }
 func (s *Store) Configure(c common.Map, nodes []Node) error {
+	s.collectMu.Lock()
+	defer s.collectMu.Unlock()
 	s.alertsMu.Lock()
 	defer s.alertsMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	tx, e := s.DB.Begin()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, e := persist.BeginWrite(ctx, s.DB)
 	if e != nil {
 		return e
 	}
@@ -85,7 +94,7 @@ func (s *Store) Configure(c common.Map, nodes []Node) error {
 	for _, n := range nodes {
 		if !n.Active {
 			for _, q := range []string{"UPDATE health_rules SET phase='disabled' WHERE node=?", "UPDATE alert_outbox SET done=strftime('%s','now') WHERE node=? AND done IS NULL", "UPDATE alert_batches SET done=strftime('%s','now') WHERE node=? AND done IS NULL"} {
-				if _, e = tx.Exec(q, n.ID); e != nil {
+				if _, e = tx.ExecContext(ctx, q, n.ID); e != nil {
 					return e
 				}
 			}
@@ -95,7 +104,7 @@ func (s *Store) Configure(c common.Map, nodes []Node) error {
 	for _, n := range nodes {
 		known[n.ID] = true
 	}
-	rows, err := tx.Query("SELECT DISTINCT node FROM health_rules WHERE phase IN ('pending','firing')")
+	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT node FROM health_rules WHERE phase IN ('pending','firing')")
 	if err != nil {
 		return err
 	}
@@ -116,24 +125,24 @@ func (s *Store) Configure(c common.Map, nodes []Node) error {
 		return err
 	}
 	for _, id := range removed {
-		if _, e = tx.Exec("UPDATE health_rules SET phase='disabled' WHERE node=?", id); e != nil {
+		if _, e = tx.ExecContext(ctx, "UPDATE health_rules SET phase='disabled' WHERE node=?", id); e != nil {
 			return e
 		}
 	}
 	for _, kind := range []string{"cpu", "memory"} {
 		if !common.B(common.M(c["alerts"])[kind+"_enabled"]) {
-			if _, e = tx.Exec("UPDATE health_rules SET phase='disabled' WHERE kind=?", kind); e != nil {
+			if _, e = tx.ExecContext(ctx, "UPDATE health_rules SET phase='disabled' WHERE kind=?", kind); e != nil {
 				return e
 			}
 			// A batch can contain several rules. Cancel its old message, release
 			// unaffected members for regrouping, and retain all event history.
-			if _, e = tx.Exec("UPDATE alert_batches SET done=strftime('%s','now') WHERE done IS NULL AND id IN(SELECT m.batch FROM alert_members m JOIN health_events h ON h.id=m.event WHERE h.kind=?)", kind); e != nil {
+			if _, e = tx.ExecContext(ctx, "UPDATE alert_batches SET done=strftime('%s','now') WHERE done IS NULL AND id IN(SELECT m.batch FROM alert_members m JOIN health_events h ON h.id=m.event WHERE h.kind=?)", kind); e != nil {
 				return e
 			}
-			if _, e = tx.Exec("DELETE FROM alert_members WHERE batch IN(SELECT id FROM alert_batches WHERE done IS NOT NULL) AND event IN(SELECT id FROM alert_outbox WHERE done IS NULL)"); e != nil {
+			if _, e = tx.ExecContext(ctx, "DELETE FROM alert_members WHERE batch IN(SELECT id FROM alert_batches WHERE done IS NOT NULL) AND event IN(SELECT id FROM alert_outbox WHERE done IS NULL)"); e != nil {
 				return e
 			}
-			if _, e = tx.Exec("UPDATE alert_outbox SET done=strftime('%s','now') WHERE done IS NULL AND id IN(SELECT id FROM health_events WHERE kind=?)", kind); e != nil {
+			if _, e = tx.ExecContext(ctx, "UPDATE alert_outbox SET done=strftime('%s','now') WHERE done IS NULL AND id IN(SELECT id FROM health_events WHERE kind=?)", kind); e != nil {
 				return e
 			}
 
@@ -143,7 +152,11 @@ func (s *Store) Configure(c common.Map, nodes []Node) error {
 		return e
 	}
 	s.config = common.Clone(c)
+	s.generation++
 	s.nodes = append([]Node(nil), nodes...)
+	for i := range s.nodes {
+		s.nodes[i].generation = s.generation
+	}
 	return nil
 }
 func (s *Store) Nodes(ctx context.Context) ([]Node, error) {

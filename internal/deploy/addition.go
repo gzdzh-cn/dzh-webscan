@@ -173,12 +173,25 @@ func (d *Deploy) additionSteps(ctx context.Context, steps []additionStep) error 
 
 func (d *Deploy) deployAddition(ctx context.Context) (err error) {
 	n := d.C.Selected(d.O.Node)[0]
-	progress.Info(ctx, "新增节点流程：主服务器登记与采集配置 → 节点安装与清单 → 启用传输 → 文件和消息验收；沿用主服务器运行设置")
+	progress.Info(ctx, "子服务器范围流程：主服务器登记与采集配置 → 节点安装与清单 → 启用传输 → 文件和消息验收；沿用主服务器运行设置")
 	if err = d.waitReady(ctx); err != nil {
 		return err
 	}
+	if _, err = d.nodeCapabilities(ctx); err != nil {
+		return err
+	}
+	acceptedHealthy := false
 	defer func() {
 		if err == nil {
+			return
+		}
+		if acceptedHealthy {
+			d.State["step"] = "node-maintenance-pending"
+			d.State["last_failure"] = common.Map{"stage": "node-maintenance", "time": common.Now()}
+			progress.Warn(ctx, "节点检测、扫描和投递已验收；保留已验收服务，等待原任务继续收尾，不自动切回旧容器")
+			if saveErr := d.save(); saveErr != nil {
+				err = fmt.Errorf("node_addition_state_save_failed: %w", err)
+			}
 			return
 		}
 		progress.Warn(ctx, "新增节点失败，恢复本次节点服务和主服务器登记；保留数据库、事件及队列")
@@ -198,8 +211,8 @@ func (d *Deploy) deployAddition(ctx context.Context) (err error) {
 		}
 	}()
 	err = d.additionSteps(ctx, []additionStep{
-		{"registered", progress.Host(d.C.Raw), "一次更新主服务器节点登记与指标采集配置", d.registerAddition},
-		{"local_ready", progress.Node(n), "安装新节点并建立本地文件清单（暂缓传输）", func(ctx context.Context) error {
+		{"registered", progress.Host(d.C.Raw), "热加载指定节点登记与指标采集配置", d.registerAddition},
+		{"local_ready", progress.Node(n), "安装或升级指定节点并建立本地文件清单（暂缓传输）", func(ctx context.Context) error {
 			if err := d.InstallNode(ctx, n); err != nil {
 				return err
 			}
@@ -223,7 +236,8 @@ func (d *Deploy) deployAddition(ctx context.Context) (err error) {
 	if err = progress.Stage(ctx, progress.Node(n), "核对全部健康指标与待投递队列", func(ctx context.Context) error { return d.WaitHealth(ctx, n) }); err != nil {
 		return err
 	}
-	if err = d.clearNodeMaintenance(ctx, n); err != nil {
+	acceptedHealthy = true
+	if err = progress.Stage(ctx, progress.Node(n), "解除节点维护状态并确认中心应用", func(ctx context.Context) error { return d.clearNodeMaintenance(ctx, n) }); err != nil {
 		return err
 	}
 	state := common.M(common.M(d.State["nodes"])[d.O.Node])
@@ -301,6 +315,16 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 	if !common.Contains(active, d.O.Node) {
 		active = append(active, d.O.Node)
 	}
+	if Native(d.C) && common.S(s["registry_before"]) == "" {
+		v, e := d.nodeCapabilities(ctx)
+		if e != nil {
+			return e
+		}
+		s["registry_before"] = v["revision"]
+		if e = d.save(); e != nil {
+			return e
+		}
+	}
 	if !common.B(s["registration_started"]) {
 		names := []string{"runtime.json"}
 		if !Native(d.C) {
@@ -312,6 +336,9 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 			}
 		}
 		for _, service := range d.registrationServices() {
+			if Native(d.C) {
+				break
+			}
 			id, err := d.serviceIdentity(ctx, service)
 			if err != nil {
 				return err
@@ -330,9 +357,13 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 			return err
 		}
 		n := d.C.Selected(d.O.Node)[0]
-		common.M(runtime["nodes"])[d.O.Node] = common.Map{"host": n["host"], "name": n["name"], "token": common.M(common.M(d.Secrets["nodes"])[d.O.Node])["token"]}
+		common.M(runtime["nodes"])[d.O.Node] = common.M(d.centralRuntime(active)["nodes"])[d.O.Node]
 		runtime["active_nodes"] = active
-		common.M(runtime["monitoring"])["maintenance_nodes"] = []string{d.O.Node}
+		maintenance := common.SS(common.M(runtime["monitoring"])["maintenance_nodes"])
+		if !common.Contains(maintenance, d.O.Node) {
+			maintenance = append(maintenance, d.O.Node)
+		}
+		common.M(runtime["monitoring"])["maintenance_nodes"] = maintenance
 		monitor := common.M(runtime["monitoring"])
 		list := []any{}
 		for _, v := range common.A(monitor["nodes"]) {
@@ -377,6 +408,13 @@ func (d *Deploy) registerAddition(ctx context.Context) error {
 			return err
 		}
 	}
+	if Native(d.C) {
+		if err := d.reloadNodeRegistry(ctx, common.S(s["registry_before"])); err != nil {
+			return err
+		}
+		d.State["active"] = active
+		return d.save()
+	}
 	for _, service := range d.registrationServices() {
 		if common.B(s[service+"_restarted"]) {
 			continue
@@ -415,11 +453,25 @@ func (d *Deploy) rollbackAddition(ctx context.Context) error {
 		}
 	}
 	if common.B(s["registration_started"]) {
+		expected := ""
+		if Native(d.C) {
+			v, e := d.nodeCapabilities(ctx)
+			if e != nil {
+				return e
+			}
+			expected = common.S(v["revision"])
+		}
 		if err := d.Journal.Rollback(); err != nil {
 			return err
 		}
-		if _, err := d.compose(ctx, append([]string{"up", "-d", "--no-deps", "--force-recreate"}, d.registrationServices()...)...); err != nil {
-			return err
+		if Native(d.C) {
+			if err := d.reloadNodeRegistry(ctx, expected); err != nil {
+				return err
+			}
+		} else {
+			if _, err := d.compose(ctx, append([]string{"up", "-d", "--no-deps", "--force-recreate"}, d.registrationServices()...)...); err != nil {
+				return err
+			}
 		}
 		if err := d.waitReady(ctx); err != nil {
 			return err
@@ -427,9 +479,10 @@ func (d *Deploy) rollbackAddition(ctx context.Context) error {
 	}
 	d.State["active"] = common.SS(s["previous_active"])
 	d.State["configuration"], d.State["config_hash"] = s["previous_configuration"], s["previous_config_hash"]
+	d.State["applied_fingerprints"] = d.State["previous_applied_fingerprints"]
 	d.State["go_release"], d.State["image_lock"] = d.State["previous_go_release"], d.State["previous_image_lock"]
 	d.State["step"] = "rolled-back"
-	for _, key := range []string{"local_ready", "registration_started", "files_written", "receiver_before", "prometheus_before", "receiver_restarted", "prometheus_restarted", "registered", "transport_ready", "accepted"} {
+	for _, key := range []string{"registry_before", "local_ready", "registration_started", "files_written", "receiver_before", "prometheus_before", "receiver_restarted", "prometheus_restarted", "registered", "transport_ready", "accepted"} {
 		delete(s, key)
 	}
 	return d.save()

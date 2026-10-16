@@ -6,7 +6,7 @@ TASK_VERSION=${1:?Usage: package-bootstrap.sh RELEASE}
 [[ $TASK_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
 cd "$TASK_ROOT"
 mkdir -p "dist/$TASK_VERSION"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.Release=$TASK_VERSION -X webscan/internal/deploy.Release=$TASK_VERSION" -o "dist/$TASK_VERSION/bootstrap" ./cmd/bootstrap
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.Release=$TASK_VERSION -X webscan/internal/deploy.Release=$TASK_VERSION ${WEBSCAN_BUILD_FLAGS:-}" -o "dist/$TASK_VERSION/bootstrap" ./cmd/bootstrap
 TASK_SHA=$(shasum -a 256 "dist/$TASK_VERSION/bootstrap" | awk '{print $1}')
 cat > "dist/$TASK_VERSION/deploy-webscan.sh" <<HEADER
 #!/usr/bin/env bash

@@ -47,3 +47,37 @@ it('pasted content reaches save-and-deploy without entering the node SSH object'
  await open(true);await contentMode();changeText('fixture pasted key');await settle();button('校验并预览').click();await settle();button('保存并部署').click();await settle()
  const args=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/deployments')!;expect(args).toBeTruthy();expect((args[2] as {edit:{ssh_private_key_content:string}}).edit.ssh_private_key_content).toBe('fixture pasted key')
 })
+
+it('connection check never saves or deploys and late result is ignored after closing',async()=>{
+ await open(false)
+ let finish!:(value:unknown)=>void
+ vi.mocked(api).mockImplementation(async <T,>(url:string)=> {if(url==='/api/servers/preflight')return await new Promise<unknown>(resolve=>{finish=resolve}) as T;throw new Error('unexpected request')})
+ button('连接与环境检查').click();await settle()
+ expect(vi.mocked(api).mock.calls.filter(c=>c[1]==='POST').map(c=>c[0])).toEqual(['/api/servers/preflight'])
+ button('取消').click();await settle();finish({ok:true,items:[{name:'late-check',status:'passed',message:'should not appear'}]});await settle()
+ expect(document.body.textContent).not.toContain('should not appear')
+})
+it('opening the node dialog displays inherited configuration without side effects',async()=>{
+ await open(false)
+ // Existing API fixture remains read-only until the user explicitly invokes a form action.
+ expect(vi.mocked(api).mock.calls.map(c=>c[0])).toEqual(['/api/settings'])
+ expect(document.body.textContent).toContain('使用公共配置（推荐）')
+ expect(document.body.textContent).toContain('跟随公共配置')
+})
+
+it('independent upgrade ignores unsaved form drafts and uses a bound preview',async()=>{
+ await open(true)
+ vi.mocked(api).mockImplementation(async <T,>(url:string)=>{
+  if(url==='/api/settings')return {revision:'saved',values:{nodes:[{id:'old',name:'已保存名称',host:'192.0.2.2',enabled:true,ssh:{auth_method:'key'}}]},effective_nodes:[{id:'old',enabled:true,deployment:{mode:'docker'}}],node_deployments:{old:{mode:'docker',version:'v2.0.43',phase:'complete'}}} as T
+  if(url.endsWith('/upgrade-preview'))return {preview_token:'bound-token',revision:'saved',mode:'docker',current_version:'v2.0.43',target_version:'v2.0.44',target_image:'test@sha256:fixture',changes:[],baseline_known:false,scope:'仅升级此子服务器'} as T
+  if(url==='/api/deployments')return {id:'upgrade-job'} as T
+  throw new Error('unexpected request')
+ })
+ button('取消').click();await settle()
+ // Reopen by mounting again with installed metadata.
+ app.unmount();host.remove()
+ const visible=ref(false),router=createRouter({history:createMemoryHistory(),routes:[{path:'/:pathMatch(.*)*',component:{render:()=>null}}]});await router.push('/servers');await router.isReady();host=document.createElement('div');document.body.append(host);app=createApp({render:()=>h(NodeDialog,{modelValue:visible.value,nodeId:'old','onUpdate:modelValue':(v:boolean)=>{visible.value=v}})});app.use(router).use(ElementPlus).mount(host);visible.value=true;await settle()
+ const name=document.body.querySelector('.node-editor-dialog input') as HTMLInputElement;name.value='未保存草稿';name.dispatchEvent(new Event('input',{bubbles:true}));await settle()
+ button('升级子服务器').click();await settle();expect(document.body.textContent).toContain('不保存弹窗草稿');expect(document.body.textContent).toContain('无法确认配置差异');button('确认升级（不保存草稿）').click();await settle()
+ const call=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/deployments')!;expect(call[2]).toMatchObject({kind:'upgrade-node',node:'old',revision:'saved',preview_token:'bound-token'});expect(call[2]).not.toHaveProperty('edit');expect(vi.mocked(api).mock.calls.filter(c=>c[1]==='PUT')).toHaveLength(0)
+})

@@ -2,13 +2,19 @@ package central
 
 import (
 	"errors"
+	"fmt"
 	"webscan/internal/common"
 	"webscan/internal/notify"
 	"webscan/internal/telemetry"
 )
 
 func configPathFrom(c common.Map) string { return common.S(c["runtime_path"]) }
+
+var errRuntimeSettingsUnavailable = errors.New("runtime_settings_unavailable")
+
 func (s *Store) reloadSettings(path string) error {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
 	if path == "" {
 		return errors.New("运行配置路径缺失")
 	}
@@ -22,13 +28,13 @@ func (s *Store) reloadSettings(path string) error {
 	}
 	for _, key := range []string{"data_dir", "bind", "port", "https", "public_http", "nodes", "active_nodes", "management_socket"} {
 		if string(common.JSON(old[key])) != string(common.JSON(c[key])) {
-			return errors.New("连接或节点变化需要部署应用")
+			return fmt.Errorf("连接或节点变化需要部署应用（字段：%s）", key)
 		}
 	}
 	wm, previous := common.M(c["website_monitor"]), common.M(old["website_monitor"])
 	for _, key := range []string{"enabled", "host_port", "ssl_enabled", "bind_address"} {
 		if string(common.JSON(wm[key])) != string(common.JSON(previous[key])) {
-			return errors.New("后台监听变化需要重建")
+			return fmt.Errorf("后台监听变化需要重建（字段：website_monitor.%s）", key)
 		}
 	}
 	c["runtime_path"] = path
@@ -40,7 +46,7 @@ func (s *Store) reloadSettings(path string) error {
 			nodes = append(nodes, telemetry.Node{ID: common.S(n["id"]), Name: common.S(n["name"]), Host: common.S(n["host"]), URL: common.S(n["url"]), Active: common.B(n["active"]), Central: common.B(n["central"])})
 		}
 		if e = s.Telemetry.Configure(settings, nodes); e != nil {
-			return e
+			return fmt.Errorf("%w: %w", errRuntimeSettingsUnavailable, e)
 		}
 	}
 	if s.Websites != nil {

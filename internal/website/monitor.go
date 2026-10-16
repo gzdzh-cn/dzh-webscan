@@ -77,7 +77,7 @@ type Monitor struct {
 	WriteMu        *sync.Mutex
 	mu             sync.Mutex
 	active         map[int64]context.CancelFunc
-	sessions       map[string]session
+	nodeRegistry   atomic.Pointer[common.Map]
 	attempts       map[string]attempt
 	probe          *prober
 	pulse          atomic.Int64
@@ -96,7 +96,7 @@ func New(db *sql.DB, config, nodes common.Map, writeMu *sync.Mutex, notify bool)
 	if writeMu == nil {
 		writeMu = &sync.Mutex{}
 	}
-	m := &Monitor{DB: db, Config: config, Nodes: nodes, WriteMu: writeMu, active: map[int64]context.CancelFunc{}, sessions: map[string]session{}, attempts: map[string]attempt{}, probe: newProber(), PasswordHash: common.S(config["password_hash"]), Username: common.S(config["admin_username"]), ConsoleURL: common.S(config["console_url"]), Notify: notify}
+	m := &Monitor{DB: db, Config: config, Nodes: nodes, WriteMu: writeMu, active: map[int64]context.CancelFunc{}, attempts: map[string]attempt{}, probe: newProber(), PasswordHash: common.S(config["password_hash"]), Username: common.S(config["admin_username"]), ConsoleURL: common.S(config["console_url"]), Notify: notify}
 	if e := m.migrate(); e != nil {
 		return nil, e
 	}
@@ -476,7 +476,7 @@ func (m *Monitor) apply(ctx context.Context, s Site, r Result) error {
 }
 func (m *Monitor) message(s Site, text string, r Result) string {
 	node := "主服务器检测"
-	if n := common.M(m.Nodes[s.Node]); len(n) > 0 {
+	if n := common.M(m.NodeRegistry()[s.Node]); len(n) > 0 {
 		node = common.S(n["name"]) + "（" + common.S(n["host"]) + "）"
 	}
 	return fmt.Sprintf("网站可用性提醒\n网站：%s\n地址：%s\n关联服务器：%s\n情况：%s\n发生时间：%s（北京时间）", s.Name, s.URL, node, text, time.Unix(r.Time, 0).In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05"))

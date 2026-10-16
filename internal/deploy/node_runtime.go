@@ -11,6 +11,7 @@ import (
 	"time"
 	"webscan/internal/assets"
 	"webscan/internal/common"
+	"webscan/internal/progress"
 )
 
 func ResolveNodeMode(n, state common.Map) string {
@@ -98,7 +99,10 @@ func (d *Deploy) prepareUnifiedNode(ctx context.Context, n common.Map) error {
 	id := common.S(n["id"])
 	state := common.M(common.M(d.State["nodes"])[id])
 	state["target_deployment_mode"] = nodeMode(n)
-	if common.S(state["go_run_id"]) != d.RunID {
+	if common.S(state["prepare_run_id"]) != d.RunID {
+		state["prepare_run_id"] = d.RunID
+		state["previous_agent_image"] = state["agent_image"]
+		state["previous_go_image"] = state["go_image"]
 		state["previous_go_release"] = state["go_release"]
 		state["previous_deployment_mode"] = common.S(state["deployment_mode"])
 		if common.S(state["previous_deployment_mode"]) == "" && common.S(state["phase"]) != "" {
@@ -113,6 +117,7 @@ func (d *Deploy) prepareUnifiedNode(ctx context.Context, n common.Map) error {
 	}
 	defer os.RemoveAll(dir)
 	image := common.S(d.Images["agent"])
+	state["agent_image"] = image
 	container := "webscan-native-" + common.ID()
 	if _, e = d.Docker.Exec(ctx, nil, "create", "--name", container, image, "version"); e != nil {
 		return e
@@ -336,6 +341,33 @@ func (d *Deploy) waitUnifiedTransport(ctx context.Context, n common.Map) error {
 func (d *Deploy) clearNodeMaintenance(ctx context.Context, n common.Map) error {
 	return d.setNodeMaintenance(ctx, n, false)
 }
+
+// Reloads are idempotent. A busy or restarting center must not turn an accepted
+// node into a failed installation after just one management request.
+func (d *Deploy) reloadNodeMaintenance(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	port := common.I(common.M(common.M(d.C.Raw["central"])["event_service"])["port"])
+	for attempt := 0; ; attempt++ {
+		status, _, e := common.Request(ctx, d.HTTP, "POST", fmt.Sprintf("http://127.0.0.1:%d/reload-settings", port), common.Map{}, map[string]string{"Authorization": "Bearer " + common.S(d.Secrets["alert_token"])})
+		if e == nil && status == 200 {
+			return nil
+		}
+		reason := "请求失败或响应未确认"
+		if status != 0 {
+			reason = fmt.Sprintf("HTTP %d", status)
+		}
+		transient := status == 0 || status == 200 || status == 429 || status >= 500
+		if !transient || attempt >= 4 || ctx.Err() != nil {
+			return &progress.Failure{Code: "node_maintenance_release_failed", Message: "中心维护状态同步未完成（" + reason + "）。已保留部署现场，请按原范围继续任务；认证或配置校验失败不会自动重试。"}
+		}
+		progress.Info(ctx, fmt.Sprintf("中心维护状态同步暂未确认（%s），%d 秒后重试", reason, 1<<attempt))
+		if !common.Sleep(ctx, time.Duration(1<<attempt)*time.Second) {
+			return ctx.Err()
+		}
+	}
+}
+
 func (d *Deploy) setNodeMaintenance(ctx context.Context, n common.Map, enabled bool) error {
 	path := filepath.Join(d.C.CentralRoot(), "runtime.json")
 	runtime, e := common.ReadJSON(path)
@@ -346,11 +378,9 @@ func (d *Deploy) setNodeMaintenance(ctx context.Context, n common.Map, enabled b
 		return e
 	}
 	m := common.M(runtime["monitoring"])
-	if !enabled && !common.Contains(common.SS(m["maintenance_nodes"]), common.S(n["id"])) {
-		return nil
-	}
+	previous := common.SS(m["maintenance_nodes"])
 	list := []string{}
-	for _, id := range common.SS(m["maintenance_nodes"]) {
+	for _, id := range previous {
 		if id != common.S(n["id"]) {
 			list = append(list, id)
 		}
@@ -359,15 +389,24 @@ func (d *Deploy) setNodeMaintenance(ctx context.Context, n common.Map, enabled b
 		list = append(list, common.S(n["id"]))
 	}
 	m["maintenance_nodes"] = list
-	if e = d.Journal.Write(path, common.JSON(runtime), 0600); e != nil {
-		return e
+	if string(common.JSON(previous)) != string(common.JSON(list)) {
+		if d.Journal == nil {
+			run := common.S(d.State["run_id"])
+			if !strings.HasPrefix(run, "go-") {
+				return errors.New("node_maintenance_requires_deployment_journal")
+			}
+			d.Journal, e = NewJournal(filepath.Join(StateRoot, "runs", run, "central"))
+			if e != nil {
+				return e
+			}
+		}
+		if e = d.Journal.Write(path, common.JSON(runtime), 0600); e != nil {
+			return e
+		}
 	}
-	port := common.I(common.M(common.M(d.C.Raw["central"])["event_service"])["port"])
-	status, _, e := common.Request(ctx, d.HTTP, "POST", fmt.Sprintf("http://127.0.0.1:%d/reload-settings", port), common.Map{}, map[string]string{"Authorization": "Bearer " + common.S(d.Secrets["alert_token"])})
-	if e != nil || status != 200 {
-		return errors.New("node_maintenance_release_failed")
-	}
-	return nil
+	// Always confirm the running state, even when a previous attempt already
+	// wrote the desired file but lost the reload response.
+	return d.reloadNodeMaintenance(ctx)
 }
 
 func systemdPath(p string) string {

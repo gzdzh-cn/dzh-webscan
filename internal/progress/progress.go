@@ -3,6 +3,7 @@ package progress
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -167,6 +168,10 @@ func (r *Reporter) emit(s scope, status, message string) {
 	line := fmt.Sprintf("[%s][%s][%s][%s] %s\n", time.Now().In(zone).Format("15:04:05"), label, status, r.clean(host), r.clean(message))
 	if r.file != nil {
 		fmt.Fprint(r.file, line)
+	}
+	if os.Getenv("WEBSCAN_MANAGEMENT_JOB") != "" {
+		event, _ := json.Marshal(map[string]any{"step": s.step, "phase": r.phase, "host": r.clean(host), "title": r.clean(s.title), "status": status, "message": r.clean(message), "time": time.Now().Unix()})
+		fmt.Fprintf(r.out, "@webscan-progress %s\n", event)
 	}
 	if r.color {
 		color := "36"

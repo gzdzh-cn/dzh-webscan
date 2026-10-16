@@ -194,7 +194,7 @@ func (m *Monitor) preview(ctx context.Context, doc BackupDocument, b Backup) (Re
 	unknown := map[string]bool{}
 	for _, s := range doc.Sites {
 		if s.Node != "" {
-			if _, ok := m.Nodes[s.Node]; !ok {
+			if _, ok := m.NodeRegistry()[s.Node]; !ok {
 				if !unknown[s.Node] {
 					out.Unknown = append(out.Unknown, s.Node)
 					unknown[s.Node] = true
@@ -267,7 +267,7 @@ func (m *Monitor) restore(ctx context.Context, doc BackupDocument, b Backup, tok
 	changed := []int64{}
 	for _, s := range doc.Sites {
 		if s.Node != "" {
-			if _, ok := m.Nodes[s.Node]; !ok {
+			if _, ok := m.NodeRegistry()[s.Node]; !ok {
 				s.Node = ""
 			}
 		}

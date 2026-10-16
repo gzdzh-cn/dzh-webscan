@@ -107,7 +107,7 @@ func (d *Deploy) showScope(ctx context.Context) {
 	if d.O.AddNode {
 		progress.Info(ctx, "操作范围：仅安装或更新 "+progress.Node(d.C.Selected(d.O.Node)[0])+"；沿用主服务器当前镜像和配置，忽略 YAML 中待应用的主服务器修改")
 		if Native(d.C) {
-			progress.Info(ctx, "主服务器变更：仅此节点登记和 Go 采集目标；receiver 最多重建一次，其他节点保持运行")
+			progress.Info(ctx, "主服务器变更：仅热加载此节点登记和 Go 采集目标；不重建中心容器，其他节点保持运行")
 		} else {
 			progress.Info(ctx, "主服务器变更：仅此节点登记和采集目标；receiver、Prometheus 各最多重建一次；Grafana、Loki、Alertmanager 与其他节点保持运行")
 		}
@@ -124,4 +124,14 @@ func (d *Deploy) showScope(ctx context.Context) {
 		names = append(names, progress.Node(n))
 	}
 	progress.Info(ctx, "子服务器变更："+strings.Join(names, "、"))
+}
+
+// A selected child install/upgrade uses the same constrained operation as the
+// visual node action, regardless of which supported CLI spelling is used.
+func (d *Deploy) normalizeNodeScope() {
+	if d.O.Node != "" && !d.O.CentralOnly && !d.O.AddNode && (d.O.Install || d.O.Upgrade) && !d.O.Resume && !d.O.Rollback {
+		d.O.AddNode = true
+		d.O.Install = false
+		d.O.Upgrade = false
+	}
 }

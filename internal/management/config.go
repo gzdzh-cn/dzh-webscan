@@ -426,6 +426,12 @@ func yamlValue(v any) any {
 }
 
 func effectFor(field string) (string, string, bool) {
+	if strings.HasPrefix(field, "credentials_or_effective_config.") {
+		if strings.TrimPrefix(field, "credentials_or_effective_config.") == "central" {
+			return "runtime", "更新主服务器配置", false
+		}
+		return "nodes", "更新对应节点凭据及配置", true
+	}
 	if field == "ssl.enabled" || field == "central.public_url" || strings.HasPrefix(field, "central.event_service.") || strings.HasPrefix(field, "central.metrics_allowed_source_ip") {
 		return "full", "更新主服务器和全部启用节点", true
 	}
@@ -458,9 +464,18 @@ func (s *Service) pendingPreview(raw []byte, p Preview) Preview {
 	for _, change := range p.Changes {
 		seen[change.Field] = true
 	}
-	for _, change := range configChanges(old, applied) {
+	for _, change := range configChanges(effectiveMap(old, state), effectiveMap(common.M(config.Redact(config.ApplicationInput(c.Raw, c.Nodes))), state)) {
 		if !seen[change.Field] {
 			p.Changes = append(p.Changes, change)
+		}
+	}
+	// Fingerprint-only differences (for example a replaced SSH password) are not in redacted snapshots.
+	summary := s.configurationStatus(c, state)
+	if extra, ok := summary["changes"].([]Change); ok {
+		for _, change := range extra {
+			if strings.HasPrefix(change.Field, "credentials_or_effective_config.") && !seen[change.Field] {
+				p.Changes = append(p.Changes, change)
+			}
 		}
 	}
 	rank := map[string]int{"runtime": 0, "central": 1, "node": 2, "nodes": 2, "full": 3}
