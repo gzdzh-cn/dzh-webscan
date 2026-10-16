@@ -37,7 +37,13 @@ func (s *Service) apply(ctx context.Context, id string) error {
 	}
 	// Applying networking or node changes requires the deployment engine, not a partial hot update.
 	oldCenter, newCenter := common.M(previous["central"]), common.M(c.Raw["central"])
-	restart := string(common.JSON(previous["ssl"])) != string(common.JSON(c.Raw["ssl"])) || string(common.JSON(oldCenter["public_url"])) != string(common.JSON(newCenter["public_url"])) || string(common.JSON(oldCenter["event_service"])) != string(common.JSON(newCenter["event_service"])) || string(common.JSON(previous["nodes"])) != string(common.JSON(common.M(config.Redact(c.Raw))["nodes"]))
+	summary := s.configurationStatus(c, state)
+	restart := common.S(summary["scope"]) == "full" || common.S(summary["scope"]) == "nodes"
+	for id, status := range common.M(s.configurationStatus(c, state)["statuses"]) {
+		if id != "central" && common.S(status) == "pending" {
+			restart = true
+		}
+	}
 	centralRestart := false
 	if string(common.JSON(oldCenter["metrics_allowed_source_ip"])) != string(common.JSON(newCenter["metrics_allowed_source_ip"])) {
 		restart = true
@@ -51,9 +57,6 @@ func (s *Service) apply(ctx context.Context, id string) error {
 		if string(common.JSON(common.M(oldCenter["website_monitor"])[key])) != string(common.JSON(common.M(newCenter["website_monitor"])[key])) {
 			centralRestart = true
 		}
-	}
-	if string(common.JSON(previous["node_defaults"])) != string(common.JSON(common.M(config.Redact(c.Raw))["node_defaults"])) {
-		restart = true
 	}
 	if deploy.OnlyRuleChanges(previous, common.M(config.Redact(c.Raw))) {
 		binary, e := os.Executable()
@@ -132,6 +135,7 @@ func (s *Service) apply(ctx context.Context, id string) error {
 	applied := common.M(config.Redact(c.Raw))
 	applied["images"] = previous["images"]
 	state["configuration"] = applied
+	config.RecordApplied(state, config.ApplicationInput(c.Raw, c.Nodes), "", true)
 	state["config_hash"] = common.Hash(common.JSON(state["configuration"]))
 	if e = common.AtomicJSON(filepath.Join(s.StateDir, "state.json"), state); e != nil {
 		return e

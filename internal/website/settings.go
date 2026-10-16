@@ -30,3 +30,15 @@ func (m *Monitor) notificationsEnabled() bool {
 	}
 	return m.Notify
 }
+
+// Node lists are immutable once published, just like the runtime settings.
+func (m *Monitor) NodeRegistry() common.Map {
+	if n := m.nodeRegistry.Load(); n != nil {
+		return *n
+	}
+	return m.Nodes
+}
+func (m *Monitor) UpdateNodes(nodes common.Map) {
+	next := common.Clone(nodes)
+	m.nodeRegistry.Store(&next)
+}

@@ -32,27 +32,34 @@ CREATE TABLE IF NOT EXISTS watchdog_state(id TEXT PRIMARY KEY,phase TEXT,since I
 CREATE TABLE IF NOT EXISTS watchdog_outbox(id TEXT PRIMARY KEY,message TEXT,created INTEGER,done INTEGER);`
 
 type Service struct {
-	Operations   *recordops.Service
-	decryptSlot  chan struct{}
-	ConfigPath   string
-	StateDir     string
-	DB           *sql.DB
-	mu           sync.Mutex
-	running      bool
-	watchdogBeat atomic.Int64
-	execute      func(context.Context, string, string, string) error
+	Operations      *recordops.Service
+	decryptSlot     chan struct{}
+	ConfigPath      string
+	StateDir        string
+	DB              *sql.DB
+	mu              sync.Mutex
+	running         bool
+	watchdogBeat    atomic.Int64
+	preflightOwners map[string]bool
+	execute         func(context.Context, string, string, string) error
+	upgradeResolver func(context.Context, *config.Config) (string, string, error)
 }
 type Job struct {
-	CanDelete    bool   `json:"can_delete"`
-	DeleteReason string `json:"delete_reason"`
-	ID           string `json:"id"`
-	Kind         string `json:"kind"`
-	Node         string `json:"node"`
-	Status       string `json:"status"`
-	Created      int64  `json:"created"`
-	Updated      int64  `json:"updated"`
-	Revision     string `json:"revision"`
-	Message      string `json:"message"`
+	ParentID       string `json:"parent_id,omitempty"`
+	CanResume      bool   `json:"can_resume"`
+	CanRollback    bool   `json:"can_rollback"`
+	RecoveryReason string `json:"recovery_reason"`
+	Scope          string `json:"scope"`
+	CanDelete      bool   `json:"can_delete"`
+	DeleteReason   string `json:"delete_reason"`
+	ID             string `json:"id"`
+	Kind           string `json:"kind"`
+	Node           string `json:"node"`
+	Status         string `json:"status"`
+	Created        int64  `json:"created"`
+	Updated        int64  `json:"updated"`
+	Revision       string `json:"revision"`
+	Message        string `json:"message"`
 }
 
 func Open(configPath, state string) (*Service, error) {
@@ -88,6 +95,10 @@ func Open(configPath, state string) (*Service, error) {
 		return nil, e
 	}
 	s := &Service{ConfigPath: p, StateDir: state, DB: db, Operations: ops, decryptSlot: make(chan struct{}, 1)}
+	if e = s.initWorkflow(); e != nil {
+		db.Close()
+		return nil, e
+	}
 	ops.Apply = s.applyRecordOperation
 	return s, nil
 }
@@ -165,6 +176,16 @@ func decode(r *http.Request, v any) error {
 }
 func (s *Service) Handler(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.URL.Path == "/version" && r.Method == "GET":
+		reply(w, 200, deploy.BuildInfo())
+	case strings.HasPrefix(r.URL.Path, "/servers/") && strings.HasSuffix(r.URL.Path, "/upgrade-preview") && r.Method == "POST":
+		s.upgradePreview(w, r)
+	case r.URL.Path == "/servers/preflight" && r.Method == "POST":
+		s.preflight(w, r)
+	case strings.HasSuffix(r.URL.Path, "/recovery-preview") && r.Method == "POST":
+		s.recoveryPreview(w, r)
+	case strings.HasSuffix(r.URL.Path, "/logs/download") && r.Method == "GET":
+		s.downloadLogs(w, r)
 	case strings.HasPrefix(r.URL.Path, "/nodes/remove"):
 		s.removeNodesAPI(w, r)
 	case r.URL.Path == "/operations" && r.Method == "GET":
@@ -216,7 +237,7 @@ func (s *Service) Handler(w http.ResponseWriter, r *http.Request) {
 			}
 			deployed[id] = common.Map{"mode": mode, "version": n["go_release"], "phase": n["phase"]}
 		}
-		reply(w, 200, common.Map{"node_deployments": deployed, "revision": common.Hash(raw), "values": Redact(c.Raw), "effective_nodes": redactNodes(c.Nodes), "editable": editable, "running": state["configuration"], "pending_task": s.pending() || s.removalPending(), "operation_running": s.running})
+		reply(w, 200, common.Map{"pending_changes": s.configurationStatus(c, state), "recovery": s.recoveryStatus(), "node_deployments": deployed, "revision": common.Hash(raw), "values": Redact(c.Raw), "effective_nodes": redactNodes(c.Nodes), "editable": editable, "running": state["configuration"], "pending_task": s.pending() || s.removalPending(), "operation_running": s.running})
 	case r.URL.Path == "/settings/preview" && r.Method == "POST":
 		var edit Edit
 		if e := decode(r, &edit); e != nil {
@@ -313,6 +334,7 @@ func (s *Service) jobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		j.CanDelete, j.DeleteReason = s.jobDeletable(r.Context(), j)
+		s.decorateJob(&j)
 		items = append(items, j)
 	}
 	rows.Close()
@@ -325,6 +347,16 @@ func (s *Service) jobs(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Service) job(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/jobs/")
+	if id == "current" {
+		status := s.recoveryStatus()
+		if common.S(status["job_id"]) != "current" {
+			reply(w, 404, common.Map{"message": "原命令行任务已结束或已被接管，请返回列表"})
+			return
+		}
+		reply(w, 200, common.Map{"job": Job{ID: "current", Kind: "external", Status: "interrupted", Node: common.S(status["node"]), Scope: common.S(status["scope"]), CanResume: common.B(status["can_resume"]), CanRollback: common.B(status["can_rollback"]), RecoveryReason: common.S(status["reason"]), Message: "命令行任务尚未完成；保留原范围继续或回退。"}, "logs": []any{}, "stages": []any{}, "cursor": 0})
+		return
+	}
+
 	j, e := scanJob(s.DB.QueryRow("SELECT "+jobColumns+" FROM jobs WHERE id=? AND id NOT IN (SELECT id FROM job_archives)", id))
 	if e != nil {
 		reply(w, 404, common.Map{"message": "任务不存在"})
@@ -346,15 +378,20 @@ func (s *Service) job(w http.ResponseWriter, r *http.Request) {
 		logs = append(logs, common.Map{"id": seq, "time": tm, "message": msg})
 		cursor = int(seq)
 	}
-	reply(w, 200, common.Map{"job": j, "logs": logs, "cursor": cursor})
+	rows.Close()
+	s.decorateJob(&j)
+	reply(w, 200, common.Map{"job": j, "logs": logs, "cursor": cursor, "stages": s.jobStages(id)})
 }
 
 type Start struct {
-	Key      string `json:"request_key"`
-	Revision string `json:"revision"`
-	Kind     string `json:"kind"`
-	Node     string `json:"node"`
-	Edit     *Edit  `json:"edit,omitempty"`
+	PreviewToken  string `json:"preview_token,omitempty"`
+	OriginalJob   string `json:"original_job,omitempty"`
+	RecoveryToken string `json:"recovery_token,omitempty"`
+	Key           string `json:"request_key"`
+	Revision      string `json:"revision"`
+	Kind          string `json:"kind"`
+	Node          string `json:"node"`
+	Edit          *Edit  `json:"edit,omitempty"`
 }
 
 func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
@@ -369,6 +406,10 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.preflightOwners) > 0 {
+		failure(w, userError("连接检查正在执行，请稍后重试"))
+		return
+	}
 	if j, e := scanJob(s.DB.QueryRow("SELECT "+jobColumns+" FROM jobs WHERE request_key=?", input.Key)); e == nil {
 		reply(w, 200, j)
 		return
@@ -386,7 +427,7 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch input.Kind {
-	case "apply", "add-node", "resume", "rollback", "migrate":
+	case "apply", "add-node", "upgrade-node", "resume", "rollback", "migrate":
 	default:
 		failure(w, userError("不支持此部署操作"))
 		return
@@ -409,6 +450,10 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 	next := raw
 	keyPath := ""
 	if input.Edit != nil {
+		if input.Kind == "upgrade-node" {
+			failure(w, userError("独立升级不允许携带 edit，不保存弹窗草稿"))
+			return
+		}
 		if input.Kind != "apply" && input.Kind != "add-node" {
 			failure(w, userError("恢复或迁移任务不能同时修改配置"))
 			return
@@ -425,6 +470,14 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 		failure(w, e)
 		return
 	}
+	image, version := "", ""
+	if input.Kind == "upgrade-node" {
+		image, version, e = s.checkUpgrade(r, input, c)
+		if e != nil {
+			failure(w, e)
+			return
+		}
+	}
 	if input.Kind == "add-node" && (input.Node == "" || len(c.Selected(input.Node)) != 1) {
 		failure(w, userError("请选择一个启用节点"))
 		return
@@ -432,6 +485,10 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 	if input.Kind == "resume" || input.Kind == "rollback" {
 		state, e := common.ReadJSON(filepath.Join(s.StateDir, "state.json"))
 		if e != nil {
+			failure(w, e)
+			return
+		}
+		if e = s.checkRecovery(r, &input, state); e != nil {
 			failure(w, e)
 			return
 		}
@@ -452,9 +509,53 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 	}
 	id := common.ID()
 	now := time.Now().Unix()
+	if input.OriginalJob == "current" {
+		state := s.state()
+		parent := "external-" + common.Hash([]byte(common.S(state["run_id"])))
+		_, e = s.DB.Exec("INSERT OR IGNORE INTO jobs VALUES(?,?,?,?,?,?,?,?,?)", parent, "external-"+common.S(state["run_id"]), "external", common.S(state["target_node"]), "interrupted", now, now, common.Hash(raw), "从命令行未完成任务接续；原范围："+recoveryScope(state))
+		if e != nil {
+			failure(w, e)
+			return
+		}
+		_, e = s.DB.Exec("INSERT OR IGNORE INTO job_workflow(job,parent,run_id) VALUES(?,?,?)", parent, "", common.S(state["run_id"]))
+		if e != nil {
+			failure(w, e)
+			return
+		}
+		input.OriginalJob = parent
+	}
 	revision := common.Hash(raw)
-	_, e = s.DB.Exec("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)", id, input.Key, input.Kind, input.Node, "queued", now, now, revision, "")
+	tx, e := persist.BeginWrite(r.Context(), s.DB)
 	if e != nil {
+		failure(w, e)
+		return
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(r.Context(), "INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)", id, input.Key, input.Kind, input.Node, "queued", now, now, revision, ""); e != nil {
+		failure(w, e)
+		return
+	}
+	if _, e = tx.ExecContext(r.Context(), "INSERT INTO job_workflow(job,parent,run_id) VALUES(?,?,?)", id, input.OriginalJob, ""); e != nil {
+		failure(w, e)
+		return
+	}
+	if input.Kind == "upgrade-node" {
+		if _, e = tx.ExecContext(r.Context(), "INSERT INTO upgrade_jobs VALUES(?,?,?)", id, image, version); e != nil {
+			failure(w, e)
+			return
+		}
+		result, err := tx.ExecContext(r.Context(), "DELETE FROM upgrade_previews WHERE token=? AND expires>?", common.Hash([]byte(input.PreviewToken)), time.Now().Unix())
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		affected, err := result.RowsAffected()
+		if err != nil || affected != 1 {
+			failure(w, userError("升级预览已失效，请重新预览"))
+			return
+		}
+	}
+	if e = tx.Commit(); e != nil {
 		failure(w, e)
 		return
 	}
@@ -476,6 +577,9 @@ func (w logWriter) Write(b []byte) (int, error) {
 			text = strings.ReplaceAll(text, secret, "[已隐藏]")
 		}
 	}
+	if strings.HasPrefix(text, "@webscan-progress ") {
+		return len(b), w.s.recordProgress(w.id, strings.TrimSpace(strings.TrimPrefix(text, "@webscan-progress ")))
+	}
 	_, e := w.s.DB.Exec("INSERT INTO logs(job,time,message) VALUES(?,?,?)", w.id, time.Now().Unix(), text)
 	return len(b), e
 }
@@ -483,6 +587,7 @@ func (s *Service) run(id, kind, node string) {
 	s.DB.Exec("UPDATE jobs SET status='running',updated=? WHERE id=?", time.Now().Unix(), id)
 	e := s.perform(context.Background(), id, kind, node)
 	status, msg := "complete", "部署及验收完成"
+	s.bindJobRun(id)
 	if e != nil {
 		status = "failed"
 		msg = userMessage(e)
@@ -522,7 +627,7 @@ func (s *Service) perform(ctx context.Context, id, kind, node string) error {
 	}
 	args := []string{"deploy", "--config", s.ConfigPath, "--non-interactive", "--expected-revision", revision}
 	switch kind {
-	case "add-node":
+	case "add-node", "upgrade-node":
 		args = append(args, "--add-node", "--node", node)
 	case "resume":
 		fallthrough
@@ -584,6 +689,13 @@ func (s *Service) command(ctx context.Context, id, binary string, args []string)
 	collect(c.Raw)
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Env = append(os.Environ(), "WEBSCAN_MANAGEMENT_JOB="+id)
+	image, e := s.upgradeLockForJob(id)
+	if e != nil {
+		return e
+	}
+	if image != "" {
+		cmd.Env = append(cmd.Env, "WEBSCAN_AGENT_IMAGE_LOCK="+image)
+	}
 	credentials, _ := common.ReadJSON(filepath.Join(s.StateDir, "credentials.json"))
 	collect(credentials)
 	writer := &lineWriter{writer: logWriter{s, id, secrets}}
@@ -642,7 +754,7 @@ func Run(ctx context.Context, path, state, socket string) error {
 		l.Close()
 		return e
 	}
-	server := &http.Server{Handler: http.HandlerFunc(s.Handler), ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+	server := &http.Server{Handler: http.HandlerFunc(s.Handler), ReadTimeout: 15 * time.Second, WriteTimeout: 75 * time.Second, IdleTimeout: 30 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)

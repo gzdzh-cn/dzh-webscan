@@ -84,6 +84,9 @@ func (s *Service) applyRecordOperation(ctx context.Context, kind, id string) (st
 		if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO job_archives VALUES(?,?)", id, time.Now().Unix()); e != nil {
 			return "", "", e
 		}
+		if _, e = tx.ExecContext(ctx, "DELETE FROM job_progress WHERE job=?", id); e != nil {
+			return "", "", e
+		}
 		if _, e = tx.ExecContext(ctx, "DELETE FROM logs WHERE job=?", id); e != nil {
 			return "", "", e
 		}

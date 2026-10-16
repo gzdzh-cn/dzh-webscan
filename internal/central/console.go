@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 	"webscan/internal/common"
+	"webscan/internal/deploy"
 	"webscan/internal/notify"
 	"webscan/internal/telemetry"
 	"webscan/internal/website"
@@ -111,7 +112,7 @@ func (s *Store) Console(w http.ResponseWriter, r *http.Request) bool {
 		s.retentionAPI(w, r)
 		return true
 	}
-	if strings.HasPrefix(path, "/api/servers/remove") || path == "/api/settings" || path == "/api/settings/preview" || strings.HasPrefix(path, "/api/deployments") || strings.HasPrefix(path, "/api/config-backups") {
+	if strings.HasPrefix(path, "/api/servers/remove") || path == "/api/servers/preflight" || (strings.HasPrefix(path, "/api/servers/") && strings.HasSuffix(path, "/upgrade-preview")) || path == "/api/settings" || path == "/api/settings/preview" || strings.HasPrefix(path, "/api/deployments") || strings.HasPrefix(path, "/api/config-backups") {
 		s.managementProxy(w, r)
 		return true
 	}
@@ -119,7 +120,7 @@ func (s *Store) Console(w http.ResponseWriter, r *http.Request) bool {
 		s.emailTest(w, r)
 		return true
 	}
-	recognized := path == "/api/dashboard" || path == "/api/servers" || strings.HasPrefix(path, "/api/servers/") || path == "/api/events" || path == "/api/alerts" || strings.HasPrefix(path, "/api/alerts/") || path == "/api/notifications" || strings.HasPrefix(path, "/api/notifications/") || path == "/api/system/health"
+	recognized := path == "/api/dashboard" || path == "/api/servers" || strings.HasPrefix(path, "/api/servers/") || path == "/api/events" || path == "/api/alerts" || strings.HasPrefix(path, "/api/alerts/") || path == "/api/notifications" || strings.HasPrefix(path, "/api/notifications/") || path == "/api/system/health" || path == "/api/system/version"
 	if !recognized {
 		return false
 	}
@@ -128,6 +129,12 @@ func (s *Store) Console(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	switch {
+	case path == "/api/system/version":
+		manager := common.Map{}
+		if status, v, e := s.managementRequest(r.Context(), "GET", "/version", nil); e == nil && status == 200 {
+			manager = common.M(v)
+		}
+		write(w, 200, common.Map{"central": deploy.BuildInfo(), "manager": manager, "hotfix": deploy.ExecutableMount()})
 	case path == "/api/servers" || strings.HasPrefix(path, "/api/servers/"):
 		s.serverAPI(w, r)
 	case path == "/api/dashboard":
@@ -226,6 +233,8 @@ func (s *Store) serverAPI(w http.ResponseWriter, r *http.Request) {
 			known[id] = true
 		}
 		for i := range nodes {
+			nodes[i].ConfigurationState = common.S(common.M(common.M(meta["pending_changes"])["statuses"])[nodes[i].ID])
+			nodes[i].Recovery = common.M(meta["recovery"])
 			if nodes[i].Central {
 				nodes[i].ConfiguredMode = "docker"
 				nodes[i].ActualMode = "docker"
@@ -651,7 +660,11 @@ func (s *Store) managementProxy(w http.ResponseWriter, r *http.Request) {
 		return d.DialContext(ctx, "unix", socket)
 	}}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	timeout := 15 * time.Second
+	if r.URL.Path == "/api/servers/preflight" || strings.HasSuffix(r.URL.Path, "/upgrade-preview") {
+		timeout = 65 * time.Second
+	}
+	client := &http.Client{Transport: transport, Timeout: timeout}
 	path := strings.TrimPrefix(r.URL.Path, "/api")
 	if path == "/record-operations" {
 		path = "/operations"
@@ -684,7 +697,11 @@ func (s *Store) managementProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", v)
 	}
 	w.WriteHeader(response.StatusCode)
-	io.Copy(w, io.LimitReader(response.Body, 8<<20))
+	if strings.HasSuffix(r.URL.Path, "/logs/download") {
+		io.Copy(w, response.Body)
+	} else {
+		io.Copy(w, io.LimitReader(response.Body, 8<<20))
+	}
 }
 
 var _ = filepath.Separator

@@ -75,6 +75,14 @@ func (s *Store) Collect(ctx context.Context, client *http.Client, n Node, extra 
 	for k, v := range extra {
 		snap.Values[k] = v
 	}
+	s.collectMu.RLock()
+	defer s.collectMu.RUnlock()
+	s.mu.Lock()
+	stale := n.generation != 0 && n.generation != s.generation
+	s.mu.Unlock()
+	if stale {
+		return nil
+	}
 	if snap.OK {
 		if cpu, ok := snap.Values["cpu_percent"]; ok {
 			avg, known, err := s.cpuAverage(ctx, n.ID, now, cpu)

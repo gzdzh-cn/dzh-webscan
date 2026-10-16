@@ -96,3 +96,12 @@
 !/docs/image/console-alerts.png
 !/docs/image/console-backups.png
 !/docs/image/console-*-preview.png
+
+!/docs/DEPLOYMENT-WORKFLOW.md
+!/docs/ACCEPTANCE-v2.0.40.md
+!/docs/ACCEPTANCE-v2.0.42.md
+
+!/docs/ACCEPTANCE-v2.0.43.md
+
+!/docs/ACCEPTANCE-v2.0.44.md
+!/docs/image/node-upgrade-v44.png

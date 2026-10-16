@@ -156,7 +156,7 @@ func run() (runErr error) {
 	dry, node := parsed["--dry-run"] == "true", parsed["--node"]
 	uninstall, centralOnly := parsed["--uninstall"] == "true", parsed["--central-only"] == "true"
 	if parsed["--help"] == "true" || parsed["-h"] == "true" {
-		fmt.Println("bash deploy-webscan.sh：显示 1 安装、2 重装、3 卸载、4 增加子服务器、5 SSL 设置并自动部署菜单\nbash deploy-webscan.sh [--set-ssl on|off] [--install|--reinstall|--uninstall|--check|--upgrade|--add-node|--resume|--rollback|--reload-rules] [--dry-run] [--config-help] [--config YAML] [--node ID] [--central-only|--grafana-only|--sync-grafana-credentials] [--non-interactive]\n菜单 4 等同于 --add-node --node 节点ID，沿用主服务器当前版本和配置；恢复追加 --resume，回退追加 --rollback。\n--set-ssl on/off 保存协议后自动完整部署；交互安装和重装会引导选择 SSL，--non-interactive 沿用 YAML。\n重装与卸载保留监控数据、凭据、备份及三文件部署包。")
+		fmt.Println("bash deploy-webscan.sh：显示 1 安装、2 重装、3 卸载、4 增加子服务器、5 SSL 设置并自动部署菜单\nbash deploy-webscan.sh [--set-ssl on|off] [--install|--reinstall|--uninstall|--check|--upgrade|--add-node|--resume|--rollback|--reload-rules] [--dry-run] [--config-help] [--config YAML] [--node ID] [--central-only|--grafana-only|--sync-grafana-credentials] [--non-interactive]\n菜单 4 等同于 --add-node --node 节点ID，沿用主服务器当前版本和配置；--upgrade --node 节点ID 也只升级指定子服务器，不重建中心；恢复追加 --resume，回退追加 --rollback。\n--set-ssl on/off 保存协议后自动完整部署；交互安装和重装会引导选择 SSL，--non-interactive 沿用 YAML。\n重装与卸载保留监控数据、凭据、备份及三文件部署包。")
 		return nil
 	}
 

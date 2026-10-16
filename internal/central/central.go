@@ -43,6 +43,7 @@ type Store struct {
 	Telemetry *telemetry.Store
 	Retention *retention.Service
 	started   int64
+	reloadMu  sync.RWMutex
 	runtime   atomic.Pointer[common.Map]
 	emailSend func(context.Context, common.Map, string, string, string, string) error
 }
@@ -334,6 +335,10 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	public := r.TLS != nil || r.Context().Value(publicEventRequest{}) == true
 	path := r.URL.Path
+	if path != "/reload-settings" && path != "/reload-nodes" && path != "/node-capabilities" {
+		s.reloadMu.RLock()
+		defer s.reloadMu.RUnlock()
+	}
 	if public {
 		ipstr, _, e := net.SplitHostPort(r.RemoteAddr)
 		if e != nil {
@@ -424,8 +429,12 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 	node := s.identity(r)
 	admin := common.S(s.Snapshot()["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Snapshot()["alert_token"]))) == 1
+	if (path == "/reload-nodes" || path == "/node-capabilities") && !admin {
+		write(w, 401, common.Map{})
+		return
+	}
 	deployment := path == "/deployment-notices" || path == "/deployment-tests" || path == "/deployment-acceptance"
-	if deployment && !admin || node == "" && !(admin && (path == "/alerts" || path == "/reload-settings" || path == "/node-removal" || deployment)) {
+	if deployment && !admin || node == "" && !(admin && (path == "/alerts" || path == "/reload-settings" || path == "/reload-nodes" || path == "/node-capabilities" || path == "/node-removal" || deployment)) {
 		write(w, 401, common.Map{})
 		return
 	}
@@ -507,12 +516,28 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		write(w, 200, common.Map{"websites": sites})
+	case "/node-capabilities":
+		if !admin {
+			write(w, 401, common.Map{})
+			return
+		}
+		write(w, 200, common.Map{"node_registry_reload": s.native() && s.Telemetry != nil, "revision": runtimeRevision(s.Snapshot())})
+	case "/reload-nodes":
+		if !admin {
+			write(w, 401, common.Map{})
+			return
+		}
+		s.reloadNodes(w, r, common.M(value))
 	case "/reload-settings":
 		if !admin || r.Method != "POST" {
 			write(w, 401, common.Map{})
 			return
 		}
 		if e = s.reloadSettings(configPathFrom(s.Snapshot())); e != nil {
+			if errors.Is(e, errRuntimeSettingsUnavailable) {
+				write(w, 503, common.Map{"error": "runtime_settings_unavailable", "message": "指标配置暂时无法应用，请重试；原运行配置保留"})
+				return
+			}
 			write(w, 400, common.Map{"message": common.SecretFree(e)})
 			return
 		}
@@ -906,7 +931,7 @@ func Run(ctx context.Context, configPath string) error {
 	if s.Websites != nil {
 		wc := common.M(config["website_monitor"])
 		console := ghttp.GetServer("webscan-console")
-		consoleCfg := ghttp.ServerConfig{Name: "webscan-console", HTTPSAddr: fmt.Sprintf("0.0.0.0:%d", common.I(wc["host_port"])), TLSConfig: cfg.TLSConfig, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, Logger: glog.New(), LogLevel: "error", LogStdout: false, AccessLogEnabled: false, ErrorLogEnabled: false, DumpRouterMap: false, Handler: s.Websites.Handler}
+		consoleCfg := ghttp.ServerConfig{Name: "webscan-console", HTTPSAddr: fmt.Sprintf("0.0.0.0:%d", common.I(wc["host_port"])), TLSConfig: cfg.TLSConfig, ReadTimeout: 15 * time.Second, WriteTimeout: 75 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, Logger: glog.New(), LogLevel: "error", LogStdout: false, AccessLogEnabled: false, ErrorLogEnabled: false, DumpRouterMap: false, Handler: s.Websites.Handler}
 		consoleSSL := true
 		if value, exists := wc["ssl_enabled"]; exists {
 			consoleSSL = common.B(value)

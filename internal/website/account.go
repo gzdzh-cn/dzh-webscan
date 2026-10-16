@@ -50,11 +50,14 @@ func AccountAt(path string) (Account, error) {
 	return ReadAccount(db)
 }
 func (m *Monitor) migrate() error {
-	var exists int
+	var exists, sessionsExist int
 	if e := m.DB.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='website_admin'").Scan(&exists); e != nil {
 		return e
 	}
-	if exists == 0 {
+	if e := m.DB.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='website_sessions'").Scan(&sessionsExist); e != nil {
+		return e
+	}
+	if exists == 0 || sessionsExist == 0 {
 		var sites int
 		if e := m.DB.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='websites'").Scan(&sites); e != nil {
 			return e
@@ -69,7 +72,7 @@ func (m *Monitor) migrate() error {
 				}
 				dir = filepath.Join(filepath.Dir(path), "backups")
 			}
-			if e := persist.BackupDB(m.DB, filepath.Join(dir, "website-migrations", "before-v2.0.29-"+common.ID()+".sqlite3")); e != nil {
+			if e := persist.BackupDB(m.DB, filepath.Join(dir, "website-migrations", "before-account-sessions-"+common.ID()+".sqlite3")); e != nil {
 				return fmt.Errorf("网站后台升级前数据库备份失败，已停止迁移，请检查备份目录权限和磁盘空间: %w", e)
 			}
 		}
@@ -79,7 +82,7 @@ func (m *Monitor) migrate() error {
 		return e
 	}
 	defer tx.Rollback()
-	if _, e = tx.Exec(schema + accountSchema); e != nil {
+	if _, e = tx.Exec(schema + accountSchema + sessionSchema); e != nil {
 		return e
 	}
 	if _, e = tx.Exec("INSERT OR IGNORE INTO website_admin(id,username,password_hash,revision,modified) VALUES(1,?,?,1,?)", m.Username, m.PasswordHash, time.Now().Unix()); e != nil {
@@ -104,15 +107,11 @@ func ResetPassword(db *sql.DB, password string) error {
 	if e != nil {
 		return e
 	}
-	v, e := db.Exec("UPDATE website_admin SET password_hash=?,revision=revision+1,modified=? WHERE id=1", string(hash), time.Now().Unix())
+	ok, e := replacePassword(context.Background(), db, string(hash), nil)
 	if e != nil {
 		return e
 	}
-	n, e := v.RowsAffected()
-	if e != nil {
-		return e
-	}
-	if n != 1 {
+	if !ok {
 		return errors.New("后台账号尚未初始化，请先启动主服务器后台")
 	}
 	return nil
@@ -173,21 +172,15 @@ func (m *Monitor) changePassword(w http.ResponseWriter, r *http.Request, revisio
 		m.dbError(w, e)
 		return
 	}
-	v, e := m.DB.Exec("UPDATE website_admin SET password_hash=?,revision=revision+1,modified=? WHERE id=1 AND revision=?", string(hash), time.Now().Unix(), revision)
+	ok, e := replacePassword(r.Context(), m.DB, string(hash), &revision)
 	if e != nil {
 		m.dbError(w, e)
 		return
 	}
-	n, e := v.RowsAffected()
-	if e != nil {
-		m.dbError(w, e)
-		return
-	}
-	if n != 1 {
+	if !ok {
 		apiError(w, 401, "session_expired", "账号已修改，请重新登录", "")
 		return
 	}
-	m.sessions = map[string]session{}
 	delete(m.attempts, key)
 	http.SetCookie(w, &http.Cookie{Name: "webscan_session", Path: "/", MaxAge: -1, Secure: m.secureCookie(r), HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	respond(w, 200, common.Map{"message": "密码已修改，所有登录已退出，请使用新密码登录"})

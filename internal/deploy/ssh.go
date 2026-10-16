@@ -20,8 +20,9 @@ import (
 )
 
 type Remote struct {
-	Client *ssh.Client
-	Host   string
+	Client      *ssh.Client
+	Host        string
+	Fingerprint string
 }
 
 func Connect(ctx context.Context, n common.Map) (*Remote, error) {
@@ -29,6 +30,14 @@ func Connect(ctx context.Context, n common.Map) (*Remote, error) {
 }
 
 func connectWithHostKeys(ctx context.Context, n common.Map, hostKeysPath string) (*Remote, error) {
+	return connectOptions(ctx, n, hostKeysPath, false, "")
+}
+
+// CheckConnection authenticates without persisting credentials or first-use host keys.
+func CheckConnection(ctx context.Context, n common.Map, hostKeysPath, content string) (*Remote, error) {
+	return connectOptions(ctx, n, hostKeysPath, true, content)
+}
+func connectOptions(ctx context.Context, n common.Map, hostKeysPath string, readOnly bool, content string) (*Remote, error) {
 	c := common.M(n["ssh"])
 	pin := common.S(c["host_key_sha256"])
 	var trusted ssh.HostKeyCallback
@@ -42,6 +51,14 @@ func connectWithHostKeys(ctx context.Context, n common.Map, hostKeysPath string)
 	auth := []ssh.AuthMethod{}
 	switch common.S(c["auth_method"]) {
 	case "key":
+		if content != "" {
+			key, err := ssh.ParsePrivateKey([]byte(content))
+			if err != nil {
+				return nil, errors.New("ssh_key_parse_failed")
+			}
+			auth = append(auth, ssh.PublicKeys(key))
+			break
+		}
 		path := common.S(c["private_key_path"])
 		st, e := os.Lstat(path)
 		if e != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 && st.Mode().Perm() != 0400 {
@@ -115,7 +132,7 @@ func connectWithHostKeys(ctx context.Context, n common.Map, hostKeysPath string)
 				conn.Close()
 				return nil, err
 			}
-			if pin == "" {
+			if pin == "" && !readOnly {
 				var added bool
 				added, err = recordHostKey(ctx, hostKeysPath, addr, raw.RemoteAddr(), presented)
 				if err != nil {
@@ -129,7 +146,7 @@ func connectWithHostKeys(ctx context.Context, n common.Map, hostKeysPath string)
 				}
 			}
 			raw.SetDeadline(time.Time{})
-			return &Remote{ssh.NewClient(conn, channels, requests), common.S(n["host"])}, nil
+			return &Remote{Client: ssh.NewClient(conn, channels, requests), Host: common.S(n["host"]), Fingerprint: ssh.FingerprintSHA256(presented)}, nil
 		}
 		raw.Close()
 		if err := ctx.Err(); err != nil {

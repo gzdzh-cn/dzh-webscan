@@ -535,6 +535,12 @@ func (d *Deploy) RollbackNode(ctx context.Context, n common.Map, uninstall bool)
 		delete(state, "backup_pending")
 		state["deployment_mode"] = state["previous_deployment_mode"]
 		state["go_release"] = state["previous_go_release"]
+		if value, ok := state["previous_agent_image"]; ok {
+			state["agent_image"] = value
+		}
+		if value, ok := state["previous_go_image"]; ok {
+			state["go_image"] = value
+		}
 	}
 	return e
 }
@@ -556,6 +562,7 @@ func (d *Deploy) Rollback(ctx context.Context, uninstall bool) error {
 		d.State["go_release"], d.State["image_lock"] = d.State["previous_go_release"], d.State["previous_image_lock"]
 		d.State["central_runtime_release"] = d.State["previous_central_runtime_release"]
 		d.State["configuration"], d.State["config_hash"] = d.State["previous_configuration"], d.State["previous_config_hash"]
+		d.State["applied_fingerprints"] = d.State["previous_applied_fingerprints"]
 		d.State["step"] = "rolled-back"
 		return d.save()
 	}

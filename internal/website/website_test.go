@@ -476,7 +476,9 @@ func TestListPaginationFiltersAndExpiredSession(t *testing.T) {
 		}
 	}
 	token := "fixture-cookie"
-	m.sessions[tokenHash(token)] = session{Revision: 1, CSRF: "fixture", Expires: time.Now().Add(time.Hour)}
+	if _, err := m.storeSession(context.Background(), tokenHash(token), session{Revision: 1, CSRF: "fixture", Expires: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
 	cookie := &http.Cookie{Name: "webscan_session", Value: token}
 	for _, tt := range []struct {
 		path        string
@@ -491,7 +493,7 @@ func TestListPaginationFiltersAndExpiredSession(t *testing.T) {
 			t.Fatal(tt, w.Body.String())
 		}
 	}
-	m.sessions[tokenHash(token)] = session{Revision: 1, Expires: time.Now().Add(-time.Second)}
+	m.DB.Exec("UPDATE website_sessions SET expires=? WHERE token_hash=?", time.Now().Add(-time.Second).Unix(), tokenHash(token))
 	if w := request(m, "GET", "/api/session", "", cookie, ""); w.Code != 401 {
 		t.Fatal("expired session accepted")
 	}

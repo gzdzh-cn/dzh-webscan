@@ -17,6 +17,7 @@ import (
 	"time"
 	"webscan/internal/assets"
 	"webscan/internal/common"
+	"webscan/internal/config"
 	"webscan/internal/persist"
 	"webscan/internal/progress"
 )
@@ -111,9 +112,8 @@ func Run(ctx context.Context, o Options) error {
 	if actions > 1 || o.Node != "" && o.CentralOnly || o.DryRun && (o.Check || o.Rollback || o.GrafanaOnly || o.SyncGrafana || o.ReloadRules) || o.YaraRules != "" && !o.ReloadRules || o.ReloadRules && o.CentralOnly || o.GrafanaOnly && (o.Node != "" || o.CentralOnly) || o.SyncGrafana && (o.Node != "" || o.CentralOnly) || o.Reinstall && (o.Node != "" || o.CentralOnly) {
 		return errors.New("incompatible_cli_options")
 	}
-	if e = d.validateSSLChange(); e != nil {
-		return e
-	}
+	d.normalizeNodeScope()
+	o = d.O
 	if o.AddNode {
 		if o.Node == "" || o.CentralOnly || o.Install || o.Upgrade || o.Uninstall || o.Reinstall || o.Check || o.ReloadRules || o.GrafanaOnly || o.SyncGrafana {
 			return errors.New("incompatible_cli_options")
@@ -122,6 +122,9 @@ func Run(ctx context.Context, o Options) error {
 			return e
 		}
 		c = d.C
+	}
+	if e = d.validateSSLChange(); e != nil {
+		return e
 	}
 	selectedNodes := c.Selected(o.Node)
 	if o.Uninstall {
@@ -246,6 +249,11 @@ func Run(ctx context.Context, o Options) error {
 	return d.Deploy(ctx)
 }
 func (d *Deploy) Preflight(ctx context.Context) error {
+	if d.O.AddNode {
+		if _, e := d.nodeCapabilities(ctx); e != nil {
+			return e
+		}
+	}
 	if Native(d.C) {
 		if e := requireManagementHost(); e != nil {
 			return e
@@ -333,6 +341,9 @@ func (d *Deploy) initialize() error {
 		return errors.New("first_goframe_migration_requires_upgrade")
 	}
 	hash := common.Hash(common.JSON(Redact(d.C.Raw)))
+	if d.O.Resume || d.O.Rollback {
+		d.State["management_job"] = os.Getenv("WEBSCAN_MANAGEMENT_JOB")
+	}
 	run := common.S(d.State["run_id"])
 	unfinished := strings.HasPrefix(run, "go-") && common.S(d.State["step"]) != "complete" && common.S(d.State["step"]) != "rolled-back"
 	if unfinished {
@@ -359,6 +370,7 @@ func (d *Deploy) initialize() error {
 		} else {
 			delete(d.State, "target_tool_image")
 		}
+		d.State["target_agent_image"] = os.Getenv("WEBSCAN_AGENT_IMAGE_LOCK")
 		delete(d.State, "node_addition")
 		delete(d.State, "rollout")
 		delete(d.State, "central_image_services")
@@ -369,9 +381,11 @@ func (d *Deploy) initialize() error {
 			return errors.New("add_node_requires_installed_compatible_main")
 		}
 		d.State["previous_image_lock"] = common.Clone(common.M(d.State["image_lock"]))
+		d.State["previous_applied_fingerprints"] = common.Clone(common.M(d.State["applied_fingerprints"]))
 		d.State["previous_configuration"] = common.Clone(common.M(d.State["configuration"]))
 		d.State["previous_config_hash"] = d.State["config_hash"]
 		d.State["previous_central_runtime_release"] = d.State["central_runtime_release"]
+		d.State["management_job"] = os.Getenv("WEBSCAN_MANAGEMENT_JOB")
 		d.State["previous_go_release"], d.State["run_id"] = d.State["go_release"], d.RunID
 		delete(d.State, "target_images")
 		d.State["target_release"], d.State["target_config_hash"], d.State["step"] = Release, hash, "preparing"
@@ -464,6 +478,15 @@ func (d *Deploy) LockImages(ctx context.Context) error {
 		e := progress.Stage(ctx, progress.Host(d.C.Raw), "下载并校验 "+progress.Role(role), func(ctx context.Context) error {
 			var err error
 			request := d.C.Image(role)
+			if role == "agent" {
+				request = agentImageForRelease(request, Release)
+				if locked := common.S(d.State["target_agent_image"]); locked != "" {
+					if !strings.Contains(locked, "@sha256:") {
+						return errors.New("invalid_agent_image_lock")
+					}
+					request = locked
+				}
+			}
 			if role == "central" && strings.HasSuffix(request, ":latest") {
 				if tool := os.Getenv("WEBSCAN_TOOL_IMAGE_LOCK"); strings.Contains(tool, "@sha256:") {
 					if _, err = docker.Exec(ctx, nil, "image", "inspect", tool); err == nil {
@@ -512,6 +535,15 @@ func (d *Deploy) LockImages(ctx context.Context) error {
 	d.State["image_lock"], d.State["target_images"] = d.Images, common.Clone(d.Images)
 	return d.save()
 }
+
+// Agent images contain a native tool bundle that must match the running deploy
+// program. A registry mirror's mutable latest cache is not a version guarantee.
+func agentImageForRelease(image, release string) string {
+	if strings.HasSuffix(image, ":latest") && strings.HasPrefix(release, "v2.") {
+		return strings.TrimSuffix(image, ":latest") + ":" + release
+	}
+	return image
+}
 func (d *Deploy) Deploy(ctx context.Context) (err error) {
 	if d.O.Resume && common.S(d.State["step"]) == "notifying" {
 		if err = d.initialize(); err != nil {
@@ -548,6 +580,11 @@ func (d *Deploy) Deploy(ctx context.Context) (err error) {
 	}
 	if d.canRetryRollout() {
 		progress.Info(ctx, "上次全部节点已确认回退且没有已验收节点；使用本次目标版本重新部署，保留原部署记录、当前主服务器、数据库和队列")
+	}
+	if d.O.AddNode {
+		if _, err = d.nodeCapabilities(ctx); err != nil {
+			return err
+		}
 	}
 	if err = progress.Stage(ctx, progress.Host(d.C.Raw), "准备部署状态、凭据和回退记录", func(context.Context) error { return d.initialize() }); err != nil {
 		return err
@@ -680,6 +717,15 @@ func (d *Deploy) finishDeployment(ctx context.Context) (err error) {
 	if d.O.KeepImages {
 		common.M(d.State["configuration"])["images"] = common.M(d.State["previous_configuration"])["images"]
 	}
+	if d.O.CentralOnly {
+		previous := common.M(d.State["previous_configuration"])
+		if len(previous) > 0 {
+			common.M(d.State["configuration"])["nodes"] = previous["nodes"]
+			common.M(d.State["configuration"])["node_defaults"] = previous["node_defaults"]
+			d.State["config_hash"] = common.Hash(common.JSON(d.State["configuration"]))
+		}
+	}
+	config.RecordApplied(d.State, config.ApplicationInput(d.C.Raw, d.C.Nodes), d.O.Node, d.O.CentralOnly)
 	d.State["completed_at"] = common.Now()
 	delete(d.State, "last_failure")
 	if err = d.save(); err != nil {
