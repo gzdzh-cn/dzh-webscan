@@ -11,11 +11,17 @@ import (
 	"webscan/internal/agent"
 	"webscan/internal/common"
 	"webscan/internal/deploy"
+	"webscan/internal/diagnostic"
 	"webscan/internal/persist"
 )
 
 func Run(ctx context.Context, action, input, output string, uninstall bool) error {
 	switch action {
+	case "deployment-probe":
+		if input != "-" {
+			return errors.New("检测参数只能通过标准输入传入")
+		}
+		return diagnostic.Run(ctx, os.Stdin, os.Stdout)
 	case "validate-native-service":
 		b, err := os.ReadFile("/etc/systemd/system/webscan-agent-native.service")
 		if err != nil {

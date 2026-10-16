@@ -48,6 +48,9 @@ esac
 				if strings.Contains(cmd, " pull --platform") {
 					return "", false
 				}
+				if strings.Contains(cmd, "yara-check-") {
+					return "", false
+				}
 				return "", true
 			})
 			d.Remotes["new-node"] = r
@@ -67,6 +70,9 @@ esac
 			joined := strings.Join(commands, "\n")
 			if strings.Index(joined, "package.tar.gz") > strings.Index(joined, "--action backup-node") || strings.Contains(joined, "docker stop") {
 				t.Fatal(joined)
+			}
+			if !strings.Contains(joined, "yara-check-") || strings.Index(joined, "yara-check-") > strings.Index(joined, "--action backup-node") {
+				t.Fatal("scan rules were not checked before backup", joined)
 			}
 			if mode == "native" && strings.Contains(joined, "docker ") {
 				t.Fatal("native node used Docker", joined)

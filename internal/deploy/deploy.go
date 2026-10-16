@@ -31,6 +31,7 @@ type Options struct {
 	DryRun, Check, Install, Reinstall, Upgrade, Resume, Rollback, Uninstall, CentralOnly, GrafanaOnly, SyncGrafana, ReloadRules, NonInteractive bool
 	AddNode                                                                                                                                     bool
 	KeepImages                                                                                                                                  bool
+	AcknowledgeWarnings                                                                                                                         bool
 }
 type Deploy struct {
 	C                      *Config
@@ -281,6 +282,11 @@ func (d *Deploy) Preflight(ctx context.Context) error {
 				d.Remotes[common.S(n["id"])] = r
 				if e = d.checkNodeEnvironment(ctx, r, n); e != nil {
 					return fmt.Errorf("node_%s_%w", common.S(n["id"]), e)
+				}
+				if d.O.AddNode && !d.O.Check {
+					if e = d.checkNodeNetwork(ctx, n, r); e != nil {
+						return e
+					}
 				}
 				return nil
 			}); err != nil {

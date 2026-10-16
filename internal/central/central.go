@@ -363,6 +363,10 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		path = strings.TrimPrefix(path, "/webscan/v1")
 	}
+	if !public && path == "/node-preflight" {
+		s.nodePreflight(w, r)
+		return
+	}
 	if !public && (path == "/website-verify" || path == "/native-verify") && r.Method == http.MethodPost {
 		admin := common.S(s.Snapshot()["alert_token"]) != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+common.S(s.Snapshot()["alert_token"]))) == 1
 		if !admin {
@@ -521,7 +525,7 @@ func (s *Store) Handler(w http.ResponseWriter, r *http.Request) {
 			write(w, 401, common.Map{})
 			return
 		}
-		write(w, 200, common.Map{"node_registry_reload": s.native() && s.Telemetry != nil, "revision": runtimeRevision(s.Snapshot())})
+		write(w, 200, common.Map{"node_preflight": s.native(), "node_registry_reload": s.native() && s.Telemetry != nil, "revision": runtimeRevision(s.Snapshot())})
 	case "/reload-nodes":
 		if !admin {
 			write(w, 401, common.Map{})

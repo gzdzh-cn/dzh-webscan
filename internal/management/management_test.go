@@ -14,6 +14,7 @@ import (
 	"webscan/internal/assets"
 	"webscan/internal/common"
 	"webscan/internal/config"
+	"webscan/internal/deploy"
 )
 
 func TestRecoveryArgumentsPreserveOriginalScope(t *testing.T) {
@@ -65,6 +66,9 @@ func managerFixture(t *testing.T) *Service {
 	s, e := Open(p, filepath.Join(dir, "state"))
 	if e != nil {
 		t.Fatal(e)
+	}
+	s.preflightRunner = func(context.Context, *config.Config, common.Map, string, bool, func(deploy.CheckItem)) deploy.CheckReport {
+		return deploy.CheckReport{OK: true, Items: []deploy.CheckItem{}, CheckedAt: time.Now().Unix()}
 	}
 	t.Cleanup(func() { s.DB.Close() })
 	return s

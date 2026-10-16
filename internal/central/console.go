@@ -112,7 +112,7 @@ func (s *Store) Console(w http.ResponseWriter, r *http.Request) bool {
 		s.retentionAPI(w, r)
 		return true
 	}
-	if strings.HasPrefix(path, "/api/servers/remove") || path == "/api/servers/preflight" || (strings.HasPrefix(path, "/api/servers/") && strings.HasSuffix(path, "/upgrade-preview")) || path == "/api/settings" || path == "/api/settings/preview" || strings.HasPrefix(path, "/api/deployments") || strings.HasPrefix(path, "/api/config-backups") {
+	if strings.HasPrefix(path, "/api/servers/remove") || strings.HasPrefix(path, "/api/servers/preflight") || path == "/api/servers/requirements" || (strings.HasPrefix(path, "/api/servers/") && strings.HasSuffix(path, "/upgrade-preview")) || path == "/api/settings" || path == "/api/settings/preview" || strings.HasPrefix(path, "/api/deployments") || strings.HasPrefix(path, "/api/config-backups") {
 		s.managementProxy(w, r)
 		return true
 	}

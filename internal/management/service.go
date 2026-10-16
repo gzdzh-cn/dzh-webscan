@@ -41,6 +41,8 @@ type Service struct {
 	running         bool
 	watchdogBeat    atomic.Int64
 	preflightOwners map[string]bool
+	preflights      map[string]*preflightRecord
+	preflightRunner func(context.Context, *config.Config, common.Map, string, bool, func(deploy.CheckItem)) deploy.CheckReport
 	execute         func(context.Context, string, string, string) error
 	upgradeResolver func(context.Context, *config.Config) (string, string, error)
 }
@@ -180,6 +182,10 @@ func (s *Service) Handler(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, deploy.BuildInfo())
 	case strings.HasPrefix(r.URL.Path, "/servers/") && strings.HasSuffix(r.URL.Path, "/upgrade-preview") && r.Method == "POST":
 		s.upgradePreview(w, r)
+	case r.URL.Path == "/servers/requirements" && r.Method == "GET":
+		s.requirements(w, r)
+	case strings.HasPrefix(r.URL.Path, "/servers/preflight/") && (r.Method == "GET" || r.Method == "DELETE"):
+		s.preflightStatus(w, r)
 	case r.URL.Path == "/servers/preflight" && r.Method == "POST":
 		s.preflight(w, r)
 	case strings.HasSuffix(r.URL.Path, "/recovery-preview") && r.Method == "POST":
@@ -384,14 +390,16 @@ func (s *Service) job(w http.ResponseWriter, r *http.Request) {
 }
 
 type Start struct {
-	PreviewToken  string `json:"preview_token,omitempty"`
-	OriginalJob   string `json:"original_job,omitempty"`
-	RecoveryToken string `json:"recovery_token,omitempty"`
-	Key           string `json:"request_key"`
-	Revision      string `json:"revision"`
-	Kind          string `json:"kind"`
-	Node          string `json:"node"`
-	Edit          *Edit  `json:"edit,omitempty"`
+	PreflightToken      string `json:"preflight_token,omitempty"`
+	AcknowledgeWarnings bool   `json:"acknowledge_warnings,omitempty"`
+	PreviewToken        string `json:"preview_token,omitempty"`
+	OriginalJob         string `json:"original_job,omitempty"`
+	RecoveryToken       string `json:"recovery_token,omitempty"`
+	Key                 string `json:"request_key"`
+	Revision            string `json:"revision"`
+	Kind                string `json:"kind"`
+	Node                string `json:"node"`
+	Edit                *Edit  `json:"edit,omitempty"`
 }
 
 func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
@@ -498,6 +506,14 @@ func (s *Service) createJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		input.Node = original
+	}
+	target := deploy.Release
+	if input.Kind == "upgrade-node" {
+		target = image + "/" + version
+	}
+	if e = s.checkDeployment(r, input, c, target); e != nil {
+		failure(w, e)
+		return
 	}
 	if input.Edit != nil {
 		e = s.commitConfig(raw, next, *input.Edit, keyPath, "部署前")
@@ -628,7 +644,7 @@ func (s *Service) perform(ctx context.Context, id, kind, node string) error {
 	args := []string{"deploy", "--config", s.ConfigPath, "--non-interactive", "--expected-revision", revision}
 	switch kind {
 	case "add-node", "upgrade-node":
-		args = append(args, "--add-node", "--node", node)
+		args = append(args, "--add-node", "--node", node, "--acknowledge-preflight-warnings")
 	case "resume":
 		fallthrough
 	case "rollback":

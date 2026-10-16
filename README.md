@@ -2,10 +2,11 @@
 
 一个中文后台，集中查看**服务器资源、网站访问、证书有效期和文件安全**。发现异常后，通过飞书和邮箱提醒，并保留可查询的故障与通知历史。
 
-**当前版本 v2.0.44** · [GitHub 已发布源码](https://github.com/gzdzh-cn/dzh-webscan/releases/latest) · [安装教程](docs/INSTALLATION.md) · [后台指南](docs/CONSOLE.md) · [版本记录](docs/CHANGELOG.md) · [本次实现与验收](docs/ACCEPTANCE-v2.0.44.md)
+**当前版本 v2.0.45** · [GitHub 已发布源码](https://github.com/gzdzh-cn/dzh-webscan/releases/latest) · [安装教程](docs/INSTALLATION.md) · [后台指南](docs/CONSOLE.md) · [版本记录](docs/CHANGELOG.md) · [本次实现与验收](docs/ACCEPTANCE-v2.0.45.md)
 
-v2.0.44 增加子服务器动态登记与独立升级：普通节点操作不重建中心；会话可跨中心重启保留，添加／编辑弹窗支持内部滚动。详见[部署流程](docs/DEPLOYMENT-WORKFLOW.md)。已有用户先升级中心以启用新能力；发布不会自动切换生产服务。
+v2.0.45 增加部署前须知与自动环境、双向网络检查，安装／升级失败时明确显示原因和建议；弹窗及系统设置在按钮附近持续显示进度和结果。普通节点操作继续免重启中心。[部署流程 →](docs/DEPLOYMENT-WORKFLOW.md)
 
+已有用户先升级中心与宿主管理程序以启用检查能力，无需单独升级子服务器。发布不会自动切换生产服务。
 
 ## 核心功能
 

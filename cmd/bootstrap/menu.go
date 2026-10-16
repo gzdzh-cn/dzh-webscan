@@ -18,7 +18,7 @@ var errMenuExit = errors.New("menu_exit")
 // strict options as the container-extracted GoFrame CLI before removing anything.
 func parseBootstrapArgs(args []string) (map[string]string, error) {
 	parsed := map[string]string{}
-	boolean := []string{"--install", "--reinstall", "--uninstall", "--upgrade", "--add-node", "--resume", "--rollback", "--check", "--grafana-only", "--sync-grafana-credentials", "--reload-rules", "--central-only", "--non-interactive", "--dry-run", "--config-help", "--help", "-h"}
+	boolean := []string{"--install", "--reinstall", "--uninstall", "--upgrade", "--add-node", "--resume", "--rollback", "--check", "--grafana-only", "--sync-grafana-credentials", "--reload-rules", "--central-only", "--acknowledge-preflight-warnings", "--non-interactive", "--dry-run", "--config-help", "--help", "-h"}
 	for i := 0; i < len(args); i++ {
 		key, value, equals := strings.Cut(args[i], "=")
 		switch key {

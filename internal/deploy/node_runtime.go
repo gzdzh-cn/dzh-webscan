@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -38,28 +39,34 @@ func nodeMode(n common.Map) string {
 	return m
 }
 func (d *Deploy) checkNodeEnvironment(ctx context.Context, r *Remote, n common.Map) error {
-	base := "set -eu; test $(id -u) = 0; test $(uname -m) = x86_64; test -d /run/systemd/system; command -v systemctl >/dev/null; test -x /bin/bash; command -v sync >/dev/null; command -v sha256sum >/dev/null; command -v tar >/dev/null"
-	if _, e := r.Run(ctx, base); e != nil {
-		return errors.New("native_requires_root_linux_amd64_systemd_and_tools")
+	report := CheckNodePrerequisites(ctx, r, n, func(item CheckItem) {
+		progress.Info(ctx, item.Name+"："+item.Message+"；"+item.Suggestion)
+	})
+	if !report.OK {
+		for _, item := range report.Items {
+			if item.Status == "failed" {
+				return fmt.Errorf("%s：%s；%s", item.Name, item.Message, item.Suggestion)
+			}
+		}
 	}
-	// Reserve enough space for two consistent database snapshots and the
-	// isolated scanner bundle before any running service is touched.
-	if _, e := r.Run(ctx, "set -eu; free=$(df -Pk /var/lib | awk 'NR==2 {print $4}'); size=0; if [ -f /var/lib/webscan-v1/agent.sqlite3 ]; then size=$(du -k /var/lib/webscan-v1/agent.sqlite3 | cut -f1); fi; test \"$free\" -ge $((size * 2 + 262144))"); e != nil {
-		return errors.New("node_disk_insufficient_for_bundle_and_database_backups")
+	for _, item := range report.Items {
+		if item.Status == "warning" && !d.O.Check && !d.O.AcknowledgeWarnings {
+			if d.O.NonInteractive {
+				return errors.New("部署前检查存在警告：" + item.Message + "；确认后使用 --acknowledge-preflight-warnings 重试")
+			}
+			tty, e := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+			if e != nil {
+				return errors.New("部署前检查存在警告，需要交互确认或 --acknowledge-preflight-warnings")
+			}
+			fmt.Fprint(tty, "部署前检查警告："+item.Message+"。是否继续安装所需组件？[y/N] ")
+			answer, _ := bufio.NewReader(tty).ReadString('\n')
+			tty.Close()
+			if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+				return errors.New("已取消部署，现有服务保持运行")
+			}
+		}
 	}
 	if nodeMode(n) == "native" {
-		b, e := r.Run(ctx, "systemctl --version; test -f /sys/fs/cgroup/cgroup.controllers && cat /sys/fs/cgroup/cgroup.controllers || { test -d /sys/fs/cgroup/memory && test -d /sys/fs/cgroup/cpu; echo 'memory cpu'; }")
-		fields := strings.Fields(string(b))
-		if len(fields) < 2 {
-			return errors.New("native_systemd_version_unavailable")
-		}
-		version, err := strconv.Atoi(fields[1])
-		if err != nil || version < 231 {
-			return errors.New("native_requires_systemd_231")
-		}
-		if e != nil || !strings.Contains(string(b), "memory") || !strings.Contains(string(b), "cpu") {
-			return errors.New("native_cpu_memory_cgroup_limits_unavailable")
-		}
 		return nil
 	}
 	if _, e := r.Run(ctx, "command -v docker >/dev/null"); e == nil {
@@ -136,6 +143,9 @@ func (d *Deploy) prepareUnifiedNode(ctx context.Context, n common.Map) error {
 	if _, e = r.Exec(ctx, command, strings.NewReader(string(raw))); e != nil {
 		return errors.New("native_bundle_transfer_or_verification_failed")
 	}
+	if e = validateNodeScanTools(ctx, n, r, target); e != nil {
+		return e
+	}
 	state["native_dir"], state["native_sha256"] = target, common.Hash(raw)
 	if nodeMode(n) == "docker" {
 		if pulled, err := RemotePull(ctx, r, d.C, image); err == nil {
@@ -152,6 +162,35 @@ func (d *Deploy) prepareUnifiedNode(ctx context.Context, n common.Map) error {
 	return d.save()
 }
 
+// Validate tools and existing rules before any center registration or service stop.
+func validateNodeScanTools(ctx context.Context, n common.Map, r *Remote, target string) error {
+	rules, err := r.Read(ctx, "/etc/webscan-v1/php-webshell.yar")
+	if err != nil {
+		rules, _ = assets.Files.ReadFile("php-webshell.yar")
+	}
+	checkPath := "/var/lib/webscan-deploy/yara-check-" + common.ID() + ".yar"
+	if e := r.Write(ctx, checkPath, rules, 0600); e != nil {
+		return e
+	}
+	_, checkErr := r.Run(ctx, Q(target+"/tools/bin/yara")+" -w "+Q(checkPath)+" /dev/null")
+	r.Run(context.WithoutCancel(ctx), "rm -f "+Q(checkPath))
+	if checkErr != nil {
+		return errors.New("node_yara_validation_failed")
+	}
+	if common.B(common.M(common.M(n["scan"])["clamav"])["enabled"]) {
+		conf := "/var/lib/webscan-deploy/clamd-check-" + common.ID() + ".conf"
+		if e := r.Write(ctx, conf, []byte("LocalSocket /run/clamav/clamd.ctl\n"), 0600); e != nil {
+			return e
+		}
+		_, checkErr = r.Run(ctx, "set -eu; : > "+Q(conf+".probe")+"; test -S /run/clamav/clamd.ctl && "+Q(target+"/tools/bin/clamdscan")+" --fdpass --config-file="+Q(conf)+" --no-summary "+Q(conf+".probe"))
+		r.Run(context.WithoutCancel(ctx), "rm -f "+Q(conf)+" "+Q(conf+".probe"))
+		if checkErr != nil {
+			return errors.New("node_clamav_service_unavailable")
+		}
+	}
+	return nil
+}
+
 const stopNodeWriters = "set -eu; for name in webscan-agent-native webscan-agent-v1 webscan-vector-v1 webscan-exporter-v1 webscan-firewall-v1; do if systemctl cat \"$name.service\" >/dev/null 2>&1; then systemctl disable --now \"$name.service\"; fi; done; if [ -f /etc/webscan-v1/compose.yml ] && command -v docker >/dev/null 2>&1; then docker info >/dev/null; for name in webscan-agent-go webscan-vector-v1 webscan-exporter-v1; do if docker inspect \"$name\" >/dev/null 2>&1; then docker update --restart=no \"$name\" >/dev/null; docker stop -t 30 \"$name\" >/dev/null; fi; done; fi"
 
 func (d *Deploy) installUnifiedNode(ctx context.Context, n common.Map) error {
@@ -165,29 +204,17 @@ func (d *Deploy) installUnifiedNode(ctx context.Context, n common.Map) error {
 	if target == "" {
 		return errors.New("native_bundle_not_prepared")
 	}
-	rules, err := r.Read(ctx, "/etc/webscan-v1/php-webshell.yar")
-	if err != nil {
-		rules, _ = assets.Files.ReadFile("php-webshell.yar")
-	}
-	checkPath := "/var/lib/webscan-deploy/yara-check-" + common.ID() + ".yar"
-	if e = r.Write(ctx, checkPath, rules, 0600); e != nil {
+	if e = validateNodeScanTools(ctx, n, r, target); e != nil {
 		return e
 	}
-	_, checkErr := r.Run(ctx, Q(target+"/tools/bin/yara")+" -w "+Q(checkPath)+" /dev/null")
-	r.Run(context.WithoutCancel(ctx), "rm -f "+Q(checkPath))
-	if checkErr != nil {
-		return errors.New("node_yara_validation_failed")
+	recheck := CheckNodePrerequisites(ctx, r, n, nil)
+	for _, item := range recheck.Items {
+		if item.Status == "failed" {
+			return fmt.Errorf("%s：%s；%s", item.Name, item.Message, item.Suggestion)
+		}
 	}
-	if common.B(common.M(common.M(n["scan"])["clamav"])["enabled"]) {
-		conf := "/var/lib/webscan-deploy/clamd-check-" + common.ID() + ".conf"
-		if e = r.Write(ctx, conf, []byte("LocalSocket /run/clamav/clamd.ctl\n"), 0600); e != nil {
-			return e
-		}
-		_, checkErr = r.Run(ctx, "set -eu; : > "+Q(conf+".probe")+"; test -S /run/clamav/clamd.ctl && "+Q(target+"/tools/bin/clamdscan")+" --fdpass --config-file="+Q(conf)+" --no-summary "+Q(conf+".probe"))
-		r.Run(context.WithoutCancel(ctx), "rm -f "+Q(conf)+" "+Q(conf+".probe"))
-		if checkErr != nil {
-			return errors.New("node_clamav_service_unavailable")
-		}
+	if e = d.checkNodeNetwork(ctx, n, r); e != nil {
+		return e
 	}
 	if e = d.setNodeMaintenance(ctx, n, true); e != nil {
 		return e

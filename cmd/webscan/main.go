@@ -24,7 +24,7 @@ func main() {
 	agentCmd := &gcmd.Command{Name: "agent", Arguments: cfg, Strict: true, Func: func(ctx context.Context, p *gcmd.Parser) error { return agent.Run(ctx, p.GetOpt("config").String()) }}
 	centralCmd := &gcmd.Command{Name: "central", Arguments: cfg, Strict: true, Func: func(ctx context.Context, p *gcmd.Parser) error { return central.Run(ctx, p.GetOpt("config").String()) }}
 	args := append([]gcmd.Argument{}, cfg...)
-	for _, name := range []string{"dry-run", "check", "install", "reinstall", "upgrade", "add-node", "resume", "rollback", "uninstall", "central-only", "grafana-only", "sync-grafana-credentials", "reload-rules", "non-interactive", "config-help", "keep-images"} {
+	for _, name := range []string{"dry-run", "check", "install", "reinstall", "upgrade", "add-node", "resume", "rollback", "uninstall", "central-only", "grafana-only", "sync-grafana-credentials", "reload-rules", "non-interactive", "config-help", "keep-images", "acknowledge-preflight-warnings"} {
 		args = append(args, gcmd.Argument{Name: name, Orphan: true})
 	}
 	args = append(args, gcmd.Argument{Name: "node"}, gcmd.Argument{Name: "yara-rules"}, gcmd.Argument{Name: "expected-revision"})
@@ -33,7 +33,7 @@ func main() {
 			fmt.Print(config.Help())
 			return nil
 		}
-		return deploy.Run(ctx, deploy.Options{Config: p.GetOpt("config").String(), Node: p.GetOpt("node").String(), YaraRules: p.GetOpt("yara-rules").String(), DryRun: present(p, "dry-run"), Check: present(p, "check"), Install: present(p, "install"), Reinstall: present(p, "reinstall"), Upgrade: present(p, "upgrade"), AddNode: present(p, "add-node"), Resume: present(p, "resume"), Rollback: present(p, "rollback"), Uninstall: present(p, "uninstall"), CentralOnly: present(p, "central-only"), GrafanaOnly: present(p, "grafana-only"), SyncGrafana: present(p, "sync-grafana-credentials"), ReloadRules: present(p, "reload-rules"), NonInteractive: present(p, "non-interactive"), KeepImages: present(p, "keep-images"), ExpectedRevision: p.GetOpt("expected-revision").String()})
+		return deploy.Run(ctx, deploy.Options{Config: p.GetOpt("config").String(), Node: p.GetOpt("node").String(), YaraRules: p.GetOpt("yara-rules").String(), DryRun: present(p, "dry-run"), Check: present(p, "check"), Install: present(p, "install"), Reinstall: present(p, "reinstall"), Upgrade: present(p, "upgrade"), AddNode: present(p, "add-node"), Resume: present(p, "resume"), Rollback: present(p, "rollback"), Uninstall: present(p, "uninstall"), CentralOnly: present(p, "central-only"), GrafanaOnly: present(p, "grafana-only"), SyncGrafana: present(p, "sync-grafana-credentials"), ReloadRules: present(p, "reload-rules"), NonInteractive: present(p, "non-interactive"), KeepImages: present(p, "keep-images"), AcknowledgeWarnings: present(p, "acknowledge-preflight-warnings"), ExpectedRevision: p.GetOpt("expected-revision").String()})
 	}}
 	toolCmd := &gcmd.Command{Name: "tool", Strict: true, Arguments: []gcmd.Argument{{Name: "action"}, {Name: "input"}, {Name: "output"}, {Name: "uninstall", Orphan: true}}, Func: func(ctx context.Context, p *gcmd.Parser) error {
 		return tool.Run(ctx, p.GetOpt("action").String(), p.GetOpt("input").String(), p.GetOpt("output").String(), present(p, "uninstall"))
