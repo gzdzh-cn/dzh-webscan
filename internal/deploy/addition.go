@@ -137,6 +137,11 @@ func (d *Deploy) canAddNode() bool {
 	if !d.O.AddNode && !bytes.Equal(normalizeRuntime(actual), normalizeRuntime(expected)) {
 		return false
 	}
+	// HTTP installations deliberately skip PKI generation. A CA is required only
+	// when issuing a new node certificate for the installed HTTPS configuration.
+	if !d.C.SSLEnabled() {
+		return true
+	}
 	_, err = os.Stat(filepath.Join(root, "pki", "ca.key"))
 	return err == nil
 }
@@ -252,7 +257,11 @@ func (d *Deploy) waitStagedNode(ctx context.Context, n common.Map) error {
 		}
 		if time.Since(notice) >= 10*time.Second {
 			if err != nil {
-				progress.Info(ctx, "文件清单已完成，等待主服务器通过 HTTPS 读取节点指标："+progress.Explain(err))
+				protocol := "HTTP"
+				if d.C.SSLEnabled() {
+					protocol = "HTTPS"
+				}
+				progress.Info(ctx, "文件清单已完成，等待主服务器通过 "+protocol+" 读取节点指标："+progress.Explain(err))
 			} else {
 				progress.Info(ctx, "文件清单已完成，等待指标采集器发布最新监控状态")
 			}

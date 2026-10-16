@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -204,6 +205,26 @@ func (s *Store) serverAPI(w http.ResponseWriter, r *http.Request) {
 	if status, v, e := s.managementRequest(metadataCtx, "GET", "/settings", nil); e == nil && status == 200 {
 		meta := common.M(v)
 		effective := common.A(meta["effective_nodes"])
+		// Configured nodes remain manageable before installation and after a
+		// rollback. Listing them must not register a new collection target.
+		known := map[string]bool{}
+		for _, n := range nodes {
+			known[n.ID] = true
+		}
+		for _, value := range effective {
+			n := common.M(value)
+			id := common.S(n["id"])
+			if id == "" || id == "central" || known[id] {
+				continue
+			}
+			active := common.B(n["enabled"])
+			status := "unknown"
+			if !active {
+				status = "disabled"
+			}
+			nodes = append(nodes, telemetry.Node{ID: id, Name: common.S(n["name"]), Host: common.S(n["host"]), Active: active, Status: status, DeploymentState: "pending"})
+			known[id] = true
+		}
 		for i := range nodes {
 			if nodes[i].Central {
 				nodes[i].ConfiguredMode = "docker"
@@ -223,7 +244,9 @@ func (s *Store) serverAPI(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			deployed := common.M(common.M(meta["node_deployments"])[nodes[i].ID])
-			nodes[i].DeploymentState = common.S(deployed["phase"])
+			if phase := common.S(deployed["phase"]); phase != "" {
+				nodes[i].DeploymentState = phase
+			}
 			nodes[i].ActualMode = common.S(deployed["mode"])
 			nodes[i].AgentVersion = common.S(deployed["version"])
 			if nodes[i].ActualMode == "" {
@@ -238,6 +261,12 @@ func (s *Store) serverAPI(w http.ResponseWriter, r *http.Request) {
 			nodes[i].PendingMode = nodes[i].ConfiguredMode != "" && nodes[i].ConfiguredMode != nodes[i].ActualMode
 		}
 	}
+	sort.SliceStable(nodes, func(i, j int) bool {
+		if nodes[i].Central != nodes[j].Central {
+			return nodes[i].Central
+		}
+		return nodes[i].ID < nodes[j].ID
+	})
 	if r.URL.Path == "/api/servers" {
 		q := strings.ToLower(r.URL.Query().Get("q"))
 		status := r.URL.Query().Get("status")

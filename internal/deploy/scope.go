@@ -12,6 +12,19 @@ import (
 	"webscan/internal/progress"
 )
 
+// Recover the original operation's semantics before normalizing its target.
+// The explicit node must still match; never expand a single-node resume.
+func (d *Deploy) restoreResumeScope() error {
+	if !d.O.Resume || !common.B(d.State["target_add_node"]) {
+		return nil
+	}
+	if d.O.Node == "" || d.O.Node != common.S(d.State["target_node"]) || d.O.CentralOnly {
+		return errors.New("resume_scope_must_match_original_run")
+	}
+	d.O.AddNode = true
+	return nil
+}
+
 // Build the node-only target from the installed snapshot, not pending global
 // YAML edits. Only the selected node and download credentials come from YAML.
 // The caller's YAML is never modified and remains the target for a full upgrade.

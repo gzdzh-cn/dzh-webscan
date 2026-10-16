@@ -525,17 +525,36 @@ func (s *Service) perform(ctx context.Context, id, kind, node string) error {
 	case "add-node":
 		args = append(args, "--add-node", "--node", node)
 	case "resume":
-		args = append(args, "--resume")
-		if node != "" {
-			args = append(args, "--node", node)
-		}
+		fallthrough
 	case "rollback":
-		args = append(args, "--rollback")
-		if node != "" {
-			args = append(args, "--node", node)
+		state, err := common.ReadJSON(filepath.Join(s.StateDir, "state.json"))
+		if err != nil {
+			return err
 		}
+		recovery, err := recoveryArguments(kind, node, state)
+		if err != nil {
+			return err
+		}
+		args = append(args, recovery...)
 	}
 	return s.command(ctx, id, binary, args)
+}
+
+func recoveryArguments(kind, node string, state common.Map) ([]string, error) {
+	if node != common.S(state["target_node"]) {
+		return nil, userError("请保持原任务节点范围")
+	}
+	args := []string{"--" + kind}
+	if node != "" {
+		args = append(args, "--node", node)
+	}
+	if common.B(state["target_central_only"]) {
+		args = append(args, "--central-only")
+	}
+	if kind == "resume" && common.B(state["target_add_node"]) {
+		args = append(args, "--add-node")
+	}
+	return args, nil
 }
 func (s *Service) command(ctx context.Context, id, binary string, args []string) error {
 	c, e := config.Load(s.ConfigPath)

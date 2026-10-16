@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"golang.org/x/crypto/bcrypt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,62 @@ import (
 	"webscan/internal/telemetry"
 	"webscan/internal/website"
 )
+
+func TestServerListIncludesConfiguredNodesAfterRollback(t *testing.T) {
+	s := consoleFixture(t)
+	dir, err := os.MkdirTemp("/tmp", "webscan-list-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "manager.sock")
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/settings" {
+			t.Errorf("unexpected management request %s %s", r.Method, r.URL.Path)
+		}
+		write(w, 200, common.Map{"effective_nodes": []any{
+			common.Map{"id": "node", "name": "子服务器", "enabled": true},
+			common.Map{"id": "rolled-back", "name": "回退节点", "host": "192.0.2.5", "enabled": true, "deployment": common.Map{"mode": "docker"}, "ssh": common.Map{"password": "do-not-expose"}},
+			common.Map{"id": "new-node", "name": "待部署节点", "enabled": true},
+			common.Map{"id": "disabled-node", "name": "停用节点", "enabled": false},
+		}, "node_deployments": common.Map{"rolled-back": common.Map{"phase": "go-rolled-back"}}})
+	}))
+	server.Listener.Close()
+	server.Listener = l
+	server.Start()
+	t.Cleanup(server.Close)
+	s.Config["management_socket"] = socket
+	list := consoleGET(t, s, "/api/servers")
+	if common.I(list["total"]) != 5 || strings.Contains(string(common.JSON(list)), "do-not-expose") {
+		t.Fatal(list)
+	}
+	rows := map[string]common.Map{}
+	for _, row := range common.A(list["items"]) {
+		n := common.M(row)
+		rows[common.S(n["id"])] = n
+	}
+	if common.S(rows["rolled-back"]["deployment_state"]) != "go-rolled-back" || common.S(rows["rolled-back"]["status"]) != "unknown" || common.S(rows["new-node"]["deployment_state"]) != "pending" || common.S(rows["disabled-node"]["status"]) != "disabled" {
+		t.Fatal(list)
+	}
+	if common.S(consoleGET(t, s, "/api/servers/rolled-back")["id"]) != "rolled-back" {
+		t.Fatal("configured detail unavailable")
+	}
+	if common.I(consoleGET(t, s, "/api/servers?q=回退&status=unknown")["total"]) != 1 {
+		t.Fatal("filter failed")
+	}
+	nodes, err := s.Telemetry.Nodes(context.Background())
+	if err != nil || len(nodes) != 2 {
+		t.Fatal("listing changed collection targets", nodes, err)
+	}
+	server.Close()
+	if common.I(consoleGET(t, s, "/api/servers")["total"]) != 2 {
+		t.Fatal("manager outage hid running nodes")
+	}
+}
 
 func consoleFixture(t *testing.T) *Store {
 	s := testStore(t)

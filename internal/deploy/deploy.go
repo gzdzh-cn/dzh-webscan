@@ -89,6 +89,10 @@ func Run(ctx context.Context, o Options) error {
 		return e
 	}
 	defer d.Close()
+	if e = d.restoreResumeScope(); e != nil {
+		return e
+	}
+	o = d.O
 	if o.Resume && common.S(d.State["step"]) == "compose-adoption-pending" {
 		return AdoptCompose(ctx, o.Config)
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,28 @@ import (
 	"webscan/internal/common"
 	"webscan/internal/config"
 )
+
+func TestRecoveryArgumentsPreserveOriginalScope(t *testing.T) {
+	for _, tc := range []struct {
+		kind, node string
+		state      common.Map
+		want       []string
+	}{
+		{"resume", "new-node", common.Map{"target_node": "new-node", "target_add_node": true}, []string{"--resume", "--node", "new-node", "--add-node"}},
+		{"rollback", "new-node", common.Map{"target_node": "new-node", "target_add_node": true}, []string{"--rollback", "--node", "new-node"}},
+		{"resume", "", common.Map{"target_central_only": true}, []string{"--resume", "--central-only"}},
+		{"rollback", "", common.Map{"target_central_only": true}, []string{"--rollback", "--central-only"}},
+		{"resume", "", common.Map{}, []string{"--resume"}},
+	} {
+		got, err := recoveryArguments(tc.kind, tc.node, tc.state)
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Fatal(tc, got, err)
+		}
+	}
+	if _, err := recoveryArguments("resume", "other-node", common.Map{"target_node": "new-node"}); err == nil {
+		t.Fatal("scope change accepted")
+	}
+}
 
 func managerFixture(t *testing.T) *Service {
 	t.Helper()

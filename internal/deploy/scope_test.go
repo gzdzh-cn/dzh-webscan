@@ -13,6 +13,100 @@ import (
 	"webscan/internal/progress"
 )
 
+func TestResumeAdditionRestoresInstalledTargetBeforeHashCheck(t *testing.T) {
+	d := additionFixture(t)
+	d.State["go_release"] = "v2.0.38"
+	d.O = Options{AddNode: true, Node: "new-node"}
+	common.M(d.C.Raw["central"])["name"] = "pending global edit"
+	yamlConfig := d.C
+	if err := d.useInstalledMain(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.initialize(); err != nil {
+		t.Fatal(err)
+	}
+	originalHash := common.S(d.State["target_config_hash"])
+	d.C = yamlConfig
+	d.O = Options{Resume: true, Node: "new-node"}
+	if err := d.initialize(); err == nil || err.Error() != "resume_target_must_match_original_run" {
+		t.Fatal("fixture did not reproduce mismatch", err)
+	}
+	if err := d.restoreResumeScope(); err != nil {
+		t.Fatal(err)
+	}
+	if !d.O.AddNode {
+		t.Fatal("lost original node-add semantics")
+	}
+	if err := d.useInstalledMain(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if common.Hash(common.JSON(Redact(d.C.Raw))) != originalHash || common.S(common.M(d.C.Raw["central"])["name"]) == "pending global edit" {
+		t.Fatal("resume consumed unrelated YAML settings")
+	}
+	for _, o := range []Options{{Resume: true}, {Resume: true, Node: "other-node"}, {Resume: true, Node: "new-node", CentralOnly: true}} {
+		d.O = o
+		if err := d.restoreResumeScope(); err == nil {
+			t.Fatal("resume accepted changed scope", o)
+		}
+	}
+}
+
+func TestNodeOnlyAdditionRequiresCAOnlyForHTTPS(t *testing.T) {
+	for _, mode := range []string{"native", "legacy"} {
+		for _, ssl := range []bool{false, true} {
+			name := mode + "/http"
+			if ssl {
+				name = mode + "/https"
+			}
+			t.Run(name, func(t *testing.T) {
+				d := additionFixture(t)
+				d.State["go_release"] = "v2.0.38"
+				d.O = Options{AddNode: true, Node: "new-node"}
+				previous := common.M(d.State["configuration"])
+				for _, raw := range []common.Map{d.C.Raw, previous} {
+					common.M(raw["ssl"])["enabled"] = ssl
+					common.M(common.M(raw["central"])["monitoring"])["mode"] = mode
+				}
+				root := d.C.CentralRoot()
+				if err := os.RemoveAll(filepath.Join(root, "pki")); err != nil {
+					t.Fatal(err)
+				}
+				prior := &Config{Raw: previous, Nodes: []common.Map{d.C.Nodes[0]}}
+				if err := common.Atomic(filepath.Join(root, "compose.yml"), YAML(ComposeCentral(prior, d.Images)), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := common.AtomicJSON(filepath.Join(root, "runtime.json"), CentralRuntime(prior, d.Secrets, common.SS(d.State["active"]))); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.useInstalledMain(); err != nil {
+					t.Fatal(err)
+				}
+				if ssl {
+					if d.canAddNode() {
+						t.Fatal("HTTPS node addition accepted without its installed CA")
+					}
+					return
+				}
+				if !d.canAddNode() {
+					t.Fatal("HTTP node addition incorrectly requires a CA")
+				}
+				if err := d.initialize(); err != nil {
+					t.Fatal(err)
+				}
+				if !d.addingNode() || !common.B(d.State["target_add_node"]) {
+					t.Fatal("HTTP operation did not retain node-only scope")
+				}
+				if _, err := os.Stat(filepath.Join(root, "pki")); !os.IsNotExist(err) {
+					t.Fatal("HTTP node addition created PKI files", err)
+				}
+			})
+		}
+	}
+}
+
 func TestNodeOnlyPreservesPendingGlobalConfigurationAndCurrentImage(t *testing.T) {
 	d := additionFixture(t)
 	d.State["go_release"] = "v2.0.10"

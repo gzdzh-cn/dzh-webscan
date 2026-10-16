@@ -425,7 +425,7 @@ func Explain(err error) string {
 		"node_agent_ready_timeout":                          "子服务器建立文件清单超时，请检查目录规模和 Agent 状态",
 		"node_agent_container_not_running":                  "子服务器 Agent 容器未正常运行",
 		"node_agent_start_time_unavailable":                 "无法确认子服务器当前监控容器的启动时间，已停止就绪确认",
-		"node_staged_exporter_not_ready":                    "文件清单已完成，但主服务器尚未取得节点的最新 HTTPS 指标，请检查指标采集器及连接",
+		"node_staged_exporter_not_ready":                    "文件清单已完成，但主服务器尚未取得节点的最新指标，请检查指标采集器及连接",
 		"deployment_already_running":                        "已有部署程序正在运行，请勿同时执行安装",
 		"ssh_host_fingerprint_mismatch":                     "SSH 主机指纹不匹配，请核对服务器身份",
 		"ssh_host_fingerprint_invalid":                      "可选 SSH 主机指纹格式无效；自动记录模式请删除该字段或留空",

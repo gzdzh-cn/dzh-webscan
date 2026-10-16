@@ -6,7 +6,7 @@ import { metricLabel, metricValue, resourceCharts, trendOption, healthCharts } f
 import MetricChart from './MetricChart.vue'
 import NodeDialog from './NodeDialog.vue'
 import { servers, statusLabel, rangeQuery, requestKey, type Settings, errorMessage, type Server, type Trend } from './monitoring'
-function deploymentLabel(value?:string){return ({complete:'已验收','go-switched':'已启动，待验收','go-prepared':'准备中','go-rolled-back':'已回退',uninstalled:'已卸载'} as Record<string,string>)[value || ''] || (value ? '部署处理中' : '尚无部署记录')}
+function deploymentLabel(value?:string){return ({pending:'待部署',complete:'已验收','go-switched':'已启动，待验收','go-prepared':'准备中','go-rolled-back':'已回退，可编辑后部署',uninstalled:'已卸载'} as Record<string,string>)[value || ''] || (value ? '部署处理中' : '尚无部署记录')}
 function runtimeLabel(mode?:string) {return mode==='native'?'直接运行 Go':mode==='docker'?'Docker 容器':'尚未确认'}
 const systemHealth = ref<{mode:string;database:string;pending_notifications:number;oldest_pending:number;pending_email:number;oldest_email:number;email_enabled:boolean;manager:{available:boolean;message?:string;watchdog_phase?:string}}>()
 const systemError=ref(''), route=useRoute(),router=useRouter()
