@@ -105,11 +105,19 @@ it('warnings require explicit confirmation and only saving does not start prefli
  button('确认警告并继续部署').click();await settle()
  expect(vi.mocked(api).mock.calls.find(c=>c[0]==='/api/deployments')?.[2]).toMatchObject({preflight_token:'check-fixture',acknowledge_warnings:true})
 })
-it('requirements display effective custom ports and source without claiming reachability',async()=>{
+it('deployment requirements show the agreed port text without expanded explanations',async()=>{
  await open(true)
- vi.mocked(api).mockImplementation(async <T,>()=>({minimum_systemd:231,reserve_mib:256,event_url:'https://192.0.2.1:20443',nodes:[{id:'old',ssh_port:2222,metrics_port:19101,allowed_source_ip:'192.0.2.10'}]}) as T)
- button('查看完整部署要求').click();await settle()
- expect(document.body.textContent).toContain('实际来源以连接检测结果为准')
+ const requirements=document.querySelector('.node-editor-dialog .deployment-requirements')!
+ expect(Array.from(requirements.querySelectorAll('li'),item=>item.textContent)).toEqual([
+  '子服务器放行入站 TCP 22、19100，仅允许主服务器访问。',
+  '主服务器放行入站 TCP 19443，允许子服务器访问；子服务器同时允许出站连接该端口。',
+  '云安全组、宝塔防火墙和系统防火墙都要检查。自定义端口以实际配置为准。',
+ ])
+ expect(requirements.textContent).toContain('需 Linux amd64、root SSH 登录，监控目录存在且可访问。')
+ expect(requirements.textContent).toContain('Docker：需要可用的 Docker／Compose')
+ expect(requirements.textContent).not.toContain('直接运行 Go：')
+ expect(requirements.querySelector('table')).toBeNull()
+ expect(requirements.textContent).not.toContain('展开')
 })
 it('invalid fields are focused after the form is enabled and no request is sent',async()=>{
  await open(false)
