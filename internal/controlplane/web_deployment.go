@@ -126,7 +126,7 @@ func (s *Store) submitPreparation(ctx context.Context, t *deploymentTrust, user,
 		if err != nil {
 			return nil, err
 		}
-		n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1 FOR UPDATE", node))
+		n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE", node))
 		if err != nil {
 			return nil, err
 		}

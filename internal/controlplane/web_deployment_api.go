@@ -189,7 +189,7 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 			}
 			return true
 		}
-		n, err := scanNode(a.Store.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1", node))
+		n, err := scanNode(a.Store.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1", node))
 		if err != nil {
 			webDeploymentFailure(w, err)
 			return true

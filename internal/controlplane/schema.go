@@ -6,7 +6,7 @@ import (
 	"errors"
 )
 
-const SchemaVersion = 35
+const SchemaVersion = 36
 
 // A separate migration per version is intentional: CREATE IF NOT EXISTS is
 // insufficient to upgrade an already initialized control plane.
@@ -283,6 +283,12 @@ func (s *Store) Upgrade(ctx context.Context, backupDirectory string) error {
 	}
 	if version == 34 {
 		if _, err = tx.ExecContext(ctx, webDeploymentSchema); err != nil {
+			return err
+		}
+		version = 35
+	}
+	if version == 35 {
+		if _, err = tx.ExecContext(ctx, nodeRemovalSchema); err != nil {
 			return err
 		}
 	}

@@ -139,7 +139,7 @@ func (s *Store) bindNodeProvisioning(ctx context.Context, c Config, t *deploymen
 		}
 		return provisioningAdmin(op, tx, user)
 	}, func(tx *sql.Tx) (any, error) {
-		n, err := scanNode(tx.QueryRowContext(op, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR UPDATE`, in.Node))
+		n, err := scanNode(tx.QueryRowContext(op, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, in.Node))
 		if err != nil || n.Version != in.Expected {
 			return nil, ErrConflict
 		}

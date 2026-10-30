@@ -184,7 +184,7 @@ func (s *Store) SaveSite(ctx context.Context, user, key string, in SiteInput, ex
 		}
 		if in.Node != "" && in.Node != "central" {
 			var id string
-			if err := tx.QueryRowContext(ctx, "SELECT id FROM v3_nodes WHERE id=$1 FOR SHARE", in.Node).Scan(&id); err == sql.ErrNoRows {
+			if err := tx.QueryRowContext(ctx, "SELECT id FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR SHARE", in.Node).Scan(&id); err == sql.ErrNoRows {
 				return nil, ErrSiteNodeMissing
 			} else if err != nil {
 				return nil, err

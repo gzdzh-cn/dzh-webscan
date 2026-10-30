@@ -187,7 +187,7 @@ func (s *Store) addCredential(ctx context.Context, v *Vault, user, key, node str
 	}{node, expected, keyID, digest(receipt)}
 	return s.guardedMutation(ctx, user, key, "add-ssh-credential", node, request, guard, func(tx *sql.Tx) (any, error) {
 		var version int64
-		if err := tx.QueryRowContext(ctx, "SELECT version FROM v3_nodes WHERE id=$1 FOR UPDATE", node).Scan(&version); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT version FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE", node).Scan(&version); err != nil {
 			if err == sql.ErrNoRows {
 				return nil, ErrConflict
 			}

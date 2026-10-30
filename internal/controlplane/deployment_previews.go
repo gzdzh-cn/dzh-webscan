@@ -150,7 +150,7 @@ func (s *Store) previewLocalDeployment(ctx context.Context, c Config, t *deploym
 	if err != nil {
 		return out, err
 	}
-	n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1 FOR UPDATE", in.Node))
+	n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE", in.Node))
 	if err != nil {
 		return out, err
 	}

@@ -225,6 +225,50 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {description: 配置版本冲突或幂等键被用于不同请求}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/remove:
+    post:
+      operationId: removeServerRecords
+      description: 管理员通过可信 HTTPS、CSRF 和幂等键，仅移除明确选择的中心记录并停止采集。不连接 SSH、不卸载远程程序，保留历史事件、指标和任务，节点 ID 保留且不能复用。提交前在同一事务备份当前配置并重新检查版本、关联网站和未完成任务；整批成功或整批保留。
+      parameters:
+        - {name: X-CSRF-Token, in: header, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [records, confirm]
+              properties:
+                confirm: {type: boolean, enum: [true]}
+                records:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [id, expected_version]
+                    properties:
+                      id: {type: string}
+                      expected_version: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: 中心记录已移除，历史和远程程序保留
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: {type: integer}
+                  message: {type: string}
+                  records: {type: array, items: {type: object}}
+        '400': {description: 无效选择、缺少确认或幂等键、重复或未知字段}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 配置版本变化、网站关联、任务保护或正在迁移或应用配置}
+        '503': {description: 备份或事务失败，原记录保留}
   /api/v3/servers/{id}:
     get:
       operationId: getServer
@@ -2239,6 +2283,8 @@ components:
         mode: {type: string, enum: [native, docker]}
         version: {type: integer, readOnly: true}
         applied_version: {type: integer, readOnly: true}
+        can_remove: {type: boolean, readOnly: true, description: 是否允许仅移除中心记录；不表示远程卸载可用}
+        remove_reason: {type: string, readOnly: true, description: 关联网站或未完成任务等移除保护原因}
         shard: {type: integer, readOnly: true}
         collection_state: {type: string, enum: [normal, unreachable, stale, unknown, disabled], readOnly: true}
         status:

@@ -49,7 +49,7 @@ func scanNodeNameChange(row interface{ Scan(...any) error }) (j nodeNameChangeJo
 // Account -> node -> task -> credential/authority is the lock order shared by
 // preparation, request admission and signing. Callers hold the operation gate.
 func nameChangeNodeStateTx(ctx context.Context, tx *sql.Tx, node string, expected int64) (Node, string, int64, string, string, error) {
-	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR UPDATE`, node))
+	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, node))
 	if err != nil || !n.Enabled || n.Version != expected || n.AppliedVersion == 0 {
 		return Node{}, "", 0, "", "", errNodeNameChange
 	}
@@ -424,7 +424,7 @@ func (s *Store) cancelNodeNameChange(ctx context.Context, user, key, id string) 
 			return nil, errNodeNameChange
 		}
 		var version int64
-		if err := tx.QueryRowContext(ctx, `SELECT version FROM v3_nodes WHERE id=$1 FOR UPDATE`, node).Scan(&version); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT version FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, node).Scan(&version); err != nil {
 			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE v3_node_name_changes SET status='canceled',updated_at=clock_timestamp() WHERE id=$1 AND status IN ('prepared','requested','signed')`, id); err != nil {

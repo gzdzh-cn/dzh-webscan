@@ -143,7 +143,7 @@ func lockedApplicationNodeParentTx(ctx context.Context, tx *sql.Tx, v *Vault, p 
 	if !ok || !want.Enabled {
 		return p, doc, errConfigurationApplication
 	}
-	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR SHARE`, node))
+	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR SHARE`, node))
 	if err != nil || !applicationNodeMatches(doc, n) {
 		return p, doc, ErrConflict
 	}
@@ -530,7 +530,7 @@ func (s *Store) verifyApplicationNodeOutcomesTx(ctx context.Context, tx *sql.Tx,
 			return err
 		}
 		var applied int64
-		if err = tx.QueryRowContext(ctx, `SELECT applied_version FROM v3_nodes WHERE id=$1`, node).Scan(&applied); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT applied_version FROM v3_nodes WHERE removed_at IS NULL AND id=$1`, node).Scan(&applied); err != nil {
 			return err
 		}
 		want := j.NodeVersion

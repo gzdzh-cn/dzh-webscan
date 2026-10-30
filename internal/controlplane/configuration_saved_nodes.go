@@ -41,7 +41,7 @@ func materializeRestoredNodesTx(ctx context.Context, tx *sql.Tx, plan configurat
  SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(id text,name text,endpoint text,server_name text,enabled boolean,mode text,config jsonb,expected bigint,snapshot text,shard integer)
  ), updated AS (
  UPDATE v3_nodes n SET name=p.name,endpoint=p.endpoint,server_name=p.server_name,enabled=p.enabled,mode=p.mode,config=p.config,version=n.version+1,updated_at=clock_timestamp()
- FROM parsed p WHERE p.expected>0 AND n.id=p.id AND n.version=p.expected
+ FROM parsed p WHERE p.expected>0 AND n.id=p.id AND n.version=p.expected AND n.removed_at IS NULL
  RETURNING n.id,n.version,n.name,n.endpoint,n.server_name,n.enabled,n.mode,n.shard,n.config
  ), inserted AS (
  INSERT INTO v3_nodes(id,name,endpoint,server_name,enabled,mode,shard,config)

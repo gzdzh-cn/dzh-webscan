@@ -18,6 +18,8 @@ func (s *Store) SaveNode(ctx context.Context, username, key string, n Node, expe
 func (s *Store) saveNode(ctx context.Context, username, key string, n Node, expected int64, shards int, before *configurationEditBackup) (json.RawMessage, error) {
 	// None of these read-model fields grant write or runtime authority.
 	n.Configuration = nil
+	n.CanRemove = false
+	n.RemoveReason = ""
 	n.RuntimeEpoch = 0
 	n.Version = 0
 	n.AppliedVersion = 0

@@ -64,7 +64,7 @@ func (r configurationNodePreparer) read(ctx context.Context, expected privateCon
 	if linked {
 		return out, errNodeProvisioning
 	}
-	n, err := scanNode(tx.QueryRowContext(op, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR SHARE`, node))
+	n, err := scanNode(tx.QueryRowContext(op, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR SHARE`, node))
 	if err != nil || !applicationNodeMatches(doc, n) {
 		return out, ErrConflict
 	}
@@ -201,7 +201,7 @@ func (r configurationNodePreparer) checkEnvironment(ctx context.Context, expecte
 	if err != nil {
 		return err
 	}
-	rows, err = tx.QueryContext(op, `SELECT `+nodeColumns+` FROM v3_nodes ORDER BY id FOR SHARE`)
+	rows, err = tx.QueryContext(op, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL ORDER BY id FOR SHARE`)
 	if err != nil {
 		return err
 	}

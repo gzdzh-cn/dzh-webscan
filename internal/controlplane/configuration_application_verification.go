@@ -320,14 +320,14 @@ func (r configurationVerificationRuntime) verifyNodesTx(ctx context.Context, tx 
 		}
 	}
 	var count int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM v3_nodes`).Scan(&count); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM v3_nodes WHERE removed_at IS NULL`).Scan(&count); err != nil {
 		return err
 	}
 	if count != len(doc.Nodes) {
 		return ErrConflict
 	}
 	for id := range doc.Nodes {
-		n, e := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR SHARE`, id))
+		n, e := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR SHARE`, id))
 		if e != nil || !applicationNodeMatches(doc, n) || n.Shard != Shard(id, r.bootstrap.Collector.Shards) {
 			return ErrConflict
 		}

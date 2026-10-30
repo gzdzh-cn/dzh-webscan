@@ -404,6 +404,11 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	if header.Version >= 36 {
+		if _, err = tx.ExecContext(ctx, nodeRemovalSchema); err != nil {
+			return err
+		}
+	}
 	tables, err := postgresTables(ctx, tx)
 	if err != nil {
 		return err

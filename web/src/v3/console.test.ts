@@ -135,6 +135,42 @@ it('does not offer configuration writes to a viewer', async () => {
   await mount(Servers, '/servers', client, 'viewer')
   expect(host.textContent).not.toContain('添加服务器')
   expect(Array.from(host.querySelectorAll('button')).some(value => value.textContent?.trim() === '编辑')).toBe(false)
+  expect(Array.from(host.querySelectorAll('button')).some(value => value.textContent?.trim() === '移除记录')).toBe(false)
+})
+
+it('removes a stale server only after explicit confirmation and retains its retry key on failure', async () => {
+  const client = new ControlV3(), stale = { ...node(), can_remove: true, collection_state: 'disabled' as const }
+  const read = vi.spyOn(client, 'servers').mockResolvedValueOnce({ items: [stale], next_cursor: '', limit: 20 }).mockResolvedValue({ items: [], next_cursor: '', limit: 20 })
+  const remove = vi.spyOn(client, 'removeServerRecords').mockRejectedValueOnce(new Error('配置备份失败，原记录保留')).mockResolvedValue({ removed: 1, message: '服务器记录已移除，已停止采集；未远程卸载程序，历史数据已保留' })
+  await mount(Servers, '/servers', client)
+  button('移除记录').click(); await settle()
+  const dialog = document.querySelector('.el-dialog[aria-labelledby]') || document.querySelector('.el-dialog')!
+  expect(dialog.textContent).toContain('不会连接服务器或卸载远程程序')
+  expect(dialog.textContent).toContain(stale.endpoint)
+  expect(button('确认移除记录', dialog).disabled).toBe(true)
+  expect(remove).not.toHaveBeenCalled()
+  ;(dialog.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); await settle()
+  button('确认移除记录', dialog).click(); await settle()
+  expect(dialog.querySelector('.v3-dialog-feedback')?.textContent).toContain('配置备份失败')
+  expect(remove.mock.calls[0]?.[0]).toEqual([{ id: stale.id, expected_version: stale.version }])
+  button('确认移除记录', dialog).click(); await settle()
+  expect(remove).toHaveBeenCalledTimes(2)
+  expect(remove.mock.calls[0]?.[1]).toBe(remove.mock.calls[1]?.[1])
+  expect(read).toHaveBeenCalledTimes(2)
+  expect(host.textContent).toContain('历史数据已保留')
+})
+
+it('explains protected records and fails closed if an older server omits removal capability', async () => {
+  const client = new ControlV3()
+  vi.spyOn(client, 'servers').mockResolvedValue({ items: [{ ...node(), can_remove: false, remove_reason: '存在未完成部署，请先继续或回退原任务' }, node('older-api')], next_cursor: '', limit: 20 })
+  const remove = vi.spyOn(client, 'removeServerRecords')
+  await mount(Servers, '/servers', client)
+  expect(host.textContent).toContain('存在未完成部署，请先继续或回退原任务')
+  const buttons = Array.from(host.querySelectorAll('button')).filter(value => value.textContent?.trim() === '移除记录')
+  expect(buttons).toHaveLength(2)
+  expect(buttons.every(value => value.disabled)).toBe(true)
+  expect(button('移除已选记录（0）').disabled).toBe(true)
+  expect(remove).not.toHaveBeenCalled()
 })
 
 it('replaces a pending deployment filter read instead of silently ignoring the new query', async () => {

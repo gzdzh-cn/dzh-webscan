@@ -160,7 +160,7 @@ func insertDeployment(ctx context.Context, tx *sql.Tx, user string, in Deploymen
 }
 
 func insertDeploymentWithBackup(ctx context.Context, tx *sql.Tx, user string, in DeploymentRequest, guard func(*sql.Tx, Node) error, before *deploymentConfigurationBackup) (any, error) {
-	n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1 FOR UPDATE", in.Node))
+	n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE", in.Node))
 	if err == sql.ErrNoRows {
 		return nil, ErrConflict
 	}

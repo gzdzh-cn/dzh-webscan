@@ -231,7 +231,7 @@ func websiteBackupRevision(ctx context.Context, tx *sql.Tx) (string, map[string]
 	if err != nil {
 		return "", nil, err
 	}
-	rows, err = tx.QueryContext(ctx, "SELECT id,version FROM v3_nodes ORDER BY id")
+	rows, err = tx.QueryContext(ctx, "SELECT id,version FROM v3_nodes WHERE removed_at IS NULL ORDER BY id")
 	if err != nil {
 		return "", nil, err
 	}

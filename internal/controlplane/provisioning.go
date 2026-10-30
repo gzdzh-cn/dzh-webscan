@@ -211,7 +211,7 @@ func (s *Store) prepareLocalDeployment(ctx context.Context, c Config, t *deploym
 	if _, err := s.ReadCredential(ctx, t.vault, in.Credential, in.Node); err != nil {
 		return DeploymentRequest{}, err
 	}
-	n, err := scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1", in.Node))
+	n, err := scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1", in.Node))
 	if err != nil {
 		return DeploymentRequest{}, err
 	}
@@ -405,7 +405,7 @@ func (s *Store) localProvisioningCommand(ctx context.Context, c Config, o Option
 			managed := false
 			if in.Kind == "upgrade" && in.IdentityID == "" && in.IdentityDirectory == "" {
 				var n Node
-				n, err = scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1", in.Node))
+				n, err = scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1", in.Node))
 				if err == nil {
 					_, managed, err = managedNodeAuthority(ctx, s.DB, c, n)
 				}

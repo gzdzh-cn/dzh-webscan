@@ -33,7 +33,7 @@ func (s *Store) consoleNodes(ctx context.Context, after, keyword, state string, 
 	q := `WITH public_nodes AS (SELECT n.id, ` + consoleCollectionStateSQL + ` state, jsonb_build_object(
  'id',n.id,'name',n.name,'endpoint',n.endpoint,'server_name',n.server_name,'enabled',n.enabled,'mode',n.mode,'version',n.version,'applied_version',n.applied_version,'shard',n.shard,
  'configuration',jsonb_build_object('registered_version',COALESCE(c.version,0),'delivered_version',COALESCE(r.delivered_version,0),'runtime_enabled',c.enabled,'runtime_mode',COALESCE(c.mode,''),'runtime_endpoint',COALESCE(c.endpoint,'')),
- 'status',` + consoleStatusSQL + `,'collection_state',` + consoleCollectionStateSQL + `) payload
+ 'status',` + consoleStatusSQL + `,'collection_state',` + consoleCollectionStateSQL + `,'can_remove',(` + nodeRemovalReasonSQL + `=''),'remove_reason',` + nodeRemovalReasonSQL + `) payload
  FROM ` + managedNodeRelations + ` LEFT JOIN v3_node_status s ON s.node=n.id WHERE n.id>$1 AND (n.name ILIKE $2 ESCAPE '\' OR n.id ILIKE $2 ESCAPE '\' OR n.endpoint ILIKE $2 ESCAPE '\'))
  SELECT payload FROM public_nodes WHERE ($3='' OR state=$3) ORDER BY id LIMIT $5`
 	pattern := "%" + strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(keyword) + "%"

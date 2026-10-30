@@ -17,14 +17,14 @@ type NodeConfigurationState struct {
 	RuntimeEndpoint   string `json:"runtime_endpoint"`
 }
 
-const managedNodeRelations = `v3_nodes n LEFT JOIN v3_node_runtime r ON r.node=n.id LEFT JOIN v3_node_configurations c ON c.node=r.node AND c.id=r.snapshot`
+const managedNodeRelations = `(SELECT * FROM v3_nodes WHERE removed_at IS NULL) n LEFT JOIN v3_node_runtime r ON r.node=n.id LEFT JOIN v3_node_configurations c ON c.node=r.node AND c.id=r.snapshot`
 
-var managedNodeColumns = "n." + strings.ReplaceAll(nodeColumns, ",", ",n.") + ",COALESCE(c.version,0),COALESCE(r.delivered_version,0),c.enabled,COALESCE(c.mode,''),COALESCE(c.endpoint,'')"
+var managedNodeColumns = "n." + strings.ReplaceAll(nodeColumns, ",", ",n.") + ",COALESCE(c.version,0),COALESCE(r.delivered_version,0),c.enabled,COALESCE(c.mode,''),COALESCE(c.endpoint,''),(" + nodeRemovalReasonSQL + "='')," + nodeRemovalReasonSQL
 
 func scanManagedNode(row interface{ Scan(...any) error }) (n Node, err error) {
 	state := &NodeConfigurationState{}
 	var enabled sql.NullBool
-	err = row.Scan(&n.ID, &n.Name, &n.Endpoint, &n.ServerName, &n.Enabled, &n.Mode, &n.Version, &n.AppliedVersion, &n.Shard, &n.Config, &state.RegisteredVersion, &state.DeliveredVersion, &enabled, &state.RuntimeMode, &state.RuntimeEndpoint)
+	err = row.Scan(&n.ID, &n.Name, &n.Endpoint, &n.ServerName, &n.Enabled, &n.Mode, &n.Version, &n.AppliedVersion, &n.Shard, &n.Config, &state.RegisteredVersion, &state.DeliveredVersion, &enabled, &state.RuntimeMode, &state.RuntimeEndpoint, &n.CanRemove, &n.RemoveReason)
 	if enabled.Valid {
 		state.RuntimeEnabled = &enabled.Bool
 	}
@@ -59,7 +59,7 @@ func captureSavedNodeTx(ctx context.Context, tx *sql.Tx, id string) (string, err
 // verified deployment checkpoint. Saving public form input never calls it.
 func publishNodeRuntimeTx(ctx context.Context, tx *sql.Tx, id, snapshot string, delivered int64) error {
 	var epoch int64
-	if err := tx.QueryRowContext(ctx, `UPDATE v3_nodes SET runtime_generation=runtime_generation+1 WHERE id=$1 RETURNING runtime_generation`, id).Scan(&epoch); err != nil {
+	if err := tx.QueryRowContext(ctx, `UPDATE v3_nodes SET runtime_generation=runtime_generation+1 WHERE id=$1 AND removed_at IS NULL RETURNING runtime_generation`, id).Scan(&epoch); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO v3_node_runtime(node,snapshot,epoch,delivered_version) VALUES($1,$2,$4,$3)
@@ -91,6 +91,10 @@ func disableRuntimeHealthTx(ctx context.Context, tx *sql.Tx, id string) error {
 	if enabled {
 		return nil
 	}
+	return disableNodeHealthTx(ctx, tx, id)
+}
+
+func disableNodeHealthTx(ctx context.Context, tx *sql.Tx, id string) error {
 	for _, q := range []string{
 		`UPDATE v3_health_rules SET phase='disabled' WHERE node=$1`,
 		`UPDATE v3_health_outbox SET done_at=clock_timestamp(),result='监控已停用，取消待入队通知' WHERE node=$1 AND done_at IS NULL`,

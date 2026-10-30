@@ -130,7 +130,7 @@ func (r configurationNodesRuntime) nodeWork(ctx context.Context, expected privat
 	}
 	var work []applicationNodeWork
 	for _, id := range keys {
-		n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR SHARE`, id))
+		n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR SHARE`, id))
 		if err != nil || !applicationNodeMatches(doc, n) {
 			return nil, ErrConflict
 		}

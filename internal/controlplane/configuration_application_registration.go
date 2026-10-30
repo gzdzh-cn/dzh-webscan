@@ -114,7 +114,7 @@ func applicationRegistrationStateTx(ctx context.Context, tx *sql.Tx, node string
 		return state, err
 	}
 	state.Runtime = *b
-	err = tx.QueryRowContext(ctx, `SELECT applied_version FROM v3_nodes WHERE id=$1`, node).Scan(&state.Applied)
+	err = tx.QueryRowContext(ctx, `SELECT applied_version FROM v3_nodes WHERE removed_at IS NULL AND id=$1`, node).Scan(&state.Applied)
 	return state, err
 }
 
@@ -150,7 +150,7 @@ func applicationRegistrationTx(ctx context.Context, tx *sql.Tx, v *Vault, p priv
 	if !ok || want.Enabled || p.Direction == "forward" && p.phase() != "nodes" || p.Direction == "rollback" && p.phase() != "restore-nodes" {
 		return false, errConfigurationApplication
 	}
-	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR UPDATE`, node))
+	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, node))
 	if err != nil || !applicationNodeMatches(doc, n) {
 		return false, ErrConflict
 	}

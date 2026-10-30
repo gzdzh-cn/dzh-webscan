@@ -62,7 +62,7 @@ func namePruningPolicyTx(ctx context.Context, tx *sql.Tx, c Config, user, node s
 	if err != nil {
 		return empty, err
 	}
-	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR UPDATE`, node))
+	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, node))
 	if err != nil || !n.Enabled || n.Version != expected || n.AppliedVersion != expected {
 		return empty, errNodeNamePruning
 	}

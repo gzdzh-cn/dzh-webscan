@@ -2,7 +2,7 @@
 
 一个中文后台，集中查看**服务器资源、网站访问、证书有效期和文件安全**。发现异常后，通过飞书和邮箱提醒，并保留可查询的故障与通知历史。
 
-**v3.0.1 · 单中心正式版** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases/tag/v3.0.1) · [v3 安装入口](docs/INSTALL-v3.0.1.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.1.md) · [发布回执与验收](docs/RELEASE-v3.0.1-RECEIPT.md)
+**v3.0.2 · 单中心正式版** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases/tag/v3.0.2) · [v3 安装入口](docs/INSTALL-v3.0.2.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.2.md) · [发布回执与验收](docs/RELEASE-v3.0.2-RECEIPT.md)
 
 v3 主控主动采集子控，业务数据使用 PostgreSQL，指标使用 VictoriaMetrics。保留原版后台风格，接通网页安装、独立升级、任务日志和继续／回退；普通子控操作不重启主控。
 
@@ -48,7 +48,7 @@ v2.0.39 将采集、部署、配置生效状态分开展示，未完成任务可
 
 ## v3 安装与打开后台
 
-按 [v3 正式安装入口](docs/INSTALL-v3.0.1.md) 下载并验证固定版本镜像、签名资料和安装请求；[发布回执](docs/RELEASE-v3.0.1-RECEIPT.md) 列出真实源码提交、摘要及验收范围。主控由应用容器、PostgreSQL 17、VictoriaMetrics 和宿主管理服务组成；安装完成后通过 HTTPS 后台管理子控。
+按 [v3 正式安装入口](docs/INSTALL-v3.0.2.md) 下载并验证固定版本镜像、签名资料和安装请求；[发布回执](docs/RELEASE-v3.0.2-RECEIPT.md) 列出真实源码提交、摘要及验收范围。主控由应用容器、PostgreSQL 17、VictoriaMetrics 和宿主管理服务组成；安装完成后通过 HTTPS 后台管理子控。
 
 浏览器访问主控 TCP 443；主控连接子控 SSH 实际端口及 TCP 19100。旧推送节点迁移完成前保留原 TCP 19443。已有试运行中心先预览升级，保留原 Vault 和数据库；v2 数据不自动导入。
 

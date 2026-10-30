@@ -42,7 +42,7 @@ func (s *Store) PrepareNodeConfiguration(ctx context.Context, release *TrustedRe
 	if release == nil || release.digest == "" || in.Expected < 1 {
 		return fail()
 	}
-	n, err := scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1", in.Node))
+	n, err := scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1", in.Node))
 	if err != nil {
 		return PreparedNodeConfiguration{}, err
 	}

@@ -131,7 +131,7 @@ func (a *API) serverTrends(w http.ResponseWriter, r *http.Request, id string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	var exists int
-	err = a.Store.DB.QueryRowContext(ctx, "SELECT 1 FROM v3_nodes WHERE id=$1", id).Scan(&exists)
+	err = a.Store.DB.QueryRowContext(ctx, "SELECT 1 FROM v3_nodes WHERE removed_at IS NULL AND id=$1", id).Scan(&exists)
 	if err == sql.ErrNoRows {
 		failure(w, 404, "not_found", "服务器不存在")
 		return

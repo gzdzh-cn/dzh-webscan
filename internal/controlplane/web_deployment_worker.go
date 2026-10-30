@@ -109,7 +109,7 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 	if err := w.store.DB.QueryRowContext(ctx, "SELECT revision FROM v3_accounts WHERE username=$1 AND role='admin'", p.Username).Scan(&rev); err != nil || rev != p.AccountRevision {
 		return out, errWebDeployment
 	}
-	n, err := scanNode(w.store.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1", p.Node))
+	n, err := scanNode(w.store.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1", p.Node))
 	if err != nil {
 		return out, err
 	}

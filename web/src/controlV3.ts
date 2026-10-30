@@ -11,8 +11,9 @@ export interface V3Node {
   version: number; applied_version: number; shard: number
   status?: V3ServerDetail['status']; collection_state?: 'normal' | 'unreachable' | 'stale' | 'unknown' | 'disabled'
   configuration?: { registered_version: number; delivered_version: number; runtime_enabled: boolean | null; runtime_mode: string; runtime_endpoint: string }
+  can_remove?: boolean; remove_reason?: string
 }
-export type V3NodeInput = Omit<V3Node, 'version' | 'applied_version' | 'shard' | 'configuration' | 'status' | 'collection_state'>
+export type V3NodeInput = Omit<V3Node, 'version' | 'applied_version' | 'shard' | 'configuration' | 'status' | 'collection_state' | 'can_remove' | 'remove_reason'>
 export interface V3Page<T> { items: T[]; next_cursor: string }
 export interface V3ServerDetail {
   node: V3Node
@@ -361,6 +362,9 @@ export class ControlV3 {
   // never replayed by the reconnect loop or combined with unsaved form state.
   saveServer(node: V3NodeInput, expectedVersion: number, idempotencyKey: string) {
     return this.send<{ id: string; version: number; message: string }>('servers', 'POST', { node, expected_version: expectedVersion }, idempotencyKey)
+  }
+  removeServerRecords(records: { id: string; expected_version: number }[], idempotencyKey: string) {
+    return this.send<{ removed: number; message: string }>('servers/remove', 'POST', { records, confirm: true }, idempotencyKey)
   }
   sshCredential(id: string, signal?: AbortSignal) { return this.read<{ configured: boolean; version: number; ssh_port: number; fingerprint: string }>(`servers/${encodeURIComponent(id)}/ssh-credential`, signal) }
   sshFingerprint(id: string, version: number, port: number, key: string) { return this.send<V3Preparation>(`servers/${encodeURIComponent(id)}/ssh-fingerprint`, 'POST', { expected_version: version, ssh_port: port }, key) }

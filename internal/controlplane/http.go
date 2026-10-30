@@ -120,6 +120,10 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if a.configurationApplicationRoutes(w, r, id) {
 		return
 	}
+	if r.URL.Path == "/api/v3/servers/remove" && r.Method == http.MethodPost {
+		a.removeServerRecords(w, r, id)
+		return
+	}
 	if a.webDeploymentRoutes(w, r, id) {
 		return
 	}

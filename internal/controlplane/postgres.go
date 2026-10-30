@@ -102,6 +102,8 @@ type Node struct {
 	Config         json.RawMessage         `json:"-"`
 	RuntimeEpoch   int64                   `json:"-"`
 	Configuration  *NodeConfigurationState `json:"configuration,omitempty"`
+	CanRemove      bool                    `json:"can_remove"`
+	RemoveReason   string                  `json:"remove_reason,omitempty"`
 }
 
 func Shard(id string, n int) int {
@@ -234,7 +236,7 @@ func putNode(ctx context.Context, db sqlExecutor, n Node, expected int64, shards
 		}
 		return nil
 	}
-	r, e := db.ExecContext(ctx, "UPDATE v3_nodes SET name=$1,endpoint=$2,server_name=$3,enabled=$4,mode=$5,config=COALESCE($6::jsonb,config),version=version+1,updated_at=clock_timestamp() WHERE id=$7 AND version=$8", n.Name, n.Endpoint, n.ServerName, n.Enabled, n.Mode, configArg, n.ID, expected)
+	r, e := db.ExecContext(ctx, "UPDATE v3_nodes SET name=$1,endpoint=$2,server_name=$3,enabled=$4,mode=$5,config=COALESCE($6::jsonb,config),version=version+1,updated_at=clock_timestamp() WHERE id=$7 AND version=$8 AND removed_at IS NULL", n.Name, n.Endpoint, n.ServerName, n.Enabled, n.Mode, configArg, n.ID, expected)
 	if e != nil {
 		return e
 	}

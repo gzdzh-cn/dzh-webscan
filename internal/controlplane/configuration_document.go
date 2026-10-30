@@ -245,7 +245,7 @@ func captureConfigurationDocumentTx(ctx context.Context, tx *sql.Tx, c Config, v
 		return configurationDocument{}, err
 	}
 	settings, version, generation, now := []byte(state.Desired), state.RuntimeVersion, state.Generation, time.Now().UTC()
-	rows, err := tx.QueryContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes ORDER BY id")
+	rows, err := tx.QueryContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL ORDER BY id")
 	if err != nil {
 		return configurationDocument{}, safeMappingError(err)
 	}

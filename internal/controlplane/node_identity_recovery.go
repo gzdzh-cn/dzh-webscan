@@ -57,7 +57,7 @@ func nodeIdentityRecoveryBusyTx(ctx context.Context, tx *sql.Tx, node, except st
 // Account -> node -> task -> credential/authority is the lock order shared by
 // preparation, request admission and signing. Callers hold the operation gate.
 func recoveryNodeStateTx(ctx context.Context, tx *sql.Tx, node string, expected int64) (Node, string, int64, error) {
-	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE id=$1 FOR UPDATE`, node))
+	n, err := scanNode(tx.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, node))
 	if err != nil || !n.Enabled || n.Version != expected || n.AppliedVersion == 0 {
 		return Node{}, "", 0, errNodeIdentityRecovery
 	}
@@ -430,7 +430,7 @@ func (s *Store) cancelNodeIdentityRecovery(ctx context.Context, user, key, id st
 			return nil, errNodeIdentityRecovery
 		}
 		var version int64
-		if err := tx.QueryRowContext(ctx, `SELECT version FROM v3_nodes WHERE id=$1 FOR UPDATE`, node).Scan(&version); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT version FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE`, node).Scan(&version); err != nil {
 			return nil, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE v3_node_identity_recoveries SET status='canceled',updated_at=clock_timestamp() WHERE id=$1 AND status IN ('prepared','requested','signed')`, id); err != nil {

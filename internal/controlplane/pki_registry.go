@@ -93,7 +93,7 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, c Config, v *Vault, us
 		return nil, err
 	}
 	return s.mutation(ctx, user, key, "issue-node-certificate", in.Node, in, func(tx *sql.Tx) (any, error) {
-		n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1 FOR UPDATE", in.Node))
+		n, err := scanNode(tx.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1 FOR UPDATE", in.Node))
 		if err == sql.ErrNoRows {
 			return nil, ErrConflict
 		}
