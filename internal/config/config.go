@@ -31,16 +31,23 @@ func (c *Config) SSLEnabled() bool {
 }
 
 func Load(path string) (_ *Config, err error) {
+	raw, e := os.ReadFile(path)
+	if e != nil {
+		return nil, WithField(errors.New("cannot_read_yaml"), "配置文件")
+	}
+	return Parse(raw, path)
+}
+
+// Parse validates a previously captured configuration without reopening its
+// path. Migration callers can enforce ownership and take one immutable read.
+func Parse(raw []byte, path string) (_ *Config, err error) {
 	field := "配置文件"
 	defer func() {
 		if err != nil {
 			err = WithField(err, field)
 		}
 	}()
-	raw, e := os.ReadFile(path)
-	if e != nil {
-		return nil, errors.New("cannot_read_yaml")
-	}
+	var e error
 	var m common.Map
 	d := yaml.NewDecoder(bytes.NewReader(raw))
 	if e = d.Decode(&m); e != nil {

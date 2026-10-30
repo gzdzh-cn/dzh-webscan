@@ -17,7 +17,9 @@ type deliveryEvent struct {
 	payload any
 }
 
-func (a *Agent) direct() bool { return common.B(a.C["direct_transport"]) }
+func (a *Agent) direct() bool {
+	return common.B(a.C["direct_transport"]) || common.S(a.C["transport_mode"]) == "pull"
+}
 func (a *Agent) directSchema() error {
 	var exists int
 	if e := a.DB.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='delivery_failures'").Scan(&exists); e != nil {

@@ -1,5 +1,10 @@
 ARG RUNTIME_IMAGE=debian:12.13-slim@sha256:2749ca60ffb3c42de053229d7967d292d7dad1067936b38995da0bbfb96c4c23
 FROM ${RUNTIME_IMAGE} AS runtime
+ARG RELEASE
+ARG SOURCE_COMMIT
+ARG SOURCE_DIGEST
+LABEL org.opencontainers.image.version=$RELEASE
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT io.webscan.source.digest=$SOURCE_DIGEST
 COPY bootstrap-ca.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates=20250419~deb12u1 tzdata=2026c-0+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
@@ -20,5 +25,5 @@ COPY --from=native-bundle /usr/local/lib/webscan/agent-native.tar.gz /usr/local/
 FROM runtime AS central
 # The shared binary provides both the central service and the deploy CLI.
 COPY webscan /usr/local/bin/webscan
-CMD ["central", "--config", "/etc/webscan-v1/runtime.json"]
+CMD ["control-v3", "--config", "/etc/webscan-v3/config.yaml", "--action", "run", "--role", "all"]
 COPY --from=native-bundle /usr/local/lib/webscan/agent-native.tar.gz /usr/local/lib/webscan/agent-native.tar.gz

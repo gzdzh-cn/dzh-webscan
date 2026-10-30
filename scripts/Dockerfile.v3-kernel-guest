@@ -1,0 +1,10 @@
+# Disposable x86_64 kernel acceptance guest, never a release/production image.
+ARG SYSTEMD_IMAGE=webscan-v3-systemd-validation:local
+FROM --platform=linux/amd64 ${SYSTEMD_IMAGE}
+RUN apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       linux-image-6.1.0-54-amd64=6.1.190-1 \
+       systemd-sysv=252.39-1~deb12u2 \
+       busybox-static=1:1.35.0-4+deb12u1+b1 \
+    && dpkg-query -W > /kernel-guest-packages.txt \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*

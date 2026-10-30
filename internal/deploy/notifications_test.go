@@ -41,7 +41,7 @@ func TestDeploymentNotificationSelectionAndResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	if len(messages) != 2 || !strings.Contains(messages[0], "角色：主服务器") || !strings.Contains(messages[1], "202") || strings.Contains(messages[1], "28（") {
+	if len(messages) != 2 || !strings.Contains(messages[0], "角色：主服务器") || !strings.Contains(messages[1], "服务器：子服务器202（") || strings.Contains(messages[1], "服务器：子服务器28（") {
 		t.Fatal("single node notification scope/order incorrect", messages)
 	}
 	if !strings.Contains(messages[0], "192.0.2.1") || strings.Contains(messages[0], "（主服务器") {

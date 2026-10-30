@@ -19,6 +19,23 @@ import (
 
 func testAgent(t *testing.T) (*Agent, context.Context) {
 	t.Helper()
+	a, parent := newTestAgent(t)
+	ctx, cancel := context.WithCancel(parent)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	if e := a.Reconcile(ctx, true, false, nil); e != nil {
+		t.Fatal(e)
+	}
+	for _, fn := range []func(context.Context){a.listen, a.jobs} {
+		wg.Add(1)
+		go func(fn func(context.Context)) { defer wg.Done(); fn(ctx) }(fn)
+	}
+	return a, ctx
+}
+
+// Construct a clean Agent without starting inventory or background workers.
+func newTestAgent(t *testing.T) (*Agent, context.Context) {
+	t.Helper()
 	base := t.TempDir()
 	root := filepath.Join(base, "www")
 	os.MkdirAll(root, 0700)
@@ -40,15 +57,7 @@ func testAgent(t *testing.T) (*Agent, context.Context) {
 		t.Fatal(e)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	t.Cleanup(func() { cancel(); wg.Wait(); a.Close() })
-	if e = a.Reconcile(ctx, true, false, nil); e != nil {
-		t.Fatal(e)
-	}
-	for _, fn := range []func(context.Context){a.listen, a.jobs} {
-		wg.Add(1)
-		go func(fn func(context.Context)) { defer wg.Done(); fn(ctx) }(fn)
-	}
+	t.Cleanup(func() { cancel(); a.worker.Wait(); a.Close() })
 	return a, ctx
 }
 func await(t *testing.T, fn func() bool) {

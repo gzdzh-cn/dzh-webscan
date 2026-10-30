@@ -102,6 +102,10 @@ func (a *Agent) Scan(ctx context.Context, t scanTask) error {
 	return tx.Commit()
 }
 func (a *Agent) scanEngine(ctx context.Context, t scanTask, tool string, spec common.Map, yara []byte) (common.Map, error) {
+	return a.scanEngineIn(ctx, t, tool, spec, yara, a.Data)
+}
+
+func (a *Agent) scanEngineIn(ctx context.Context, t scanTask, tool string, spec common.Map, yara []byte, scratch string) (common.Map, error) {
 	info, e := os.Lstat(t.Path)
 	if e != nil {
 		return nil, e
@@ -119,7 +123,7 @@ func (a *Agent) scanEngine(ctx context.Context, t scanTask, tool string, spec co
 		return nil, e
 	}
 	defer source.Close()
-	temp, e := os.CreateTemp(a.Data, "scan-*.php")
+	temp, e := os.CreateTemp(scratch, "scan-*.php")
 	if e != nil {
 		return nil, e
 	}
@@ -144,7 +148,7 @@ func (a *Agent) scanEngine(ctx context.Context, t scanTask, tool string, spec co
 	defer cancel()
 	var cmd *exec.Cmd
 	if tool == "yara" {
-		rules, e := os.CreateTemp(a.Data, "rules-snapshot-*.yar")
+		rules, e := os.CreateTemp(scratch, "rules-snapshot-*.yar")
 		if e != nil {
 			return nil, e
 		}

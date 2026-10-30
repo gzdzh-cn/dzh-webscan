@@ -1,0 +1,8 @@
+# Disposable full-kernel Docker acceptance guest. Never a release image.
+ARG ENGINE_IMAGE=docker.io/library/docker@sha256:f649ef046008ca7f926a2571c32b0ac22e5c59eb61b959617f9acc2a4c638cf5
+ARG KERNEL_IMAGE=webscan-v3-kernel-guest:local
+FROM --platform=linux/amd64 ${ENGINE_IMAGE} AS engine
+FROM --platform=linux/amd64 ${KERNEL_IMAGE}
+COPY --from=engine /usr/local/bin/docker /usr/local/bin/dockerd /usr/local/bin/containerd /usr/local/bin/containerd-shim-runc-v2 /usr/local/bin/ctr /usr/local/bin/runc /usr/local/bin/docker-init /usr/local/bin/docker-proxy /usr/local/bin/
+COPY --from=engine /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+RUN docker --version && dockerd --version && runc --version && docker compose version

@@ -13,9 +13,10 @@ go test ./...
 cp config/bootstrap-ca.crt "dist/$TASK_VERSION/bootstrap-ca.crt"
 printf "*\n!webscan\n!bootstrap-ca.crt\n!native-tools.sh\n" > "dist/$TASK_VERSION/.dockerignore"
 TASK_BUILD_COMMIT=$(git rev-parse HEAD)
-if [[ -n $(git status --porcelain -- internal cmd scripts web/src go.mod go.sum Dockerfile.release) ]]; then TASK_BUILD_COMMIT="$TASK_BUILD_COMMIT-dirty"; fi
+TASK_SOURCE_PATHS=(internal cmd api sdk scripts web/src web/index.html web/v3.html web/package.json web/package-lock.json web/vite.config.ts web/tsconfig.json web/tsconfig.node.json go.mod go.sum Dockerfile Dockerfile.release config install.sh)
+if [[ -n $(git status --porcelain -- "${TASK_SOURCE_PATHS[@]}") ]]; then TASK_BUILD_COMMIT="$TASK_BUILD_COMMIT-dirty"; fi
 TASK_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-TASK_BUILD_SOURCE=$(git ls-files -z --cached --others --exclude-standard -- internal cmd scripts web/src go.mod go.sum Dockerfile.release config | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
+TASK_BUILD_SOURCE=$(git ls-files -z --cached --others --exclude-standard -- "${TASK_SOURCE_PATHS[@]}" | xargs -0 shasum -a 256 | shasum -a 256 | awk '{print $1}')
 export WEBSCAN_BUILD_FLAGS="-X webscan/internal/deploy.BuildCommit=$TASK_BUILD_COMMIT -X webscan/internal/deploy.BuildTime=$TASK_BUILD_TIME -X webscan/internal/deploy.BuildSource=$TASK_BUILD_SOURCE"
 printf '{"release":"%s","commit":"%s","built_at":"%s","source_digest":"%s"}\n' "$TASK_VERSION" "$TASK_BUILD_COMMIT" "$TASK_BUILD_TIME" "$TASK_BUILD_SOURCE" > "dist/$TASK_VERSION/build-info.json"
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X webscan/internal/deploy.Release=$TASK_VERSION $WEBSCAN_BUILD_FLAGS" -o "dist/$TASK_VERSION/webscan" ./cmd/webscan

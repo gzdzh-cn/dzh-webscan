@@ -2,11 +2,13 @@
 
 一个中文后台，集中查看**服务器资源、网站访问、证书有效期和文件安全**。发现异常后，通过飞书和邮箱提醒，并保留可查询的故障与通知历史。
 
-**当前版本 v2.0.46** · [GitHub 已发布源码](https://github.com/gzdzh-cn/dzh-webscan/releases/latest) · [安装教程](docs/INSTALLATION.md) · [后台指南](docs/CONSOLE.md) · [版本记录](docs/CHANGELOG.md) · [本次实现与验收](docs/ACCEPTANCE-v2.0.46.md)
+**源码版本 v3.0.0 · 单中心** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases) · [v3 安装与升级](docs/V3-SINGLE-INSTALL.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.0.md) · [验收记录](docs/V3-FORMAL-RELEASE-READINESS.md)
 
-v2.0.46 精简服务器列表与添加／编辑弹窗的部署提示，直接说明需要放行的 TCP 22、19100、19443 及访问方向；保留简短环境要求、部署前自动检查和按钮附近的操作反馈。[部署流程 →](docs/DEPLOYMENT-WORKFLOW.md)
+v3 主控主动采集子控，业务数据使用 PostgreSQL，指标使用 VictoriaMetrics。保留原版后台风格，接通网页安装、独立升级、任务日志和继续／回退；普通子控操作不重启主控。
 
-已有用户只需升级中心与宿主管理程序，无需单独升级子服务器。发布不会自动切换生产服务。
+新增主控、子控默认 Docker，native 保留可选。安装前确认 SSH 指纹，发布产物绑定源码、镜像摘要及签名；发布不会自动切换生产服务。
+
+本次为单中心交付，不宣称通过高可用或万台容量认证。v2 旧数据迁移另行执行，不使用旧版升级命令自动迁入 v3。[网页部署与凭据](docs/V3-WEB-DEPLOYMENT.md) · [运行设置](docs/V3-SETTINGS-LIFECYCLE.md)
 
 ## 核心功能
 
@@ -19,7 +21,7 @@ v2.0.46 精简服务器列表与添加／编辑弹窗的部署提示，直接说
 | 如何管理与恢复 | 可视化添加节点、只读连接检查、配置生效状态、部署阶段与原任务恢复；两类配置备份 |
 | 历史如何保留 | 独立保留期限、自动清理、手动导出；受保护记录显示不可删除原因 |
 
-中心使用 Go 内置采集、告警和查询，数据保存在 SQLite。子服务器只运行一个 Agent，可选 **systemd 直接运行（无需 Docker）** 或 **Docker 单容器**。支持 Linux amd64，目标规模为 50 台服务器、1000 个网站。[架构与边界 →](docs/ARCHITECTURE.md)
+主控与子控均使用 Go，支持 Linux amd64。主控通过双向 TLS 主动读取指标和事件；子控只运行一个 Agent，SQLite 保留待确认事件。支持 **Docker 单容器（默认）** 或 **systemd 直接运行**。[v3 架构与边界 →](docs/V3-RECONSTRUCTION.md)
 
 v2.0.39 将采集、部署、配置生效状态分开展示，未完成任务可直接进入处理；节点表单明确公共规则继承，系统设置可查看待应用差异与实际构建版本。[配置与部署流程 →](docs/DEPLOYMENT-WORKFLOW.md)
 
@@ -44,12 +46,18 @@ v2.0.39 将采集、部署、配置生效状态分开展示，未完成任务可
   </tr>
 </table>
 
-## 安装与打开后台
+## v3 安装与打开后台
+
+按 [v3 单中心安装与升级](docs/V3-SINGLE-INSTALL.md) 准备固定版本镜像、签名资料和独立数据目录。主控由应用容器、PostgreSQL 17、VictoriaMetrics 和宿主管理服务组成；安装完成后通过 HTTPS 后台管理子控。
+
+浏览器访问主控 TCP 443；主控连接子控 SSH 实际端口及 TCP 19100。旧推送节点迁移完成前保留原 TCP 19443。已有试运行中心先预览升级，保留原 Vault 和数据库；v2 数据不自动导入。
+
+## v2 安装与打开后台（旧版）
 
 在 Linux amd64 主服务器的 root SSH 终端执行：
 
 ```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/gzdzh-cn/dzh-webscan/releases/latest/download/install.sh | bash'
+bash -o pipefail -c 'curl -fsSL https://github.com/gzdzh-cn/dzh-webscan/releases/download/v2.0.46/install.sh | bash'
 ```
 
 按向导填写配置，保存后选择 **1、安装**。可先只安装主服务器，以后从后台添加子服务器。日常管理在主服务器任意目录输入 `webscan`；再次执行安装命令保留已有 YAML、账号和数据，只更新入口并进入菜单，不自动升级服务。[完整安装与重复执行说明 →](docs/INSTALLATION.md)
@@ -61,7 +69,7 @@ bash -o pipefail -c 'curl -fsSL https://github.com/gzdzh-cn/dzh-webscan/releases
 
 初始账号见安装结果；后台修改密码后使用新密码。子服务器默认还需 SSH 22、指标 19100；主服务器事件接收端口为 19443。[登录与宝塔反代](docs/WEBSITE.md#宝塔域名反向代理) · [全部端口及访问方向](docs/NODE-DEPLOYMENT.md#端口与安全)
 
-## 已安装用户升级
+## v2 已安装用户升级（旧版）
 
 已完成 v2.0.35 节点整合的系统，更新当前后台只需升级主服务器：
 

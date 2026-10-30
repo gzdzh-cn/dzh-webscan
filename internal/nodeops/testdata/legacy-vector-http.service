@@ -1,0 +1,15 @@
+[Unit]
+Description=Webscan vector
+Requires=docker.service
+PartOf=docker.service
+After=docker.service network-online.target
+[Service]
+ExecStartPre=/usr/bin/docker image tag mirror.example.test/timberio/vector:0.45.0-alpine docker.io/timberio/vector:0.45.0-alpine
+ExecStartPre=-/usr/bin/docker rm -f webscan-vector-v1
+ExecStart=/usr/bin/docker run --pull never --name webscan-vector-v1 --network host --read-only --cap-drop ALL --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 -v /etc/webscan-v1/vector.yml:/etc/vector/vector.yaml:ro -v /var/log/webscan-v1:/var/log/webscan-v1:ro -v /var/lib/webscan-vector-v1:/var/lib/vector docker.io/timberio/vector:0.45.0-alpine
+ExecStop=/usr/bin/docker stop -t 20 webscan-vector-v1
+Restart=always
+RestartSec=5
+TimeoutStopSec=35
+[Install]
+WantedBy=multi-user.target docker.service

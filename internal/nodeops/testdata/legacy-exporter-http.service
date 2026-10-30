@@ -1,0 +1,15 @@
+[Unit]
+Description=Webscan exporter
+Requires=docker.service
+PartOf=docker.service
+After=docker.service network-online.target
+[Service]
+ExecStartPre=/usr/bin/docker image tag sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd docker.io/prom/node-exporter:v1.9.1
+ExecStartPre=-/usr/bin/docker rm -f webscan-exporter-v1
+ExecStart=/usr/bin/docker run --pull never --name webscan-exporter-v1 --network host --read-only --cap-drop ALL --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 --user 0:0 --pid host -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /:/rootfs:ro,rslave -v /var/lib/webscan-v1/textfile:/textfile:ro -v /etc/webscan-v1/exporter.yml:/etc/webscan-v1/exporter.yml:ro docker.io/prom/node-exporter:v1.9.1 --web.listen-address=:19100 --web.config.file=/etc/webscan-v1/exporter.yml --path.procfs=/host/proc --path.sysfs=/host/sys --path.rootfs=/rootfs --collector.textfile.directory=/textfile
+ExecStop=/usr/bin/docker stop -t 20 webscan-exporter-v1
+Restart=always
+RestartSec=5
+TimeoutStopSec=35
+[Install]
+WantedBy=multi-user.target docker.service

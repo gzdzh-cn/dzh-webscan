@@ -30,15 +30,16 @@ CREATE INDEX IF NOT EXISTS tasks_website_pending ON tasks(target,id) WHERE node=
 `
 
 type Site struct {
-	ID      int64  `json:"id"`
-	Name    string `json:"name"`
-	URL     string `json:"url"`
-	Node    string `json:"node"`
-	Keyword string `json:"keyword"`
-	Slow    bool   `json:"slow_alert"`
-	Paused  bool   `json:"paused"`
-	Version int64  `json:"version"`
-	State   State  `json:"state"`
+	ID               int64  `json:"id"`
+	Name             string `json:"name"`
+	URL              string `json:"url"`
+	Node             string `json:"node"`
+	Keyword          string `json:"keyword"`
+	Slow             bool   `json:"slow_alert"`
+	Paused           bool   `json:"paused"`
+	Version          int64  `json:"version"`
+	State            State  `json:"state"`
+	MigrationPending bool   `json:"migration_pending,omitempty"`
 }
 type State struct {
 	Status       string `json:"status"`
@@ -314,22 +315,7 @@ func (m *Monitor) apply(ctx context.Context, s Site, r Result) error {
 		return nil
 	}
 	st := current.State
-	// Network failures retain the last certificate without claiming it was
-	// checked or renewed. A successful plain-HTTP check is explicitly N/A.
-	if r.CertExpires == 0 && !r.OK && st.Last.CertExpires > 0 {
-		r.CertExpires = st.Last.CertExpires
-		r.CertHost = st.Last.CertHost
-		r.CertChecked = st.Last.CertChecked
-		r.CertApplicable = true
-		if r.CertError == "" {
-			r.CertError = "本次证书检查失败，保留最近证书信息"
-		}
-	}
-	freshCertificate := r.CertExpires > 0 && (r.CertError == "" || r.CertObserved)
-	st.Last = r
-	st.Checks++
 	now := r.Time
-	st.Next = now + int64(max(1, common.I(m.Settings()["interval_seconds"])))
 	notice := func(kind, message string) error {
 		if !m.notificationsEnabled() {
 			return nil
@@ -355,118 +341,9 @@ func (m *Monitor) apply(ctx context.Context, s Site, r Result) error {
 		_, e := tx.ExecContext(ctx, "UPDATE website_incidents SET ended=? WHERE id=? AND ended IS NULL", now, id)
 		return e
 	}
-	if r.OK {
-		st.Passed++
-		st.Successes++
-		st.Failures = 0
-		if st.Incident != 0 && st.Successes >= 2 {
-			if e = closeIncident(st.Incident); e != nil {
-				return e
-			}
-			if e = notice("recovery", fmt.Sprintf("网站已恢复访问；故障持续 %s", time.Duration(now-st.DownSince)*time.Second)); e != nil {
-				return e
-			}
-			st.Incident = 0
-			st.DownSince = 0
-			st.Status = "normal"
-		} else if st.Incident == 0 {
-			st.Status = "normal"
-		}
-	} else {
-		st.Failures++
-		st.Successes = 0
-		if st.Failures >= 3 && st.Incident == 0 {
-			st.Status = "down"
-			st.DownSince = now
-			st.Reminder = now
-			st.Incident, e = incident("outage")
-			if e != nil {
-				return e
-			}
-			if e = notice("outage", "网站连续 3 次检查失败，无法正常访问；原因："+r.Reason); e != nil {
-				return e
-			}
-		}
-		if st.Incident != 0 && now-st.Reminder >= 4*3600 {
-			st.Reminder = now
-			if e = notice("outage_reminder", "网站仍无法正常访问；原因："+r.Reason); e != nil {
-				return e
-			}
-		}
-	}
-	if r.CertExpires > 0 {
-		remaining := r.CertExpires - now
-		expired := remaining <= 0
-		days := int64(0)
-		if remaining > 0 {
-			days = (remaining + 86399) / 86400
-		}
-		if remaining <= 7*86400 && (!st.CertWarn || now-st.CertReminder >= 86400 || expired && !st.CertExpired) {
-			if !st.CertWarn {
-				st.CertIncident, e = incident("certificate")
-				if e != nil {
-					return e
-				}
-			}
-			st.CertWarn = true
-			st.CertReminder = now
-			text := fmt.Sprintf("HTTPS 证书将在 %d 天内到期，请及时续签", days)
-			if expired {
-				text = "HTTPS 证书已过期，请立即续签"
-			}
-			if !freshCertificate {
-				text += "；本次证书检查失败，以上为最近一次取得的证书信息"
-			}
-			if e = notice("certificate", text); e != nil {
-				return e
-			}
-		}
-		if remaining > 7*86400 && freshCertificate && r.CertError == "" && st.CertWarn {
-			if st.CertIncident != 0 {
-				if e = closeIncident(st.CertIncident); e != nil {
-					return e
-				}
-				st.CertIncident = 0
-			}
-			st.CertWarn = false
-			if e = notice("certificate_recovery", "HTTPS 证书已更新，有效期恢复正常"); e != nil {
-				return e
-			}
-		}
-		st.CertExpired = expired
-	}
-	if s.Slow && !r.OK {
-		st.SlowSince = 0
-		st.Fast = 0
-	}
-	if s.Slow && r.OK {
-		if r.Latency > 3 {
-			st.Fast = 0
-			if st.SlowSince == 0 {
-				st.SlowSince = now
-			}
-			if now-st.SlowSince >= 300 && st.SlowIncident == 0 {
-				st.SlowIncident, e = incident("slow")
-				if e != nil {
-					return e
-				}
-				if e = notice("slow", "网站响应超过 3 秒并持续 5 分钟，请检查网站负载"); e != nil {
-					return e
-				}
-			}
-		} else {
-			st.Fast++
-			st.SlowSince = 0
-			if st.SlowIncident != 0 && st.Fast >= 2 {
-				if e = closeIncident(st.SlowIncident); e != nil {
-					return e
-				}
-				if e = notice("slow_recovery", "网站响应速度已恢复正常"); e != nil {
-					return e
-				}
-				st.SlowIncident = 0
-			}
-		}
+	st, e = Transition(current, r, common.I(m.Settings()["interval_seconds"]), TransitionEffects{Open: incident, Close: closeIncident, Notice: notice})
+	if e != nil {
+		return e
 	}
 	_, e = tx.ExecContext(ctx, "UPDATE websites SET state=? WHERE id=?", string(common.JSON(st)), s.ID)
 	if e != nil {
@@ -504,59 +381,36 @@ func (m *Monitor) flush(ctx context.Context, now int64) error {
 	if e != nil {
 		return e
 	}
-	type group struct {
-		node, kind string
-		ids        []int64
-		messages   []string
-		sites      []int64
-	}
-	groups := []group{}
-	index := map[string]int{}
-	lastGroup := map[int64]int{}
+	items := []Notice{}
 	for rows.Next() {
-		var id, site int64
-		var node, kind, msg string
-		if e = rows.Scan(&id, &node, &kind, &msg, &site); e != nil {
+		var v Notice
+		if e = rows.Scan(&v.ID, &v.Node, &v.Kind, &v.Message, &v.Site); e != nil {
 			rows.Close()
 			return e
 		}
-		key := node + "\x00" + kind
-		idx, ok := index[key]
-		previous, seen := lastGroup[site]
-		if !ok || (seen && idx < previous) {
-			idx = len(groups)
-			index[key] = idx
-			groups = append(groups, group{node: node, kind: kind})
-		}
-		lastGroup[site] = idx
-		groups[idx].ids = append(groups[idx].ids, id)
-		groups[idx].messages = append(groups[idx].messages, msg)
-		groups[idx].sites = append(groups[idx].sites, site)
+		items = append(items, v)
 	}
 	e = rows.Err()
 	rows.Close()
 	if e != nil {
 		return e
 	}
-	for _, g := range groups {
-		messages := g.messages
-		if len(messages) > 5 {
-			messages = []string{fmt.Sprintf("网站可用性批量提醒：共 %d 个网站\n%s\n其余网站请查看管理后台：%s", len(g.ids), strings.Join(messages[:5], "\n\n"), m.ConsoleURL)}
-		}
+	for _, g := range GroupNotices(items) {
+		messages := g.NotificationMessages(m.ConsoleURL)
 		for i, msg := range messages {
 			config := common.M(m.Settings()["notification_config"])
 			if len(config) == 0 {
 				config = common.Map{"feishu": common.Map{"enabled": m.notificationsEnabled(), "notifications": common.Map{"health_failures": true, "health_recoveries": true}}}
 			}
 			category := "health_failures"
-			if strings.HasSuffix(g.kind, "recovery") || strings.Contains(g.kind, "recover") {
+			if strings.HasSuffix(g.Kind, "recovery") || strings.Contains(g.Kind, "recover") {
 				category = "health_recoveries"
 			}
-			if e = notify.Enqueue(ctx, tx, config, "central", fmt.Sprintf("website:%d:%d", g.ids[0], i), common.Map{"message": msg, "source": "website", "node_id": g.node, "notice_kind": g.kind, "site_ids": g.sites}, category, 0); e != nil {
+			if e = notify.Enqueue(ctx, tx, config, "central", fmt.Sprintf("website:%d:%d", g.IDs[0], i), common.Map{"message": msg, "source": "website", "node_id": g.Node, "notice_kind": g.Kind, "site_ids": g.Sites}, category, 0); e != nil {
 				return e
 			}
 		}
-		for _, id := range g.ids {
+		for _, id := range g.IDs {
 			if _, e = tx.ExecContext(ctx, "DELETE FROM website_outbox WHERE id=?", id); e != nil {
 				return e
 			}

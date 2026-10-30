@@ -1,0 +1,5 @@
+# Native-arm QEMU TCG supplies a real x86_64 guest kernel, without Rosetta.
+ARG TOOLS_IMAGE=docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+FROM --platform=linux/arm64 ${TOOLS_IMAGE}
+RUN apk add --no-cache qemu-system-x86_64=9.1.2-r1 qemu-img=9.1.2-r1 \
+    && apk info -v > /kernel-tools-packages.txt

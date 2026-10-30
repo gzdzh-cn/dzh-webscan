@@ -10,8 +10,9 @@ function pause(signal:AbortSignal){return new Promise<void>((resolve,reject)=>{
  const visible=()=>{clearTimeout(timer);if(!document.hidden)timer=setTimeout(done,3000)}
  signal.addEventListener('abort',abort,{once:true});document.addEventListener('visibilitychange',visible);visible();if(signal.aborted)abort()
 })}
-export async function readWithReconnect<T>(read:(signal:AbortSignal)=>Promise<T>,transient:(e:unknown)=>boolean,persistent=false):Promise<T>{
+export async function readWithReconnect<T>(read:(signal:AbortSignal)=>Promise<T>,transient:(e:unknown)=>boolean,persistent=false,signal?:AbortSignal):Promise<T>{
  const control=new AbortController();reads.set(control,persistent)
+ const abort=()=>control.abort(signal?.reason);signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort()
  try {for(;;){try{return await read(control.signal)}catch(e){if(control.signal.aborted||!transient(e))throw e;reconnecting.add(control);notify();await pause(control.signal)}}}
- finally{reads.delete(control);reconnecting.delete(control);notify()}
+ finally{signal?.removeEventListener('abort',abort);reads.delete(control);reconnecting.delete(control);notify()}
 }

@@ -108,7 +108,7 @@ optional_components:
   auditd: {enabled: false}
 node_defaults:
   # 新节点默认免 Docker；已有节点未指定方式时沿用部署记录。
-  deployment: {mode: native}
+  deployment: {mode: docker}
   resources: {agent_memory_mib: 256, go_memory_mib: 64, cpus: 1.0, gomaxprocs: 2}
   ssh:
     username: root

@@ -21,6 +21,11 @@ import (
 	"testing"
 	"time"
 	"webscan/internal/common"
+	"webscan/internal/pull"
+	agentv1 "webscan/sdk/agent/v1"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func TestMetricsSourceAndRouteRestrictions(t *testing.T) {
@@ -88,7 +93,14 @@ func TestMetricsRequireTrustedClientCertificate(t *testing.T) {
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	os.WriteFile(filepath.Join(dir, "metrics"), []byte("webscan_ready 1\n"), 0600)
-	a := &Agent{C: common.Map{"metrics_file": filepath.Join(dir, "metrics"), "metrics": common.Map{"port": port, "allowed_source_ip": "127.0.0.1", "tls_enabled": true, "cert_file": filepath.Join(dir, "server.crt"), "key_file": filepath.Join(dir, "server.key"), "ca_file": filepath.Join(dir, "ca.crt")}}}
+	a, _ := testAgent(t)
+	a.C["metrics_file"] = filepath.Join(dir, "metrics")
+	a.C["metrics"] = common.Map{"port": port, "allowed_source_ip": "127.0.0.1", "tls_enabled": true, "cert_file": filepath.Join(dir, "server.crt"), "key_file": filepath.Join(dir, "server.key"), "ca_file": filepath.Join(dir, "ca.crt")}
+	a.C["pull"] = common.Map{"collector_identities": []any{"client"}}
+	a.Pull, e = pull.New(a.DB, "isolated-node", "v3-test", &a.writeMu)
+	if e != nil {
+		t.Fatal(e)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() { cancel(); a.worker.Wait() }()
 	if e = a.startMetrics(ctx); e != nil {
@@ -117,5 +129,23 @@ func TestMetricsRequireTrustedClientCertificate(t *testing.T) {
 			r.Body.Close()
 			t.Fatal("accepted missing client certificate")
 		}
+	}
+	// Real HTTP/2 gRPC and legacy /metrics must share the same listener.
+	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	conn, e := grpc.NewClient(address, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{RootCAs: pool, Certificates: []tls.Certificate{client}, MinVersion: tls.VersionTLS12})))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer conn.Close()
+	op, stop := context.WithTimeout(ctx, 3*time.Second)
+	defer stop()
+	api := agentv1.NewAgentServiceClient(conn)
+	capabilities, e := api.Capabilities(op, &agentv1.CapabilitiesRequest{})
+	if e != nil || capabilities.NodeId != "isolated-node" || capabilities.Protocol != agentv1.ProtocolVersion {
+		t.Fatal(capabilities, e)
+	}
+	batch, e := api.FetchEvents(op, &agentv1.FetchEventsRequest{Epoch: 1, Limit: 100})
+	if e != nil || batch.NodeId != "isolated-node" {
+		t.Fatal(batch, e)
 	}
 }

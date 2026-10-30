@@ -17,9 +17,9 @@ async function open(existing:boolean){
  if(!existing){const inputs=document.body.querySelectorAll<HTMLInputElement>('.node-editor-dialog .form-grid input');for(const [i,value] of ['新节点','new-node','192.0.2.3'].entries()){inputs[i]!.value=value;inputs[i]!.dispatchEvent(new Event('input',{bubbles:true}))}await settle()}
 }
 function button(label:string){return Array.from(document.body.querySelectorAll('button')).find(b=>b.textContent?.trim()===label)!}
-it('new nodes preview native without installing Docker',async()=>{
+it('new nodes default to Docker and retain native as an option',async()=>{
  await open(false);expect(document.body.textContent).toContain('直接运行 Go（无需 Docker）');button('校验并预览').click();await settle()
- const args=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/settings/preview')!;expect((args[2] as {node:{deployment:{mode:string}}}).node.deployment.mode).toBe('native')
+ const args=vi.mocked(api).mock.calls.find(c=>c[0]==='/api/settings/preview')!;expect((args[2] as {node:{deployment:{mode:string}}}).node.deployment.mode).toBe('docker')
 })
 it('old nodes retain docker and explicit change is saved',async()=>{
  await open(true);expect(document.body.textContent).toContain('Docker 单容器')

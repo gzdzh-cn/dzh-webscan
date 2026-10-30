@@ -178,73 +178,18 @@ func (s *Store) Evaluate(ctx context.Context, n Node, snap Snapshot) error {
 		} else if e != sql.ErrNoRows {
 			return e
 		}
-		if st.Phase == "disabled" {
-			st.Phase = "normal"
-			st.Since = 0
-		}
-		previous := st.Phase
-		last := st.Last
-		st.Last = snap.Time
-		st.Message = r.Message
-		st.Severity = r.Severity
 		if !r.Known {
 			continue
 		}
-		if r.Bad {
-			st.Recovery = 0
-			if st.Phase == "pending" && last > 0 && snap.Time-last > int64(max(10, common.I(config["interval_seconds"]))*3) {
-				st.Since = snap.Time
-			}
-			if st.Phase == "normal" {
-				st.Since = snap.Time
-				st.Phase = "pending"
-			}
-			if snap.Time-st.Since >= r.For {
-				st.Phase = "firing"
-			}
-		} else if st.Phase == "pending" {
-			st.Phase = "normal"
-			st.Since = 0
-		} else if st.Phase == "firing" && r.Recover {
-			if last > 0 && snap.Time-last > int64(max(10, common.I(config["interval_seconds"]))*3) {
-				st.Recovery = 0
-			}
-			st.Recovery++
-			if st.Recovery >= r.RecoverSamples {
-				st.Phase = "normal"
-			}
-		} else {
-			st.Recovery = 0
-		}
-		phase := ""
-		if st.Phase == "firing" && previous != "firing" {
-			phase = "firing"
-		} else if st.Phase == "normal" && previous == "firing" {
-			phase = "resolved"
-		} else if st.Phase == "firing" && snap.Time-st.Reminder >= int64(max(1, common.I(config["repeat_hours"]))*3600) {
-			phase = "reminder"
-		}
+		var phase string
+		st, phase = AdvanceRule(st, r, snap.Time, common.I(config["interval_seconds"]), common.I(config["repeat_hours"]))
 		if phase != "" {
 			id := common.Hash([]byte(fmt.Sprintf("%s:%d:%s:%d", r.Key, st.Since, phase, snap.Time)))
-			message := fmt.Sprintf("监控异常提醒\n服务器：%s（%s）\n问题：%s", n.Name, n.Host, r.Message)
-			if phase == "resolved" {
-				message = fmt.Sprintf("监控已恢复\n服务器：%s（%s）\n已恢复项目：%s\n持续时间：%d 秒", n.Name, n.Host, r.Message, snap.Time-st.Since)
-			}
+			message := RuleMessage(n, r, st, phase, snap.Time)
 			if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO health_events VALUES(?,?,?,?,?,?,?)", id, n.ID, r.Kind, phase, snap.Time, message, string(common.JSON(st))); e != nil {
 				return e
 			}
-			inhibited := false
-			if strings.HasSuffix(r.Kind, ":warning") {
-				base := strings.TrimSuffix(r.Kind, ":warning")
-				mount := strings.TrimPrefix(base, strings.Split(base, ":")[0]+":")
-				metric := strings.Split(base, ":")[0]
-				limit := common.I(common.M(config["alerts"])[metric+"_critical_percent"])
-				if limit == 0 {
-					limit = 90
-				}
-				inhibited = snap.Values[metric+"_percent:"+mount] > float64(limit)
-			}
-			if !inhibited {
+			if !RuleInhibited(r, snap, config) {
 				if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO alert_outbox(id,node,kind,message,created) VALUES(?,?,?,?,?)", id, n.ID, phase, message, snap.Time); e != nil {
 					return e
 				}

@@ -16,7 +16,7 @@ func TestResolveNodeModePreservesExisting(t *testing.T) {
 		state    common.Map
 		explicit bool
 		want     string
-	}{{common.Map{}, false, "native"}, {common.Map{"active": []string{"old"}}, false, "docker"}, {common.Map{"nodes": common.Map{"old": common.Map{"phase": "complete"}}}, false, "docker"}, {common.Map{"nodes": common.Map{"old": common.Map{"deployment_mode": "native"}}}, false, "native"}, {common.Map{"active": []string{"old"}}, true, "native"}} {
+	}{{common.Map{}, false, "docker"}, {common.Map{"active": []string{"old"}}, false, "docker"}, {common.Map{"nodes": common.Map{"old": common.Map{"phase": "complete"}}}, false, "docker"}, {common.Map{"nodes": common.Map{"old": common.Map{"deployment_mode": "native"}}}, false, "native"}, {common.Map{"active": []string{"old"}}, true, "native"}} {
 		n["_deployment_explicit"] = tc.explicit
 		if got := ResolveNodeMode(n, tc.state); got != tc.want {
 			t.Fatal(got, tc.want)

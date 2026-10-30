@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 	"webscan/internal/hostmetrics"
 	"webscan/internal/persist"
+	"webscan/internal/pull"
 
 	"golang.org/x/sys/unix"
 	"webscan/internal/common"
@@ -61,6 +62,7 @@ type Agent struct {
 	ConfigPath, Data, Logs, Probe, Instance string
 	DB                                      *sql.DB
 	HTTP                                    *http.Client
+	Pull                                    *pull.Source
 	rules                                   atomic.Pointer[Rules]
 	writeMu, watchMu, inventoryMu           sync.Mutex
 	readMu                                  sync.Mutex
@@ -80,11 +82,13 @@ type Agent struct {
 	inventoryRunning                        atomic.Bool
 	inventoryChecked                        atomic.Int64
 	signature                               string
+	configurationRules                      string
+	scannerReadiness                        atomic.Pointer[scannerReadiness]
 	worker                                  sync.WaitGroup
 }
 
 func New(c common.Map, path string) (*Agent, error) {
-	policy, e := common.NewPolicy(common.M(c["monitor"]))
+	policy, e := newAgentPolicy(c)
 	if e != nil {
 		return nil, e
 	}
@@ -182,7 +186,34 @@ func New(c common.Map, path string) (*Agent, error) {
 			return nil, e
 		}
 	}
+	if common.S(c["transport_mode"]) == "pull" {
+		if !common.B(common.M(c["metrics"])["tls_enabled"]) || len(common.SS(common.M(c["pull"])["collector_identities"])) == 0 {
+			unix.Close(fd)
+			d.Close()
+			return nil, errors.New("pull_requires_mtls_and_collector_identities")
+		}
+		var exists, count int
+		if e = d.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='pull_state'").Scan(&exists); e == nil && exists == 0 {
+			e = d.QueryRow("SELECT count(*) FROM events").Scan(&count)
+			if e == nil && count > 0 {
+				e = persist.BackupDB(d, filepath.Join(data, "migration-backups", "before-pull-"+common.ID()+".sqlite3"))
+			}
+		}
+		if e == nil {
+			var configurations []pull.Configuration
+			configurations, e = pullConfigurations(c)
+			if e == nil {
+				a.Pull, e = pull.New(d, common.S(c["node_id"]), common.S(c["release"]), &a.writeMu, configurations...)
+			}
+		}
+		if e != nil {
+			unix.Close(fd)
+			d.Close()
+			return nil, e
+		}
+	}
 	a.rules.Store(&Rules{policy, yara, policy.Version(yara)})
+	a.configurationRules = a.rules.Load().Version
 	if raw, e := os.ReadFile(path); e == nil {
 		a.signature = common.Hash(append(raw, yara...))
 	}
@@ -1005,7 +1036,7 @@ func (a *Agent) Reload(ctx context.Context) error {
 	if string(common.JSON(stripRules(candidate))) != string(common.JSON(stripRules(a.C))) {
 		return reject(errors.New("unsupported_runtime_change"))
 	}
-	policy, e := common.NewPolicy(common.M(candidate["monitor"]))
+	policy, e := newAgentPolicy(candidate)
 	if e != nil {
 		return reject(e)
 	}
@@ -1170,7 +1201,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	for _, root := range a.roots(a.rules.Load().Policy) {
 		a.addTree(ctx, root, a.rules.Load().Policy)
 	}
-	for _, fn := range []func(context.Context){a.listen, a.jobs, a.export, a.metricLoop, a.probeLoop} {
+	if a.Pull != nil {
+		a.worker.Add(1)
+		go func() { defer a.worker.Done(); a.scannerReadinessLoop(ctx) }()
+	}
+	for _, fn := range []func(context.Context){a.listen, a.jobs, a.export, a.metricLoop} {
 		a.worker.Add(1)
 		go func(f func(context.Context)) { defer a.worker.Done(); f(ctx) }(fn)
 	}
@@ -1188,6 +1223,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.ready.Store(true)
 	a.counter("baseline_completed", 1, true)
 	a.counter("collector_ready", 1, true)
+	// The initial inventory also reads the probe directory. Start our own
+	// writer afterwards so it cannot invalidate that inventory's snapshot
+	// between hashing and commit, especially on a resource-limited host.
+	a.worker.Add(1)
+	go func() { defer a.worker.Done(); a.probeLoop(ctx) }()
 	// Publish current readiness immediately rather than waiting for the next
 	// periodic metrics tick after a lengthy startup inventory.
 	if e := a.Metrics(ctx); e != nil {

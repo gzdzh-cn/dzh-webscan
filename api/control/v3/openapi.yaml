@@ -1,0 +1,2233 @@
+openapi: 3.1.0
+info:
+  title: Webscan v3 Control API
+  version: 3.0.0-dev
+  description: |
+    基础重构验证接口，尚未替换 v2 后台。当前不提供生产迁移或 HA 安装。
+    时间为 RFC3339，分页采用不透明游标。写操作需 CSRF；服务器保存还需
+    Idempotency-Key 与 expected_version。配置保存不等于已下发或部署。
+servers:
+  - url: /
+security:
+  - sessionCookie: []
+paths:
+  /healthz:
+    get:
+      operationId: health
+      security: []
+      responses:
+        '200': {description: PostgreSQL 可访问}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password]
+              properties:
+                username: {type: string, maxLength: 128}
+                password: {type: string, format: password, maxLength: 72}
+      responses:
+        '200':
+          description: 设置 Secure、HttpOnly、SameSite=Strict 的会话 Cookie，绝对有效期 12 小时
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [csrf]
+                properties: {csrf: {type: string}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '429': {description: 五分钟内尝试次数超限}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/session:
+    get:
+      operationId: session
+      responses:
+        '200':
+          description: 当前账号和 CSRF
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [username, role, csrf]
+                properties:
+                  username: {type: string}
+                  role: {type: string, enum: [admin, operator, viewer]}
+                  csrf: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/logout:
+    post:
+      operationId: logout
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      responses:
+        '200': {description: 撤销当前会话}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v3/capabilities:
+    get:
+      operationId: capabilities
+      responses:
+        '200':
+          description: 已实现功能、拓扑、部署默认方式和当前试运行阶段
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_version: {type: integer, const: 3}
+                  topology: {type: string, enum: [single, ha]}
+                  implementation_stage: {type: string}
+                  deployment_defaults:
+                    type: object
+                    properties:
+                      central: {type: string, const: docker}
+                      node: {type: string, const: docker}
+                      node_modes: {type: array, items: {type: string, enum: [docker, native]}}
+                  features: {type: array, items: {type: string}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v3/openapi.yaml:
+    get:
+      operationId: openapi
+      responses:
+        '200':
+          description: 本接口文档
+          content:
+            application/yaml:
+              schema: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v3/settings:
+    get:
+      operationId: readRuntimeSettings
+      description: 管理员读取白名单字段、保存态与运行态；凭据只返回配置标记，未知字段不返回。
+      responses:
+        '200':
+          description: 安全编辑投影，不包含完整配置或凭据值
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SettingsEditor'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/settings/preview:
+    post:
+      operationId: previewRuntimeSettings
+      description: |
+        管理员、CSRF、可信 HTTPS。预览不保存设置、不连接通知通道或服务器。
+        十分钟签名凭据绑定账号版本、保存及运行版本、节点、启动草稿、部署状态与目标设置。
+        save 使用白名单部分编辑；apply 只应用已保存设置且 edit 必须为空。
+        不支持的策略变化须走专用协调流程，不能标记为已应用。
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SettingsEditorRequest'}
+      responses:
+        '200':
+          description: 仅变更字段及风险标记，不返回凭据或新旧值；签名凭据仅用于本账号确认
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SettingsPreview'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/settings/confirm:
+    post:
+      operationId: confirmRuntimeSettings
+      description: |
+        原样提交预览时编辑内容及签名凭据。重新校验、编辑前加密备份、变更、回执和审计同事务提交。
+        save 只更新草稿；apply 更新已支持的运行字段。不会触发测试通知或节点部署。
+        同键同请求可安全重试，凭据及正文不会进入回执或审计。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/SettingsEditorRequest'}
+                - {type: object, required: [preview]}
+      responses:
+        '200':
+          description: 安全状态回执；保存不等于应用
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SettingsState'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers:
+    get:
+      operationId: listServers
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: q, in: query, schema: {type: string}, description: 名称或 ID 关键词，按字面匹配}
+      responses:
+        '200':
+          description: 按 ID 升序；next_cursor 为空时结束
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, limit]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Node'}}
+                  next_cursor: {type: string}
+                  limit: {type: integer}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: saveServer
+      description: 仅 admin；新增 expected_version=0，编辑使用读取到的版本；先创建加密 before_edit 配置存档，与节点写入、回执和审计同事务提交，备份失败不保存。重复请求不重复备份；不执行部署。
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [node, expected_version]
+              properties:
+                node: {$ref: '#/components/schemas/Node'}
+                expected_version: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: 保存成功；相同幂等键及相同请求重放原响应
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: {id: {type: string}, version: {type: integer}, message: {type: string}}
+        '400': {description: 参数、节点或幂等键无效}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 配置版本冲突或幂等键被用于不同请求}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}:
+    get:
+      operationId: getServer
+      description: 同一数据库快照中的登记、最新采集和最近任务；不返回私有配置、凭据和任务计划。缺少采集证据时 status=null，缺少单项指标时为 null。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: 服务器详情
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [node, status, latest_deployment]
+                properties:
+                  node: {$ref: '#/components/schemas/Node'}
+                  status:
+                    type: object
+                    nullable: true
+                    properties:
+                      sampled_at: {type: integer, format: int64, nullable: true, description: Unix 毫秒}
+                      updated_at: {type: string, format: date-time}
+                      error: {type: string}
+                      metrics_error: {type: string}
+                      events_error: {type: string}
+                      protocol_error: {type: string}
+                      metrics:
+                        type: object
+                        properties:
+                          cpu_percent: {type: number, nullable: true}
+                          memory_percent: {type: number, nullable: true}
+                          disk_percent: {type: number, nullable: true}
+                          uptime: {type: number, nullable: true}
+                      info:
+                        type: object
+                        description: 主机名、内核、架构及 Agent 版本／运行方式的白名单字段；缺失值为 null
+                  latest_deployment:
+                    allOf: [{$ref: '#/components/schemas/DeploymentJob'}]
+                    nullable: true
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 节点不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/events:
+    get:
+      operationId: listEvents
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+        - {name: node, in: query, schema: {type: string}}
+        - {name: operation, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}, description: 文件路径关键词}
+        - {name: include_probes, in: query, schema: {type: boolean, default: false}}
+      responses:
+        '200':
+          description: 时间倒序；翻页须继续使用响应 start/end，避免相对时间漂移
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, start, end]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/Event'}}
+                  next_cursor: {type: string}
+                  start: {type: string, format: date-time}
+                  end: {type: string, format: date-time}
+        '400': {description: 参数无效，或查询 probe 但没有显式包含探针}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/dashboard:
+    get:
+      operationId: dashboard
+      responses:
+        '200':
+          description: 预计算摘要；保留旧计数字段，sections 的每个分区独立提供 data、updated_at 和 error。失败保留该分区的上次数据及时间，冷启动失败为 null；不实时遍历节点。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary, updated_at, stale, error, version, started_at]
+                properties:
+                  version: {type: string, description: 当前程序实际构建版本}
+                  started_at: {type: string, format: date-time, description: 当前 API 进程启动时间}
+                  updated_at: {type: string, format: date-time, description: 汇总缓存生成时间，不能代替分区观测时间}
+                  stale: {type: boolean}
+                  error: {type: string}
+                  summary:
+                    type: object
+                    properties:
+                      sections:
+                        type: object
+                        description: 固定分区 servers、websites、events、notifications、deployments、alerts、resources、monitoring、services。事件排除探针并沿用迁移去重；异常最多 8 项，资源表最多 20 台，各排名最多 10 台。监控正常／异常／未知只统计适用节点。
+                        additionalProperties:
+                          type: object
+                          required: [data, updated_at, error]
+                          properties:
+                            data: {type: [object, array, 'null']}
+                            updated_at: {type: [string, 'null'], format: date-time}
+                            error: {type: string, description: 安全固定说明，不返回底层数据库错误}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/metrics:
+    get:
+      operationId: queryMetrics
+      parameters:
+        - {name: node, in: query, required: true, schema: {type: string}}
+        - {name: metric, in: query, required: true, schema: {type: string}, description: 单一指标名，不接受任意 PromQL}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+      responses:
+        '200': {description: VictoriaMetrics matrix，每条时序最多约 1000 个采样点，响应最多 8 MiB}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/websites:
+    get:
+      operationId: listWebsites
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: q, in: query, schema: {type: string, maxLength: 512}}
+        - {name: node, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [normal, down, pending, paused, unknown, migration_pending]}}
+      responses:
+        '200': {description: 按网站 ID 升序的服务端筛选及游标分页；迁入网站标明 migration_pending，正式切换前不检测}
+        '400': {description: 筛选或分页参数错误}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: createWebsite
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {$ref: '#/components/requestBodies/WebsiteEdit'}
+      responses:
+        '200': {description: 网站已保存；新增 site.id 和 expected_version 必须均为 0}
+        '400': {description: 参数错误、网址重复或关联节点不存在}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 配置版本或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/websites/{id}:
+    parameters: [{$ref: '#/components/parameters/WebsiteID'}]
+    get:
+      operationId: getWebsite
+      responses:
+        '200': {description: 网站配置及最近检测状态}
+        '404': {description: 网站不存在或已软删除}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    put:
+      operationId: updateWebsite
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {$ref: '#/components/requestBodies/WebsiteEdit'}
+      responses:
+        '200': {description: 网站已保存；旧版本检测结果立即失效}
+        '400': {description: 网站参数不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 配置版本冲突或正在迁移}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/websites/delete:
+    post:
+      operationId: softDeleteWebsites
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items: {$ref: '#/components/schemas/WebsiteVersion'}
+      responses:
+        '200': {description: 仅软删除明确选中的记录，保留故障历史及排队通知，不发送恢复通知}
+        '400': {description: 选择为空、重复或超限}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 任一网站版本变化时整批拒绝}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/websites/{id}/check:
+    parameters: [{$ref: '#/components/parameters/WebsiteID'}]
+    post:
+      operationId: requestWebsiteCheck
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version]
+              properties: {expected_version: {type: integer, minimum: 1}}
+      responses:
+        '200': {description: 已加入持久化检测队列，未声明检测已完成}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 网站已变更、暂停、删除、正在迁移或已有检测任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/websites/overview:
+    get:
+      operationId: websiteOverview
+      responses:
+        '200': {description: 数据库聚合的网站数量、正常／故障／待检查／未知／暂停／迁移中互斥统计、调度心跳，以及通知出箱积压、最老等待时间和工作器心跳；无心跳时健康状态为 null}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/websites/{id}/incidents:
+    parameters: [{$ref: '#/components/parameters/WebsiteID'}]
+    get:
+      operationId: websiteIncidents
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: node, in: query, schema: {type: string}, description: 可选服务器 ID；省略查询所有服务器}
+        - {name: current, in: query, schema: {type: boolean, default: false}, description: 仅未结束且网站未暂停、未删除及非待迁移的故障；不隐含时间范围}
+        - {name: start, in: query, schema: {type: string, format: date-time}, description: 可选开始时间；显式时间范围最多 31 天}
+        - {name: end, in: query, schema: {type: string, format: date-time}, description: 可选结束时间}
+      responses:
+        '200':
+          description: 指定网站故障历史，按 ID 倒序；未结束故障及近期历史受保护
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SiteIncidentPage'}
+        '400': {description: 服务器编号、布尔值、时间范围或游标不正确}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/incidents:
+    get:
+      operationId: listWebsiteIncidents
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: node, in: query, schema: {type: string}, description: 可选服务器 ID；省略查询所有服务器}
+        - {name: current, in: query, schema: {type: boolean, default: false}, description: 仅未结束且网站未暂停、未删除及非待迁移的故障；不隐含时间范围}
+        - {name: start, in: query, schema: {type: string, format: date-time}, description: 可选开始时间；显式时间范围最多 31 天}
+        - {name: end, in: query, schema: {type: string, format: date-time}, description: 可选结束时间}
+      responses:
+        '200':
+          description: 网站故障历史，游标分页；含安全的网站名称与服务器 ID
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SiteIncidentPage'}
+        '400': {description: 服务器编号、布尔值、时间范围或游标不正确}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}/ssh-fingerprint:
+    post:
+      operationId: submitSshFingerprint
+      description: 只探测已保存节点地址的 SSH 公钥，不发送密码、不执行命令；指纹变化停止。确认绑定账号、节点、地址和端口，有效十分钟。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/DeploymentIdempotency'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version]
+              properties:
+                expected_version: {type: integer, minimum: 1}
+                ssh_port: {type: integer, minimum: 1, maximum: 65535, default: 22}
+      responses:
+        '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
+        '400': {description: 字段、凭据、幂等键不正确；拒绝重复或未知字段}
+        '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
+        '409': {description: 配置或凭据变化、指纹不匹配、预览过期或存在冲突任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}/ssh-credential:
+    get:
+      operationId: getSSHCredentialState
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: 仅返回配置标记、节点版本、SSH 端口和已固定指纹
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  configured: {type: boolean}
+                  version: {type: integer}
+                  ssh_port: {type: integer}
+                  fingerprint: {type: string}
+        '403': {description: 需要管理员}
+    post:
+      operationId: submitSshCredential
+      description: 确认本次指纹后加密保存凭据；三种认证最多选一，编辑均留空保留。路径只由宿主从受控目录读取。私钥最多 64 KiB，不返回任何认证内容。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/DeploymentIdempotency'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version]
+              properties:
+                expected_version: {type: integer, minimum: 1}
+                ssh_port: {type: integer, minimum: 1, maximum: 65535}
+                password: {type: string, writeOnly: true, maxLength: 4096}
+                private_key_content: {type: string, writeOnly: true, description: 未加密 OpenSSH 或 PEM 私钥，最大 64 KiB}
+                private_key_path: {type: string, writeOnly: true}
+                fingerprint_preparation: {type: string}
+                fingerprint_token: {type: string}
+      responses:
+        '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
+        '400': {description: 字段、凭据、幂等键不正确；拒绝重复或未知字段}
+        '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
+        '409': {description: 配置或凭据变化、指纹不匹配、预览过期或存在冲突任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}/deployment-preview:
+    post:
+      operationId: submitDeploymentPreview
+      description: 仅使用已保存配置；异步由宿主准备证书、规则和配置包，不提前停止服务或切换登记。预览十分钟内有效。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/DeploymentIdempotency'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version]
+              properties:
+                expected_version: {type: integer, minimum: 1}
+                kind: {enum: [install, upgrade]}
+      responses:
+        '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
+        '400': {description: 字段、凭据、幂等键不正确；拒绝重复或未知字段}
+        '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
+        '409': {description: 配置或凭据变化、指纹不匹配、预览过期或存在冲突任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployment-preparations/{id}:
+    get:
+      operationId: getDeploymentPreparation
+      description: 仅原管理员可读取，改密或账号版本变化后失效。敏感输入、指纹确认令牌及预览在十分钟后清除；不返回私钥、密码、宿主路径或命令。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: 准备进度、脱敏原因及完成结果
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeploymentPreparation'}
+        '403': {description: 需要原管理员}
+        '404': {description: 准备请求不存在或不属于当前账号}
+  /api/v3/deployments:
+    get:
+      operationId: listDeployments
+      description: 持久化任务历史；通过管理员确认的准备请求创建任务，日志按游标续读。
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: node, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: 创建时间及 ID 倒序，不返回计划、凭据或租约所有者
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, limit]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/DeploymentJob'}}
+                  next_cursor: {type: string}
+                  limit: {type: integer}
+        '400': {description: 游标或分页参数无效}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: confirmWebDeployment
+      description: 管理员通过可信 HTTPS 确认十分钟内的部署预览。返回准备回执；宿主确认创建任务后 GET 准备记录返回 result.job，此时才可跳转日志。请求不能携带 edit、命令、程序路径或证书目录。
+      parameters:
+        - {$ref: '#/components/parameters/DeploymentIdempotency'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version, preparation, preview_token]
+              properties:
+                expected_version: {type: integer, minimum: 1}
+                preparation: {type: string}
+                preview_token: {type: string}
+      responses:
+        '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
+        '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
+        '409': {description: 预览过期或账号、节点、凭据、目标摘要及任务状态变化}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/{id}:
+    get:
+      operationId: deployment
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: 任务、阶段及实际恢复条件；按执行器心跳、签名发布资料和当前配置计算恢复能力
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job, phase, can_resume, can_rollback, recovery_required, recovery_reason]
+                properties:
+                  job: {$ref: '#/components/schemas/DeploymentJob'}
+                  phase: {type: string}
+                  can_resume: {type: boolean}
+                  can_rollback: {type: boolean}
+                  recovery_required: {type: boolean}
+                  recovery_reason: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 任务不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/{id}/resume:
+    post:
+      operationId: resumeWebDeployment
+      description: 管理员根据实际可恢复状态操作原任务；需要可信 HTTPS、CSRF、原计划摘要及最新日志游标，不创建新的安装范围。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/DeploymentIdempotency'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [plan_digest, log_cursor]
+              properties:
+                plan_digest: {type: string}
+                log_cursor: {type: integer, minimum: 1}
+      responses:
+        '200': {description: 原任务已排队，日志游标继续递增}
+        '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
+        '409': {description: 任务、租约、游标或配置变化，重新读取原任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/{id}/rollback:
+    post:
+      operationId: rollbackWebDeployment
+      description: 管理员根据实际可恢复状态操作原任务；需要可信 HTTPS、CSRF、原计划摘要及最新日志游标，不创建新的安装范围。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/DeploymentIdempotency'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [plan_digest, log_cursor]
+              properties:
+                plan_digest: {type: string}
+                log_cursor: {type: integer, minimum: 1}
+      responses:
+        '200': {description: 原任务已排队，日志游标继续递增}
+        '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
+        '409': {description: 任务、租约、游标或配置变化，重新读取原任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/{id}/logs:
+    get:
+      operationId: deploymentLogs
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: after, in: query, schema: {type: integer, minimum: 0, default: 0}, description: 上次已收到的日志游标}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: 游标递增；空结果保留传入游标，客户端可断线续读
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, status]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [cursor, phase, code, created_at]
+                      properties:
+                        cursor: {type: integer, minimum: 1}
+                        phase: {type: string}
+                        code: {type: string, description: 服务端固定状态代码，不包含命令原始输出}
+                        created_at: {type: string, format: date-time}
+                  next_cursor: {type: integer, minimum: 0}
+                  status: {type: string}
+        '400': {description: 日志游标或分页参数无效}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 任务不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+
+  /api/v3/alerts/current:
+    get:
+      operationId: currentServerAlerts
+      description: 已启用节点的当前触发告警，只读；待定和未知不作为已恢复。
+      parameters:
+        - {name: node, in: query, schema: {type: string}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+      responses:
+        '200':
+          description: 按规则标识升序分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, limit]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/HealthState'}}
+                  next_cursor: {type: string}
+                  limit: {type: integer}
+        '400': {description: 节点、每页数量或游标不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/alerts/history:
+    get:
+      operationId: serverAlertHistory
+      description: 告警历史只读；v3 历史清理接通前 can_delete 为 false，返回实际保护原因。
+      parameters:
+        - {name: node, in: query, schema: {type: string}}
+        - {name: phase, in: query, schema: {type: string, enum: [firing, resolved, reminder]}}
+        - {name: start, in: query, schema: {type: string, format: date-time}}
+        - {name: end, in: query, schema: {type: string, format: date-time}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+      responses:
+        '200':
+          description: 默认最近 24 小时，最多 31 天；按事件时间及标识倒序分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, start, end, limit]
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/HealthRecord'}}
+                  next_cursor: {type: string}
+                  start: {type: string, format: date-time}
+                  end: {type: string, format: date-time}
+                  limit: {type: integer}
+        '400': {description: 时间、阶段或游标不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/policy:
+    get:
+      operationId: retentionPolicy
+      responses:
+        '200':
+          description: 当前 PostgreSQL 保留期限与配置版本，不返回其他设置或凭据
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, policy, updated_at]
+                properties:
+                  version: {type: integer, minimum: 1}
+                  policy: {$ref: '#/components/schemas/RetentionPolicy'}
+                  updated_at: {type: string, format: date-time}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    put:
+      operationId: saveRetentionPolicy
+      description: 仅管理员；先创建加密 before_edit 配置存档，与期限、回执和审计同事务提交，备份失败不保存。保存即生效。缩短期限不可逆；正在清理的旧版本范围会停止，已完成部分保留。不提供删除设置操作。
+      parameters:
+        - {$ref: '#/components/parameters/CSRF'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy, expected_version]
+              properties:
+                policy: {$ref: '#/components/schemas/RetentionPolicy'}
+                expected_version: {type: integer, minimum: 1}
+      responses:
+        '200': {description: 已保存，返回 version、policy、shortened 和 message}
+        '400': {description: 期限、版本或幂等键不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 配置版本或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/status:
+    get:
+      operationId: retentionStatus
+      responses:
+        '200':
+          description: 当前期限、最近自动清理任务、受管理表及索引大小、工作器心跳；无证据的心跳和健康为 null。表大小包含可复用空间，不代表可立即释放的磁盘。
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/jobs:
+    get:
+      operationId: retentionJobs
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: kind, in: query, schema: {type: string, enum: [manual]}, description: 缺省返回自动任务；manual 只返回当前账号的手动导出和清理任务}
+      responses:
+        '200': {description: 按创建时间和 ID 倒序游标分页；保留真实已完成数量及部分失败进度。}
+        '400': {description: 游标或分页数量不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/audit:
+    get:
+      operationId: auditHistory
+      description: 只读审计；管理员可查全部，其他账号仅查自己及 system。返回经过类型筛选的摘要，不返回任意审计 JSON、提供商消息、文件路径或预览凭据。普通清理不能删除，按完成时间保留 365 天，迁移冻结期间暂停过期审计清理。
+      parameters:
+        - {name: actor, in: query, schema: {type: string}, description: 筛选不会扩大账号原有可见范围}
+        - {name: kind, in: query, schema: {type: string}}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: 按时间和数值 ID 倒序游标分页；跨页沿用返回的 start、end
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/AuditRecord'}}
+                  next_cursor: {type: string}
+                  start: {type: string, format: date-time}
+                  end: {type: string, format: date-time}
+                  limit: {type: integer}
+        '400': {description: 账号、类别、时间或分页参数不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '405': {description: 不支持写入、修改或删除}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications:
+    get:
+      operationId: notificationHistory
+      description: 仅返回通知元数据及实时删除保护原因，不返回投递载荷、SMTP 响应或凭据。ID 使用十进制字符串，避免大整数精度丢失。
+      parameters:
+        - {name: channel, in: query, required: true, schema: {type: string, enum: [feishu, email]}}
+        - {name: node, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string, enum: [pending, completed]}}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: 按创建时间和数值 ID 倒序分页；后续页面应沿用返回的 start、end
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/NotificationRecord'}}
+                  next_cursor: {type: string}
+                  start: {type: string, format: date-time}
+                  end: {type: string, format: date-time}
+                  limit: {type: integer}
+        '400': {description: 通道、状态、时间或分页参数不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/preview:
+    post:
+      operationId: previewHistory
+      description: 固定本次记录范围；凭据绑定账号、配置版本，10 分钟有效。最多 200 条明确记录；不提供 records 时按类别范围预览。默认排除探针，禁止最近 24 小时。只读账号不能创建操作预览。
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HistoryScope'}}}
+      responses:
+        '200':
+          description: 可操作及受保护数量；不删除记录
+          content: {application/json: {schema: {$ref: '#/components/schemas/HistoryPreview'}}}
+        '400': {description: 范围、类别、明确记录或预览配额不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/export:
+    post:
+      operationId: exportHistory
+      description: 只导出预览时可操作且执行时仍未受保护的记录；不删除。创建任务不代表导出完成；相同幂等键不重复创建。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HistorySubmission'}}}
+      responses:
+        '200':
+          description: 持久化导出任务
+          content: {application/json: {schema: {$ref: '#/components/schemas/HistoryJob'}}}
+        '400': {description: 请求或任务配额不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 预览失效、账号不匹配、配置变化、已使用或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/cleanup:
+    post:
+      operationId: cleanupHistory
+      description: 执行前重查保护；export_first 为真时先完成 JSONL 并校验文件后删除，否则必须明确 confirm_without_export。与自动清理共用持久化互斥租约。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/HistorySubmission'}}}
+      responses:
+        '200':
+          description: 持久化清理任务；数量、状态需继续读取任务，不是全部成功确认
+          content: {application/json: {schema: {$ref: '#/components/schemas/HistoryJob'}}}
+        '400': {description: 缺少删除确认、请求或任务配额不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 预览失效、账号不匹配、配置变化、已使用或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/jobs/{id}:
+    get:
+      operationId: historyJob
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: 当前账号手动任务的 job 和固定 scope；自动任务兼容返回 kind=automatic 与 job
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      job: {$ref: '#/components/schemas/HistoryJob'}
+                      scope: {$ref: '#/components/schemas/HistoryScope'}
+                  - type: object
+                    properties:
+                      kind: {type: string, const: automatic}
+                      job: {type: object}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 不存在或不是当前账号的手动任务}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/retention/jobs/{id}/download:
+    get:
+      operationId: downloadHistory
+      description: 仅任务所属账号；文件保留 24 小时。校验每个分片摘要，Content-Length 固定总大小；中途损坏时下载不完整，客户端必须拒绝。目录和文件路径由服务端生成，不接受路径参数。下载结果保留审计。
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: 不缓存的完整 JSONL 附件；每行含稳定 record_key 和可查看的历史字段
+          content: {application/x-ndjson: {schema: {type: string}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 不存在或不属于当前账号}
+        '409': {description: 导出未完成或已过期}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/website-backups:
+    get:
+      operationId: websiteBackups
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200':
+          description: 网站配置备份，独立游标分页及实时删除保护原因
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/WebsiteBackup'}}
+                  next_cursor: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: createWebsiteBackup
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false}}}
+      responses:
+        '200': {description: 当前未删除网站的配置快照，最大 24 MiB；不包含数据库或账号}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/website-backups/import:
+    post:
+      operationId: importWebsiteBackup
+      description: 最大 2 MiB，只加入列表，不立即恢复；兼容 v2 format_version 1 JSON。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/WebsiteBackupDocument'}}}
+      responses:
+        '200': {description: 备份已加入列表，返回 id、count、source}
+        '400': {description: 格式、版本、字段、重复键、网址或大小不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/website-backups/delete:
+    post:
+      operationId: deleteWebsiteBackups
+      description: 仅明确选择的 1～200 个备份。有效恢复预览受保护；返回逐项跳过原因，不隐含删除筛选结果。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [records]
+              properties:
+                records: {type: array, minItems: 1, maxItems: 200, uniqueItems: true, items: {type: string, pattern: '^[a-f0-9]{64}$'}}
+      responses:
+        '200': {description: deleted 数量、skipped 的 id／reason 及中文说明；不删除网站}
+        '400': {description: 选择范围或编号不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/website-backups/{id}/export:
+    get:
+      operationId: exportWebsiteBackup
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: 通过摘要核对的 JSON 配置；Content-Disposition 提供生成的附件文件名
+          content: {application/json: {schema: {$ref: '#/components/schemas/WebsiteBackupDocument'}}}
+        '404': {description: 备份不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/website-backups/{id}/preview:
+    post:
+      operationId: previewWebsiteBackup
+      description: 绑定账号、备份摘要、网站配置及节点版本，有效 10 分钟。正常检测不使预览失效。未知节点在合并时清除关联并由主控检测。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false}}}
+      responses:
+        '200':
+          description: 仅预览，不修改网站
+          content: {application/json: {schema: {$ref: '#/components/schemas/WebsiteBackupPreview'}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 备份不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/website-backups/{id}/restore:
+    post:
+      operationId: restoreWebsiteBackup
+      description: 先备份当前配置，再事务合并；软删除网站复用原 ID，撤销旧检测租约，保留历史和排队通知，不生成恢复通知。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties: {token: {type: string, pattern: '^[a-f0-9]{64}$'}}
+      responses:
+        '200':
+          description: 合并数量及 before_backup；相同幂等键重试不再次应用
+          content: {application/json: {schema: {$ref: '#/components/schemas/WebsiteBackupPreview'}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 备份不存在}
+        '409': {description: 预览失效、账号不匹配、已使用、配置变化或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups:
+    get:
+      operationId: configurationBackups
+      description: 仅管理员；返回安全元数据，不返回凭据或私有配置摘要。恢复可提交到保存配置但不会自动应用；删除采用固定范围预览和持久化任务。
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200':
+          description: 分页列表，restore_available 为 false（运行应用未开放），saved_restore_available 和 delete_available 为 true
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/ConfigurationBackup'}}
+                  next_cursor: {type: string}
+                  restore_available: {const: false}
+                  saved_restore_available: {const: true}
+                  delete_available: {const: true}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: createConfigurationBackup
+      description: 已校验的启动时 bootstrap，加同一 PostgreSQL 快照中的已保存设置和节点；不读取后来修改的磁盘 YAML，不表示配置已应用。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false}}}
+      responses:
+        '200':
+          description: 加密存档已创建，幂等重试复用原存档；回执的删除保护需刷新列表
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationBackup'}}}
+        '400': {description: 当前配置无法生成合法备份}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/delete-preview:
+    post:
+      operationId: previewConfigurationDelete
+      description: 仅管理员；固定明确选择的 1～200 个稳定记录标识；保留预览时的保护结果，不隐式扩展范围。账号及设置版本绑定，有效十分钟，每账号最多一百份有效未用预览。
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [records]
+              properties:
+                records: {type: array, minItems: 1, maxItems: 200, uniqueItems: true, items: {type: string, pattern: '^configuration-backup:[a-f0-9]{64}$'}}
+      responses:
+        '200':
+          description: 固定范围和可删除／受保护数量；不会执行删除
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationDeletePreview'}}}
+        '400': {description: 范围无效或包含未知字段}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {description: 账号预览配额已满}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/delete:
+    post:
+      operationId: deleteConfigurationBackups
+      description: 仅创建持久化任务；不在请求中删除。每账号最多一百个未完成任务；执行与历史清理共用租约，逐项重新检查引用并持久化实际数量。队列回执重放不表示当前任务已完成。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, confirm]
+              properties:
+                token: {type: string, pattern: '^[a-f0-9]{64}$'}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 原始排队回执，实际进度请查询任务
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationDeleteJob'}}}
+        '400': {description: 缺少明确确认、令牌或幂等键}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 预览已失效、已使用、账号／设置版本不符或幂等键冲突}
+        '429': {description: 账号未完成任务配额已满}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/delete-jobs:
+    get:
+      operationId: configurationDeleteJobs
+      description: 仅管理员；只返回本账号任务，终态记录保留 365 天；不删除防重回执。
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200':
+          description: 游标分页
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/ConfigurationDeleteJob'}}
+                  next_cursor: {type: string}
+        '400': {description: 游标或页大小不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/delete-jobs/{id}:
+    get:
+      operationId: configurationDeleteJob
+      description: 仅当前管理员账号；关闭网页不停止任务。普通重启续作，灾备恢复取消未完成删除但保留检查点。
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: 任务及逐项结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: {$ref: '#/components/schemas/ConfigurationDeleteJob'}
+                  items: {type: array, items: {$ref: '#/components/schemas/ConfigurationDeleteItem'}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 不存在或不属于本账号}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/import:
+    post:
+      operationId: importConfigurationBackup
+      description: 仅管理员及受信 HTTPS；原生 v3 YAML 最大 32 MiB。仅存档，不写入设置或触发部署；省略字段标记需补全。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/yaml: {schema: {type: string}}}
+      responses:
+        '200': {description: 仅加入备份列表，返回安全元数据}
+        '400': {description: 格式、参数、重复字段、版本或大小不正确}
+        '403': {description: 非管理员、CSRF 错误或不是受信 HTTPS}
+        '409': {description: 幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/import-age:
+    post:
+      operationId: importEncryptedConfigurationBackup
+      description: |
+        仅管理员及受信 HTTPS；内存中读取，不落临时文件。age 包最大 34 MiB，整个 multipart 最多额外 8 KiB。
+        密码仅放请求体。按账号每五分钟最多 10 次、全库最多 60 次加密操作，跨 API 实例最多两个 scrypt 操作；
+        两连接池的实例最多一个。失败也计数，数据库异常拒绝操作。只存档，不恢复。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file, password]
+              properties:
+                file: {type: string, format: binary}
+                password: {type: string, format: password, writeOnly: true, description: 12～1024 UTF-8 字节}
+      responses:
+        '200': {description: 解密和验证通过，仅加入备份列表}
+        '400': {description: 密码错误、损坏、超限或请求格式错误；不返回输入片段}
+        '403': {description: 非管理员、CSRF 错误或不是受信 HTTPS}
+        '409': {description: 幂等键冲突}
+        '429': {description: 加密操作限流；Retry-After 为重试秒数}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/{id}/export:
+    get:
+      operationId: exportConfigurationBackup
+      description: 仅管理员；默认脱敏 YAML。移除凭据、地址和未知字段，记录省略路径；稳定节点 ID 和部分路径仍保留，不适合公开发布。
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: no-store 附件；仅审计导出准备，不证明客户端下载完成
+          content: {application/octet-stream: {schema: {type: string, format: binary}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 备份不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/{id}/export-age:
+    post:
+      operationId: exportEncryptedConfigurationBackup
+      description: |
+        仅管理员及受信 HTTPS；标准 age 密码加密包。密码不进入 URL、存档、回执或审计。
+        与加密导入共用持久化频率限制及跨实例并发上限。不附外部私钥、DSN、PKI 或凭据库。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password, confirm]
+              properties:
+                password: {type: string, format: password, writeOnly: true, description: 12～1024 UTF-8 字节}
+                confirm: {type: string, format: password, writeOnly: true, description: 须与 password 一致}
+      responses:
+        '200':
+          description: no-store 的 age 附件；仅审计导出准备
+          content: {application/octet-stream: {schema: {type: string, format: binary}}}
+        '400': {description: 密码长度或二次确认不正确}
+        '403': {description: 非管理员、CSRF 错误或不是受信 HTTPS}
+        '404': {description: 备份不存在}
+        '429': {description: 加密操作限流；Retry-After 为重试秒数}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-backups/{id}/restore-preview:
+    post:
+      operationId: previewConfigurationRestore
+      description: 管理员和可信 HTTPS；仅安全差异。默认保留当前完整凭据通道。预览有效十分钟，绑定账号版本、存档和当前配置及部署状态。请求最大 4096 字节，拒绝重复键、大小写别名及未知字段。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [use_backup_credentials]
+              properties:
+                use_backup_credentials: {type: boolean}
+      responses:
+        '200':
+          description: 预览不会写入配置、读取本机路径或连接远端
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationRestorePreview'}}}
+        '400': {description: 请求不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 配置冲突或部署未完成}
+        '429': {description: 每账号最多一百份有效恢复预览}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-applications:
+    get:
+      operationId: configurationApplications
+      description: 管理员只读历史，按创建时间及 ID 倒序分页；校验任务签名。空页不依赖本地解密密钥。写入口仅在执行器及配置应用开关同时启用时可用，默认关闭；要求管理员、可信 HTTPS、CSRF 和幂等键。
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: stage, in: query, schema: {type: string, pattern: '^[a-f0-9]{64}$'}, description: 可选恢复编号}
+      responses:
+        '200':
+          description: 签名认证的应用任务，不含运行授权、凭据或私有路径
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/ConfigurationApplication'}}
+                  next_cursor: {type: string}
+        '400': {description: 分页或恢复编号不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: queueConfigurationApplication
+      description: 只对已经提交到保存配置的恢复创建持久应用任务，禁止浏览器配置正文、文件路径或检查点。开关默认关闭；任务创建不是应用成功。需原操作账号及当前版本有效。幂等重试返回原始回执。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [stage, generation, confirm]
+              properties:
+                stage: {type: string, pattern: '^[a-f0-9]{64}$'}
+                generation: {type: string, pattern: '^[1-9][0-9]*$', description: 规范十进制 int64 字符串}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 原始排队回执；使用任务 ID 立即进入日志页
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationApplication'}}}
+        '400': {description: 缺少确认、字段不合法或请求体超限}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 保存配置、来源、任务或幂等键发生冲突，需重新读取确认}
+        '503': {description: 工作器未启用、迁移中或结果暂时无法确认；未知状态不当作成功}
+  /api/v3/configuration-applications/{id}:
+    get:
+      operationId: configurationApplication
+      description: 管理员查询；历史成功不代表当前配置仍生效。操作提示与签名任务取自同一快照，不替代执行时授权和任务游标校验。
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: 经过签名认证的任务
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: {$ref: '#/components/schemas/ConfigurationApplication'}
+                  can_resume: {type: boolean}
+                  can_rollback: {type: boolean}
+                  can_cancel: {type: boolean}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 任务不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-applications/{id}/logs:
+    get:
+      operationId: configurationApplicationLogs
+      description: 管理员只读；任务和日志取自同一数据库快照。after 不能超出签名认证的上界；缺行或非白名单阶段／代码返回 503。游标为十进制字符串，客户端不能转为浮点数。后台或网络故障时保留游标并重试。
+      parameters:
+        - {$ref: '#/components/parameters/BackupID'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: after, in: query, schema: {type: string, pattern: '^(0|[1-9][0-9]*)$', default: '0'}}
+      responses:
+        '200':
+          description: 连续的固定安全阶段日志，默认最多 100 条，上限 200
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: {$ref: '#/components/schemas/ConfigurationApplication'}
+                  can_resume: {type: boolean}
+                  can_rollback: {type: boolean}
+                  can_cancel: {type: boolean}
+                  items: {type: array, items: {$ref: '#/components/schemas/ConfigurationApplicationLog'}}
+                  next_cursor: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+        '400': {description: 游标或数量不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 任务不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-applications/{id}/resume:
+    post:
+      operationId: resumeConfigurationApplication
+      description: 管理员明确继续原任务。绑定确认时的精确日志上界及当前中心成员，状态变化后返回冲突；活动租约不可抢占，承担恢复职责的任务不可取消。前向继续需原账号有效；其他管理员可按恢复资料明确回退。相同输入及幂等键可核实丢失的响应。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_log_cursor, confirm]
+              properties:
+                expected_log_cursor: {type: string, pattern: '^[1-9][0-9]*$', description: 确认时的任务 log_cursor，规范十进制 int64 字符串}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 原任务的控制回执，后续进展请查询连续日志
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationApplication'}}}
+        '400': {description: 参数或确认不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 任务不存在}
+        '409': {description: 任务版本、成员、租约、恢复保护或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-applications/{id}/rollback:
+    post:
+      operationId: rollbackConfigurationApplication
+      description: 管理员明确回退原任务。绑定确认时的精确日志上界及当前中心成员，状态变化后返回冲突；活动租约不可抢占，承担恢复职责的任务不可取消。前向继续需原账号有效；其他管理员可按恢复资料明确回退。相同输入及幂等键可核实丢失的响应。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_log_cursor, confirm]
+              properties:
+                expected_log_cursor: {type: string, pattern: '^[1-9][0-9]*$', description: 确认时的任务 log_cursor，规范十进制 int64 字符串}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 原任务的控制回执，后续进展请查询连续日志
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationApplication'}}}
+        '400': {description: 参数或确认不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 任务不存在}
+        '409': {description: 任务版本、成员、租约、恢复保护或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-applications/{id}/cancel:
+    post:
+      operationId: cancelConfigurationApplication
+      description: 管理员明确取消原任务。绑定确认时的精确日志上界及当前中心成员，状态变化后返回冲突；活动租约不可抢占，承担恢复职责的任务不可取消。前向继续需原账号有效；其他管理员可按恢复资料明确回退。相同输入及幂等键可核实丢失的响应。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_log_cursor, confirm]
+              properties:
+                expected_log_cursor: {type: string, pattern: '^[1-9][0-9]*$', description: 确认时的任务 log_cursor，规范十进制 int64 字符串}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 原任务的控制回执，后续进展请查询连续日志
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationApplication'}}}
+        '400': {description: 参数或确认不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 任务不存在}
+        '409': {description: 任务版本、成员、租约、恢复保护或幂等键冲突}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-restores:
+    get:
+      operationId: configurationRestores
+      description: 管理员查看全库恢复记录，包含其他管理员的遗留意图；不返回存档内容、私有路径或证明。
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200':
+          description: 按创建时间及 ID 倒序分页
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/ConfigurationRestoreStage'}}
+                  next_cursor: {type: string}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    post:
+      operationId: stageConfigurationRestore
+      description: 创建持久恢复记录，同事务创建恢复前备份和保护引用；不会应用。全库只允许一个未完成恢复。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preview, confirm]
+              properties:
+                preview: {type: string, pattern: '^[a-f0-9]{64}$'}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 恢复意图已保存
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationRestoreStage'}}}
+        '400': {description: 请求不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 已有意图、预览过期或基准变化}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-restores/{id}:
+    get:
+      operationId: configurationRestore
+      parameters: [{$ref: '#/components/parameters/BackupID'}]
+      responses:
+        '200':
+          description: 同一数据库快照中的安全状态和候选版本；can_continue 只表示账号归属，执行时重查配置和资料
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stage: {$ref: '#/components/schemas/ConfigurationRestoreStage'}
+                  summary: {$ref: '#/components/schemas/ConfigurationRestoreSummary'}
+                  revision: {oneOf: [{$ref: '#/components/schemas/ConfigurationRevision'}, {type: 'null'}]}
+                  can_continue: {type: boolean}
+                  can_cancel: {type: boolean}
+                  can_apply: {type: boolean, description: 仅工作器启用且原账号的保存态尚无应用任务时提示；执行仍重查真实状态}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 恢复不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-restores/{id}/check:
+    post:
+      operationId: checkConfigurationRestore
+      description: 管理员、可信 HTTPS、CSRF 和幂等键；原账号只读本机检查；不连接数据库、SSH 或 HTTP，不创建目录或推进吊销下限；诊断不是后续授权。30 秒超时；失败重试使用原键。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: 操作完成，运行配置未切换
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationLocalReport'}}}
+        '400': {description: 请求不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 恢复不存在}
+        '409': {description: 状态、归属或本机资料检查冲突；资料失败附安全 report，可重新检查}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-restores/{id}/prepare:
+    post:
+      operationId: prepareConfigurationRestore
+      description: 管理员、可信 HTTPS、CSRF 和幂等键；原账号重新校验存档、基准和本机资料，保存独立加密候选；尚未修改保存配置。30 秒超时；失败重试使用原键。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '200':
+          description: 操作完成，运行配置未切换
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationRevision'}}}
+        '400': {description: 请求不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 恢复不存在}
+        '409': {description: 状态、归属或本机资料检查冲突；资料失败附安全 report，可重新检查}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-restores/{id}/commit:
+    post:
+      operationId: commitConfigurationRestore
+      description: 管理员、可信 HTTPS、CSRF 和幂等键；原账号提交确切候选 generation，再次检查资料，事务更新已保存设置、启动草稿及节点；不切换运行配置。30 秒超时；失败重试使用原键。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [generation, confirm]
+              properties:
+                generation: {type: string, pattern: '^[1-9][0-9]{0,18}$', description: 必须是字符串，不能经 JS number 转换}
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 操作完成，运行配置未切换
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationSavedReceipt'}}}
+        '400': {description: 请求不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 恢复不存在}
+        '409': {description: 状态、归属或本机资料检查冲突；资料失败附安全 report，可重新检查}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/configuration-restores/{id}/cancel:
+    post:
+      operationId: cancelConfigurationRestore
+      description: 管理员、可信 HTTPS、CSRF 和幂等键；任意当前管理员可取消遗留未完成意图；不要求解密密钥可用，不撤销已提交的保存配置。30 秒超时；失败重试使用原键。
+      parameters: [{$ref: '#/components/parameters/BackupID'}, {$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirm]
+              properties:
+                confirm: {const: true}
+      responses:
+        '200':
+          description: 操作完成，运行配置未切换
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConfigurationRestoreStage'}}}
+        '400': {description: 请求不正确}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 恢复不存在}
+        '409': {description: 状态、归属或本机资料检查冲突；资料失败附安全 report，可重新检查}
+        '503': {$ref: '#/components/responses/Unavailable'}
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: webscan_v3_session
+  requestBodies:
+    WebsiteEdit:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [site, expected_version]
+            properties:
+              site: {$ref: '#/components/schemas/WebsiteInput'}
+              expected_version: {type: integer, minimum: 0}
+  parameters:
+    DeploymentIdempotency:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, maxLength: 128}
+      description: 同一操作重试复用，同键不同输入返回 409
+    BackupID: {name: id, in: path, required: true, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+    WebsiteID: {name: id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'}}
+    CSRF: {name: X-CSRF-Token, in: header, required: true, schema: {type: string}}
+    Cursor: {name: cursor, in: query, schema: {type: string}, description: 使用上页 next_cursor，不解析或构造}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200}, description: 服务器默认 50，事件默认 20}
+    Start: {name: start, in: query, schema: {type: string, format: date-time}, description: 默认最近 24 小时，范围最多 31 天}
+    End: {name: end, in: query, schema: {type: string, format: date-time}, description: 默认当前 UTC 时间}
+  responses:
+    DeploymentPreparationAccepted:
+      description: 已接受准备请求，尚未表示部署成功；轮询返回的 id
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              id: {type: string}
+              status: {enum: [queued, running, succeeded, failed, expired]}
+    BadRequest:
+      description: 请求字段、类型或参数不正确；响应不会回显提交正文
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Conflict:
+      description: 配置、预览或任务状态变化，须重新读取并预览
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unauthorized:
+      description: 明确鉴权失败；客户端可跳转登录
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Forbidden:
+      description: CSRF、来源或权限不满足
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unavailable:
+      description: 服务暂时不可用；保留已有页面及会话，不跳转登录
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    DeploymentPreparation:
+      type: object
+      properties:
+        id: {type: string}
+        node: {type: string}
+        kind: {enum: [fingerprint, credential, prepare, confirm]}
+        status: {enum: [queued, running, succeeded, failed, expired]}
+        phase: {type: string}
+        error_code: {type: string}
+        version: {type: integer}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        result:
+          type: object
+          description: 仅按阶段返回当前账号的指纹确认资料、配置标记、预览或真实任务编号；从不返回认证内容
+          properties:
+            host: {type: string}
+            port: {type: integer}
+            fingerprint: {type: string}
+            fingerprint_token: {type: string}
+            configured: {type: boolean}
+            preview: {type: object}
+            job: {type: string}
+    SettingsState:
+      type: object
+      required: [generation, applied_generation, runtime_version, pending, updated_at]
+      properties:
+        generation: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+        applied_generation: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+        runtime_version: {type: integer, minimum: 1}
+        pending: {type: boolean}
+        updated_at: {type: string, format: date-time}
+    SettingsEditor:
+      type: object
+      required: [state, fields, values, runtime_values, secret_configured, runtime_secret_configured]
+      properties:
+        state: {$ref: '#/components/schemas/SettingsState'}
+        fields:
+          type: array
+          items:
+            type: object
+            required: [path, label, kind]
+            properties:
+              path: {type: string}
+              label: {type: string}
+              kind: {type: string, enum: [bool, integer, text, choice, addresses]}
+              min: {type: integer}
+              max: {type: integer}
+              choices: {type: array, items: {type: string}}
+        values: {type: object, description: 按字段路径返回已保存值；缺失表示未设置，不伪造默认值}
+        runtime_values: {type: object, description: 同白名单的当前运行值}
+        secret_configured: {type: object, additionalProperties: {type: boolean}}
+        runtime_secret_configured: {type: object, additionalProperties: {type: boolean}}
+    SettingsEditorRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_generation, expected_runtime_version, edit]
+      properties:
+        action: {type: string, enum: [save, apply]}
+        expected_generation: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+        expected_runtime_version: {type: integer, minimum: 1}
+        preview: {type: string, maxLength: 2048, description: 确认必填；预览请求禁止提供}
+        edit:
+          type: object
+          additionalProperties: false
+          properties:
+            values:
+              type: object
+              description: 仅接受 fields 中的路径和严格类型；不是任意配置编辑器
+              additionalProperties:
+                oneOf:
+                  - {type: boolean}
+                  - {type: integer}
+                  - {type: string}
+                  - {type: array, items: {type: string}}
+            secrets:
+              type: object
+              additionalProperties: false
+              properties:
+                email.password: {$ref: '#/components/schemas/SettingsSecretEdit'}
+                feishu.webhook_url: {$ref: '#/components/schemas/SettingsSecretEdit'}
+                feishu.signing_secret: {$ref: '#/components/schemas/SettingsSecretEdit'}
+    SettingsSecretEdit:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action: {type: string, enum: [keep, replace, clear]}
+        value: {type: string, maxLength: 4096, writeOnly: true, description: replace 必填；keep/clear 禁止附值；不会回显}
+    SettingsPreview:
+      type: object
+      required: [token, action, expires_at, changed_fields, retention_shortened, notifications_enabled]
+      properties:
+        token: {type: string}
+        action: {type: string, enum: [save, apply]}
+        expires_at: {type: string, format: date-time}
+        changed_fields: {type: array, items: {type: string}}
+        retention_shortened: {type: boolean}
+        notifications_enabled: {type: boolean}
+    ConfigurationRestoreSummary:
+      type: object
+      properties:
+        settings_changed: {type: boolean}
+        bootstrap_changed: {type: boolean}
+        sections: {type: array, items: {enum: [retention, backup, monitoring, website_monitor, email, feishu, other]}}
+        added: {type: integer}
+        updated: {type: integer}
+        unchanged: {type: integer}
+        removed: {type: integer}
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              node: {type: string}
+              action: {enum: [add, update, remove]}
+              fields: {type: array, items: {enum: [configuration, name, endpoint, server_name, enabled, mode, rules, requires_uninstall]}}
+        credentials_kept: {type: integer}
+        credentials_replaced: {type: integer}
+        credentials_missing: {type: integer}
+        missing_nodes: {type: array, items: {type: string}}
+        missing_settings: {type: boolean}
+        missing_bootstrap: {type: boolean}
+        requires_center_restart: {type: boolean}
+        requires_local_validation: {const: true}
+        blocked_reasons: {type: array, items: {enum: [topology_migration_required, node_mode_migration_required, node_uninstall_required, configuration_incomplete]}}
+        can_prepare: {type: boolean}
+    ConfigurationRestorePreview:
+      type: object
+      properties:
+        token: {type: string}
+        backup: {type: string}
+        expires_at: {type: string, format: date-time}
+        summary: {$ref: '#/components/schemas/ConfigurationRestoreSummary'}
+    ConfigurationRestoreStage:
+      type: object
+      properties:
+        id: {type: string}
+        username: {type: string}
+        backup: {type: string}
+        before_backup: {type: string}
+        settings_version: {type: integer}
+        status: {enum: [pending_validation, pending_application, saved, cancelled]}
+        message: {type: string, description: 固定安全说明}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        cancelled_by: {type: string}
+        application: {$ref: '#/components/schemas/ConfigurationApplication', description: 只读且签名认证的历史应用任务；仅当前查询返回，不改变原始保存回执或授予执行权限}
+    ConfigurationApplication:
+      type: object
+      properties:
+        id: {type: string}
+        stage: {type: string}
+        username: {type: string}
+        controller: {type: string}
+        generation: {type: string, pattern: '^[1-9][0-9]*$'}
+        status: {enum: [queued, running, failed, succeeded, rolled_back, cancelled]}
+        direction: {enum: [forward, rollback]}
+        phase: {enum: [environment, nodes, bootstrap, settings, verify, finalize, restore-settings, restore-bootstrap, restore-nodes, verify-rollback, complete]}
+        recovery_required: {type: boolean}
+        recovery_hold: {type: boolean}
+        error_code: {type: string, description: 固定安全代码}
+        log_cursor: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+    ConfigurationApplicationLog:
+      type: object
+      additionalProperties: false
+      required: [cursor, direction, phase, code, created_at]
+      properties:
+        cursor: {type: string, pattern: '^[1-9][0-9]*$'}
+        direction: {enum: [forward, rollback]}
+        phase: {enum: [environment, nodes, bootstrap, settings, verify, finalize, restore-settings, restore-bootstrap, restore-nodes, verify-rollback, complete]}
+        code: {enum: [queued, claimed, takeover, phase-complete, recovery-armed, resumed, rollback-requested, cancelled, succeeded, rolled-back, environment-failed, deployment-failed, bootstrap-failed, settings-failed, verification-failed, state-conflict, runtime-unavailable, interrupted]}
+        created_at: {type: string, format: date-time}
+    ConfigurationRevision:
+      type: object
+      properties:
+        id: {type: string}
+        generation: {type: string, pattern: '^[1-9][0-9]*$'}
+        stage: {type: string}
+        username: {type: string}
+        base_settings_version: {type: integer}
+        status: {enum: [pending_application, saved, cancelled]}
+        message: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+    ConfigurationLocalReport:
+      type: object
+      properties:
+        checked_at: {type: string, format: date-time}
+        local_checks_passed: {type: boolean}
+        requires_apply_checks: {const: true}
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              component: {type: string, description: 固定组件标识，不是路径}
+              status: {enum: [passed, failed, not_configured]}
+              reason: {type: string, description: 固定诊断代码，无私有值}
+    ConfigurationSavedReceipt:
+      type: object
+      properties:
+        stage: {type: string}
+        revision: {type: string}
+        generation: {type: string}
+        settings: {$ref: '#/components/schemas/SettingsState'}
+        bootstrap: {type: object, description: 启动配置版本和待应用状态，无配置正文}
+        nodes_changed: {type: integer}
+        requires_center_restart: {type: boolean}
+        status: {const: saved_pending_application}
+        message: {type: string}
+        created_at: {type: string, format: date-time}
+    ConfigurationDeleteItem:
+      type: object
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        record_key: {type: string, pattern: '^configuration-backup:[a-f0-9]{64}$'}
+        status: {enum: [eligible, protected, pending, deleted, skipped, failed]}
+        reason: {type: string}
+    ConfigurationDeletePreview:
+      type: object
+      properties:
+        token: {type: string, pattern: '^[a-f0-9]{64}$'}
+        settings_version: {type: integer}
+        eligible: {type: integer, minimum: 0}
+        protected: {type: integer, minimum: 0}
+        expires_at: {type: string, format: date-time}
+        items: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/ConfigurationDeleteItem'}}
+    ConfigurationDeleteJob:
+      type: object
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        username: {type: string}
+        settings_version: {type: integer}
+        selected: {type: integer, minimum: 1, maximum: 200}
+        status: {enum: [queued, running, succeeded, partial, cancelled]}
+        deleted: {type: integer, minimum: 0}
+        skipped: {type: integer, minimum: 0}
+        failed: {type: integer, minimum: 0}
+        message: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+    ConfigurationBackup:
+      type: object
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        record_key: {type: string}
+        created_at: {type: string, format: date-time}
+        source: {type: string, enum: [manual, before_edit, before_deploy, before_restore, import]}
+        document_created_at: {type: string}
+        settings_version: {type: integer}
+        node_count: {type: integer, minimum: 0, maximum: 20000}
+        needs_completion: {type: boolean, description: 省略字段存在；false 不代表可应用}
+        can_delete: {type: boolean, description: 内部保护状态；当前尚无公开删除入口}
+        delete_reason: {type: string}
+    AuditRecord:
+      type: object
+      required: [id, username, kind, resource, result, created_at, record_key, can_delete, delete_reason]
+      properties:
+        id: {type: string, pattern: '^[1-9][0-9]*$'}
+        username: {type: string}
+        kind: {type: string}
+        resource: {type: string}
+        result: {type: object, description: 经类型筛选的数量、状态及范围摘要，不返回原始任意对象}
+        created_at: {type: string, format: date-time}
+        record_key: {type: string}
+        can_delete: {type: boolean, const: false}
+        delete_reason: {type: string}
+    HistoryScope:
+      type: object
+      additionalProperties: false
+      required: [categories]
+      properties:
+        categories:
+          type: array
+          minItems: 1
+          maxItems: 6
+          uniqueItems: true
+          items: {type: string, enum: [events, security-events, website-incidents, server-alerts, feishu, email]}
+        node: {type: string}
+        before: {type: string, format: date-time, description: 范围默认 30 天前，明确记录默认 24 小时前；不能选最近 24 小时}
+        records: {type: array, minItems: 1, maxItems: 200, uniqueItems: true, items: {type: string}, description: 列表返回的稳定 record_key；省略则范围查询}
+        include_probes: {type: boolean, default: false, description: 不从文件页面的隐藏状态推断清理范围}
+    HistoryPreview:
+      type: object
+      required: [token, scope, settings_version, eligible, protected, expires_at]
+      properties:
+        token: {type: string, pattern: '^[a-f0-9]{64}$', description: 一次性凭据，只在本次响应返回，不放入 URL 或日志}
+        scope: {$ref: '#/components/schemas/HistoryScope'}
+        settings_version: {type: integer}
+        eligible: {type: integer, minimum: 0}
+        protected: {type: integer, minimum: 0}
+        expires_at: {type: string, format: date-time}
+    HistorySubmission:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token: {type: string, pattern: '^[a-f0-9]{64}$'}
+        export_first: {type: boolean, default: false}
+        confirm_without_export: {type: boolean, default: false}
+    HistoryJob:
+      type: object
+      required: [id, username, kind, export_first, settings_version, cutoff, phase, status, scanned, deleted, skipped, dependent_deleted, exported, export_bytes, export_ready, export_expires_at, message, created_at, updated_at, finished_at]
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{64}$'}
+        username: {type: string}
+        kind: {type: string, enum: [export, cleanup]}
+        export_first: {type: boolean}
+        settings_version: {type: integer}
+        cutoff: {type: string, format: date-time}
+        phase: {type: string, enum: [export, cleanup, finished]}
+        status: {type: string, enum: [queued, running, succeeded, partial, cancelled, failed]}
+        scanned: {type: integer, minimum: 0}
+        deleted: {type: integer, minimum: 0}
+        skipped: {type: integer, minimum: 0}
+        dependent_deleted: {type: integer, minimum: 0}
+        exported: {type: integer, minimum: 0}
+        export_bytes: {type: integer, minimum: 0}
+        export_ready: {type: boolean}
+        export_expires_at: {type: [string, 'null'], format: date-time}
+        message: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+    SiteIncidentPage:
+      type: object
+      required: [items, next_cursor, limit]
+      properties:
+        next_cursor: {type: string}
+        limit: {type: integer, minimum: 1, maximum: 200}
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, site, site_name, node, kind, started, ended, reason, record_key, can_delete, delete_reason]
+            properties:
+              id: {type: integer}
+              site: {type: integer}
+              site_name: {type: string}
+              node: {type: string}
+              kind: {type: string}
+              started: {type: integer, description: Unix 秒}
+              ended: {type: [integer, 'null'], description: Unix 秒；未结束为 null}
+              reason: {type: string}
+              record_key: {type: string}
+              can_delete: {type: boolean}
+              delete_reason: {type: string}
+    NotificationRecord:
+      type: object
+      required: [id, node, event_id, channel, recipient, created_at, done_at, attempts, state, next_try, record_key, can_delete, delete_reason]
+      properties:
+        id: {type: string, pattern: '^[1-9][0-9]*$'}
+        node: {type: string}
+        event_id: {type: string}
+        channel: {type: string, enum: [feishu, email]}
+        recipient: {type: string}
+        created_at: {type: string, format: date-time}
+        done_at: {type: [string, 'null'], format: date-time}
+        attempts: {type: integer, minimum: 0}
+        state: {type: string, enum: [completed, migration_pending, paused, sending, waiting, retrying, pending], description: 仅元数据判定；completed 不表示收件人已读}
+        next_try: {type: [string, 'null'], format: date-time, description: 未完成通知的计划发送时间；已完成为 null}
+        record_key: {type: string}
+        can_delete: {type: boolean}
+        delete_reason: {type: string}
+    WebsiteBackupDocument:
+      type: object
+      additionalProperties: false
+      required: [format_version, created_at, websites]
+      properties:
+        format_version: {type: integer, const: 1}
+        created_at: {type: string, format: date-time}
+        websites:
+          type: array
+          maxItems: 100000
+          description: 规范化后网址不能重复。导入最多 2 MiB，中心快照最多 24 MiB。
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, url, node, keyword, slow_alert, paused]
+            properties:
+              name: {type: string, minLength: 1, maxLength: 100}
+              url: {type: string, maxLength: 2048}
+              node: {type: string}
+              keyword: {type: string, maxLength: 200}
+              slow_alert: {type: boolean}
+              paused: {type: boolean}
+    WebsiteBackup:
+      type: object
+      properties:
+        id: {type: string}
+        record_key: {type: string}
+        created_at: {type: string, format: date-time}
+        source: {type: string, enum: [manual, import, before_restore]}
+        count: {type: integer}
+        restored_at: {type: [string, 'null'], format: date-time}
+        result: {type: object}
+        can_delete: {type: boolean}
+        delete_reason: {type: string}
+    WebsiteBackupPreview:
+      type: object
+      properties:
+        added: {type: integer}
+        updated: {type: integer}
+        unchanged: {type: integer}
+        unknown_nodes: {type: array, items: {type: string}}
+        token: {type: string, description: 仅创建预览时返回，不能写入 URL 或日志}
+        before_backup: {type: string, description: 恢复前自动备份标识}
+    RetentionPolicy:
+      type: object
+      additionalProperties: false
+      required: [sqlite_events_days, security_events_days, website_incidents_days, server_alerts_days, delivery_records_days]
+      properties:
+        sqlite_events_days: {type: integer, minimum: 1, maximum: 3650}
+        security_events_days: {type: integer, minimum: 1, maximum: 3650}
+        website_incidents_days: {type: integer, minimum: 1, maximum: 3650}
+        server_alerts_days: {type: integer, minimum: 1, maximum: 3650}
+        delivery_records_days: {type: integer, minimum: 1, maximum: 3650}
+    HealthState:
+      type: object
+      required: [key, node, kind, phase, since, last, recovery, reminder, message, severity]
+      properties:
+        key: {type: string}
+        node: {type: string}
+        kind: {type: string}
+        phase: {type: string, enum: [normal, pending, firing, disabled]}
+        since: {type: integer, format: int64, description: Unix 秒}
+        last: {type: integer, format: int64}
+        recovery: {type: integer}
+        reminder: {type: integer, format: int64}
+        message: {type: string}
+        severity: {type: string}
+    HealthRecord:
+      type: object
+      required: [id, node, kind, phase, time, message, state, record_key, can_delete, delete_reason]
+      properties:
+        id: {type: string}
+        node: {type: string}
+        kind: {type: string}
+        phase: {type: string, enum: [firing, resolved, reminder]}
+        time: {type: integer, format: int64, description: Unix 秒}
+        message: {type: string}
+        state: {$ref: '#/components/schemas/HealthState'}
+        record_key: {type: string}
+        can_delete: {type: boolean}
+        delete_reason: {type: string}
+    DeploymentJob:
+      type: object
+      required: [id, node, username, kind, status, direction, node_version, plan_digest, step, rollback_step, recovery_required, error_code, log_cursor, created_at, updated_at, finished_at]
+      properties:
+        id: {type: string}
+        node: {type: string}
+        username: {type: string}
+        kind: {type: string, enum: [install, upgrade, recover], description: recover 为本地管理员创建的历史恢复任务；公开提交仍不接受该类型}
+        status: {type: string, enum: [queued, running, failed, interrupted, succeeded, rolled_back]}
+        direction: {type: string, enum: [forward, rollback]}
+        node_version: {type: integer}
+        plan_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
+        step: {type: integer, minimum: 0, maximum: 6}
+        rollback_step: {type: integer, minimum: 0, maximum: 2}
+        recovery_required: {type: boolean, description: 进入可能影响旧服务的阶段前持久化为 true}
+        error_code: {type: string}
+        log_cursor: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+    Error:
+      type: object
+      required: [code, message]
+      properties: {code: {type: string}, message: {type: string}}
+    Node:
+      type: object
+      additionalProperties: false
+      required: [id, name, endpoint, server_name, enabled, mode]
+      properties:
+        id: {type: string, pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'}
+        name: {type: string, minLength: 1, maxLength: 256}
+        endpoint: {type: string, description: '主机:19100，不含 URL 协议和路径'}
+        server_name: {type: string, description: TLS 服务端证书 SAN 名称}
+        enabled: {type: boolean}
+        mode: {type: string, enum: [native, docker]}
+        version: {type: integer, readOnly: true}
+        applied_version: {type: integer, readOnly: true}
+        shard: {type: integer, readOnly: true}
+        configuration:
+          type: object
+          readOnly: true
+          description: 保存不改变运行登记；下发成功后更新登记，采集验收通过后才更新 applied_version。旧登记迁移不代表 Agent 已安装。
+          required: [registered_version, delivered_version, runtime_enabled, runtime_mode, runtime_endpoint]
+          properties:
+            registered_version: {type: integer, minimum: 0, description: '0 表示尚未登记'}
+            delivered_version: {type: integer, minimum: 0, description: '0 表示没有可靠下发证据'}
+            runtime_enabled: {type: [boolean, 'null'], description: 'null 表示尚未登记'}
+            runtime_mode: {type: string}
+            runtime_endpoint: {type: string}
+    Event:
+      type: object
+      required: [node, id, received_at, payload, source, record_key, can_delete, delete_reason]
+      properties:
+        node: {type: string}
+        id: {type: string}
+        received_at: {type: string, format: date-time}
+        payload: {type: object, additionalProperties: true}
+        source: {type: string, enum: [events, migrated_events]}
+        record_key: {type: string, description: 来源和原主键组成的稳定记录标识}
+        can_delete: {type: boolean, description: 执行前仍需重新预览并校验保护条件}
+        delete_reason: {type: string}
+    WebsiteInput:
+      type: object
+      additionalProperties: false
+      required: [id, name, url, node, keyword, slow_alert, paused]
+      properties:
+        id: {type: integer, minimum: 0}
+        name: {type: string, minLength: 1, maxLength: 100}
+        url: {type: string, maxLength: 2048, description: 公网 HTTP/HTTPS 地址，禁止凭据及内网地址}
+        node: {type: string}
+        keyword: {type: string, maxLength: 200}
+        slow_alert: {type: boolean}
+        paused: {type: boolean}
+    WebsiteVersion:
+      type: object
+      additionalProperties: false
+      required: [id, version]
+      properties:
+        id: {type: integer, minimum: 1}
+        version: {type: integer, minimum: 1}

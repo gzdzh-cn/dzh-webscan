@@ -1,0 +1,6 @@
+# Local test fixture only. No freshclam service, public ports or production data.
+ARG SCANNER_IMAGE=docker.io/gzdzh/webscan-agent@sha256:0b47dd5c6c5fa84cdb9b30c6ecd8998ff1c81f05dd106cba4be3b6c0e4a8c078
+FROM --platform=linux/amd64 ${SCANNER_IMAGE}
+RUN apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=30 install -y --no-install-recommends clamav-daemon=1.4.3+dfsg-1~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*

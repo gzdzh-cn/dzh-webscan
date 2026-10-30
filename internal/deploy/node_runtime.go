@@ -29,12 +29,12 @@ func ResolveNodeMode(n, state common.Map) string {
 	if common.Contains(common.SS(state["active"]), common.S(n["id"])) {
 		return "docker"
 	}
-	return "native"
+	return "docker"
 }
 func nodeMode(n common.Map) string {
 	m := common.S(common.M(n["deployment"])["mode"])
 	if m == "" {
-		return "native"
+		return "docker"
 	}
 	return m
 }
@@ -148,7 +148,14 @@ func (d *Deploy) prepareUnifiedNode(ctx context.Context, n common.Map) error {
 	}
 	state["native_dir"], state["native_sha256"] = target, common.Hash(raw)
 	if nodeMode(n) == "docker" {
-		if pulled, err := RemotePull(ctx, r, d.C, image); err == nil {
+		if d.O.Resume {
+			progress.Info(ctx, "继续原任务：优先核对已传输镜像，缺失时使用已校验的 SSH 归档")
+			ref, err := d.TransferImage(ctx, r, image)
+			if err != nil {
+				return err
+			}
+			state["go_image"] = ref
+		} else if pulled, err := RemotePull(ctx, r, d.C, image); err == nil {
 			state["go_image"] = pulled
 		} else {
 			ref, err := d.TransferImage(ctx, r, image)

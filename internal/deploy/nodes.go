@@ -96,9 +96,15 @@ func (d *Deploy) TransferImage(ctx context.Context, r *Remote, image string) (st
 	if _, e = d.Docker.Exec(ctx, nil, "image", "save", "--output", path, image); e != nil {
 		return "", e
 	}
-	config, e := archiveConfig(path)
+	identities, e := archiveImageIdentities(path)
 	if e != nil {
 		return "", e
+	}
+	if d.O.Resume {
+		if ref := inspectArchiveImage(ctx, r, image, identities); ref != "" {
+			progress.Info(ctx, "节点已缓存与本次归档摘要一致的镜像，继续原任务，无需重新传输")
+			return ref, nil
+		}
 	}
 	f, e := os.Open(path)
 	if e != nil {
@@ -112,37 +118,48 @@ func (d *Deploy) TransferImage(ctx context.Context, r *Remote, image string) (st
 	checksum := hash.Sum()
 	f.Seek(0, 0)
 	target := "/tmp/webscan-image-" + common.ID() + ".tar"
-	command := "set -eu; umask 077; trap " + Q("rm -f -- "+Q(target)) + " EXIT; cat > " + Q(target) + "; test \"$(sha256sum " + Q(target) + " | cut -d ' ' -f1)\" = " + Q(checksum) + "; docker load --input " + Q(target) + " >/dev/null; docker image inspect " + Q(image)
+	command := "set -eu; umask 077; trap " + Q("rm -f -- "+Q(target)) + " EXIT; cat > " + Q(target) + "; test \"$(sha256sum " + Q(target) + " | cut -d ' ' -f1)\" = " + Q(checksum) + "; docker load --input " + Q(target)
 	info, _ := f.Stat()
 	reader := io.Reader(f)
 	if info != nil {
 		reader = progress.Reader(ctx, f, info.Size(), "SSH 镜像传输")
 	}
-	b, e := r.Exec(ctx, command, reader)
-	if e == nil {
+	if _, e = r.ExecVisible(ctx, command, reader, "镜像导入"); e != nil {
+		return "", errors.New("image_archive_load_failed")
+	}
+	if ref := inspectArchiveImage(ctx, r, image, identities); ref != "" {
+		return ref, nil
+	}
+	return "", errors.New("loaded_image_identity_not_verified")
+}
+
+func inspectArchiveImage(ctx context.Context, r *Remote, image string, identities []string) string {
+	// Some containerd image stores identify an untagged OCI import by its
+	// manifest digest instead of the config digest. Both must come from the
+	// checked archive; never trust an arbitrary ID printed by docker load.
+	for _, ref := range append([]string{image}, identities...) {
+		b, err := r.Run(ctx, "docker image inspect "+Q(ref))
+		if err != nil {
+			continue
+		}
 		v, err := common.Decode(b)
-		if err == nil {
-			for _, item := range common.A(v) {
-				info := common.M(item)
-				if common.Contains(common.SS(info["RepoDigests"]), image) {
-					return image, nil
-				}
-			}
+		items := common.A(v)
+		if err != nil || len(items) != 1 {
+			continue
+		}
+		info := common.M(items[0])
+		id := common.S(info["Id"])
+		if !common.Contains(identities, id) {
+			continue
+		}
+		if ref == image && common.Contains(common.SS(info["RepoDigests"]), image) {
+			return image
+		}
+		if ref == id {
+			return id
 		}
 	}
-	b, e = r.Run(ctx, "docker image inspect "+Q(config))
-	if e != nil {
-		return "", errors.New("loaded_image_identity_not_verified")
-	}
-	v, e := common.Decode(b)
-	if e != nil {
-		return "", e
-	}
-	items := common.A(v)
-	if len(items) != 1 || common.S(common.M(items[0])["Id"]) != config {
-		return "", errors.New("loaded_image_config_digest_mismatch")
-	}
-	return config, nil
+	return ""
 }
 func (d *Deploy) PrepareNode(ctx context.Context, n common.Map) error {
 	return d.prepareUnifiedNode(ctx, n)

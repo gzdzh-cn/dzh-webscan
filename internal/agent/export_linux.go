@@ -21,7 +21,7 @@ func (a *Agent) export(ctx context.Context) {
 	delay := 2 * time.Second
 	for ctx.Err() == nil {
 		err := a.Export(ctx)
-		if a.direct() {
+		if a.direct() && a.Pull == nil {
 			reason := ""
 			if err != nil {
 				reason = common.SecretFree(err)
@@ -68,6 +68,14 @@ func (a *Agent) logBytes() (int64, error) {
 	return total, nil
 }
 func (a *Agent) Export(ctx context.Context) error {
+	if a.Pull != nil {
+		// A pull node never races the legacy push worker for confirmations.
+		if e := a.Prune(); e != nil {
+			return e
+		}
+		_, e := a.DB.ExecContext(ctx, "DELETE FROM events WHERE accepted IS NOT NULL AND accepted<? AND exported IS NULL", common.Now()-float64(max(1, common.I(a.C["retention_days"]))*86400))
+		return e
+	}
 	if a.direct() {
 		return a.DirectExport(ctx)
 	}
@@ -306,7 +314,11 @@ func (a *Agent) Metrics(ctx context.Context) error {
 			return e
 		}
 		heartbeat := 0.
-		a.DB.QueryRow("SELECT value FROM counters WHERE key='export_heartbeat_seconds'").Scan(&heartbeat)
+		if a.Pull != nil {
+			a.DB.QueryRow("SELECT updated FROM delivery_status WHERE id=1").Scan(&heartbeat)
+		} else {
+			a.DB.QueryRow("SELECT value FROM counters WHERE key='export_heartbeat_seconds'").Scan(&heartbeat)
+		}
 		up := 0
 		if common.Now()-heartbeat < 90 {
 			up = 1
@@ -333,7 +345,17 @@ func (a *Agent) Metrics(ctx context.Context) error {
 			out.WriteString("webscan_vector_metrics_up 0\n")
 		}
 	}
-	return common.Atomic(common.S(a.C["metrics_file"]), []byte(out.String()), 0644)
+	if a.Pull != nil {
+		out.WriteString(a.readinessMetrics())
+	}
+	raw := []byte(out.String())
+	if e := common.Atomic(common.S(a.C["metrics_file"]), raw, 0644); e != nil {
+		return e
+	}
+	if a.Pull != nil {
+		return a.Pull.RecordMetrics(ctx, time.Now(), raw)
+	}
+	return nil
 }
 func VectorMetrics(text string) string {
 	var out strings.Builder

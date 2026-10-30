@@ -1,0 +1,62 @@
+# 独立验证入口使用；不是 v2 webscan.yaml 的替换文件。
+# 不含生产地址或凭据。请勿用它运行现有生产安装/升级流程。
+config_version: 3
+central:
+  topology: single
+  instance_id: central-1
+  listen: 127.0.0.1:19444
+  public_url: https://monitor.example.test
+  cert_file: ""
+  key_file: ""
+  # 仅信任实际 HTTPS 反代的直连地址；代理必须覆盖 X-Forwarded-Proto。
+  # trusted_proxies: [127.0.0.1, "::1"]
+  # HA 部署须由所有 API／清理实例共享此受控目录。
+  exports_directory: /var/lib/webscan-v3/exports
+database:
+  # 文件内容为 PostgreSQL DSN；0600，属于服务运行账号。
+  dsn_file: /etc/webscan-v3/postgres.dsn
+  max_connections: 20
+metrics:
+  write_url: http://127.0.0.1:8428
+  query_url: http://127.0.0.1:8428
+collector:
+  ca_file: /etc/webscan-v3/pki/ca.crt
+  cert_file: /etc/webscan-v3/pki/collector.crt
+  key_file: /etc/webscan-v3/pki/collector.key
+  # 完成独立证书／签名吊销列表分发后启用；见 docs/V3-PKI.md。
+  # revocation_file: /etc/webscan-v3/pki/ca.crl
+  # 启用吊销校验时同时设置；现有父目录须为服务账号所有、0700。
+  # revocation_state_directory: /var/lib/webscan-v3/collector-trust
+  shards: 256
+  concurrency: 128
+  interval_seconds: 30
+
+# 离线工具先初始化并独立分发资料后，再显式配置；不会自动启用安装器。
+# 检查命令：control-v3 --action check-deployment-trust
+# 发布签名私钥留在独立发布端，绝不能放入此配置或下发到中心／节点。
+# deployment_trust:
+#   vault_key_file: /etc/webscan-v3/vault/current/vault.key
+#   previous_vault_key_files: []
+#   release_public_key_file: /etc/webscan-v3/trust/signing.pub
+#   release_manifest_file: /opt/webscan-v3/release/release.json
+#   release_signature_file: /opt/webscan-v3/release/release.sig
+#   helper_file: /opt/webscan-v3/artifacts/webscan
+#   native_bundle_file: /opt/webscan-v3/artifacts/agent-native.tar.gz
+#   image_archive_file: /opt/webscan-v3/artifacts/agent-image.tar
+
+# 内部执行器显式启用后由 all 或 executor 角色启动；默认关闭。
+# 配置包目录须已存在、属于服务账号、0700，使用 <SHA256>/node.json。
+# HA 执行器须能访问同一批不可变配置包；网页流程见 docs/V3-WEB-DEPLOYMENT.md。
+# executor:
+#   enabled: true
+#   mode: embedded # API 容器设 external；省略保持旧行为
+#   rules_file: /opt/webscan-v3/release/rules.yar # 仅宿主需要
+#   applications_enabled: false # 实验性配置应用工作器及管理员 HTTPS 提交／控制；默认关闭
+#   concurrency: 4
+#   configuration_directory: /var/lib/webscan-v3/node-configurations
+
+# 显式启用受管理节点签发；CA 必须预先创建并与 collector 的 CA／CRL 一致。
+# 只有受控签发进程需要 ca.key；不下发到采集器或子控，不自动换根。
+# node_pki:
+#   enabled: true
+#   authority_directory: /etc/webscan-v3/authority

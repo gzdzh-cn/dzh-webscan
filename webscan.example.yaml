@@ -193,8 +193,8 @@ optional_components:
 # 全部子服务器默认配置；nodes 下的同名字段覆盖这里。
 # 映射字段合并，列表整体替换；单节点自定义忽略列表时需保留所需公共规则。
 node_defaults:
-  # 新节点默认免 Docker；已有节点未指定方式时沿用部署记录。
-  deployment: {mode: native}
+  # 新节点默认 Docker；已有节点未指定方式时沿用部署记录，native 可选。
+  deployment: {mode: docker}
   # Go 版新增的 Agent 容器资源设置；修改后用 --upgrade 应用。
   resources:
     # Agent 容器硬内存上限，单位 MiB，含 Go、YARA 子进程、缓存及监听开销。
