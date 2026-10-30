@@ -89,6 +89,10 @@ func (s *Store) NotificationHistory(ctx context.Context, channel, node, state st
 }
 
 func (a *API) notificationHistoryRoutes(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path == "/api/v3/notifications/stats" {
+		a.consoleNotificationStats(w, r)
+		return true
+	}
 	if r.URL.Path != "/api/v3/notifications" {
 		return false
 	}

@@ -39,7 +39,7 @@ func (a *API) serverDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var status json.RawMessage
-	err = tx.QueryRowContext(ctx, `SELECT jsonb_build_object('sampled_at',sampled_at,'updated_at',updated_at,'error',error,'metrics_error',metrics_error,'events_error',events_error,'protocol_error',protocol_error,'metrics',jsonb_build_object('cpu_percent',metrics->'cpu_percent','memory_percent',metrics->'memory_percent','disk_percent',metrics->'disk_percent','uptime',metrics->'uptime'),'info',jsonb_build_object('hostname',info->'nodename','kernel',info->'release','architecture',info->'machine','agent_version',info->'agent_version','agent_mode',info->'agent_mode')) FROM v3_node_status WHERE node=$1`, id).Scan(&status)
+	err = tx.QueryRowContext(ctx, "SELECT COALESCE("+consoleStatusSQL+",'null'::jsonb) FROM "+managedNodeRelations+" LEFT JOIN v3_node_status s ON s.node=n.id WHERE n.id=$1", id).Scan(&status)
 	if err != nil && err != sql.ErrNoRows {
 		failure(w, 503, "query_failed", "服务器采集状态暂时不可用")
 		return

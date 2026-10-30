@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import type { EChartsOption } from 'echarts'
+import { Monitor, Cpu, Document, FirstAidKit, Connection, Link, Coin, Bell, Message, Setting, Warning, FolderOpened, List, CircleCheck, CircleClose, QuestionFilled, Remove } from '@element-plus/icons-vue'
+import { rankingOption } from '../charts'
+import PageHeading from './PageHeading.vue'
 import type { V3Dashboard } from '../controlV3'
 import MetricChart from '../MetricChart.vue'
 import { useConsole, timeText } from './context'
@@ -27,32 +29,52 @@ const summaries = computed(() => {
   const s = sections.value
   const notifications = s?.notifications?.data
   return [
-    { title: '服务器采集', value: s?.servers?.data ? `${s.servers.data.fresh} / ${s.servers.data.enabled}` : '—', detail: '正常 / 启用', section: s?.servers, to: '/servers' },
-    { title: '网站状态', value: s?.websites?.data ? `${s.websites.data.normal} / ${s.websites.data.total}` : '—', detail: `正常 / 全部 · 暂停 ${number(s?.websites?.data?.paused)}`, section: s?.websites, to: '/websites' },
+    { title: '服务器采集', value: s?.servers?.data ? `${s.servers.data.fresh} 正常 / ${s.servers.data.abnormal} 异常` : '—', detail: s?.servers?.data ? `共 ${s.servers.data.servers} 台，未知 ${s.servers.data.unknown} 台` : '尚无采集汇总', section: s?.servers, to: '/servers' },
+    { title: '网站状态', value: s?.websites?.data ? `${s.websites.data.normal} 正常 / ${s.websites.data.down} 异常` : '—', detail: `共 ${number(s?.websites?.data?.total)} 个，暂停 ${number(s?.websites?.data?.paused)} 个，待检查 ${number(s?.websites?.data?.pending)} 个`, section: s?.websites, to: '/websites' },
     { title: '当前异常', value: number(s?.alerts?.data?.total), detail: '服务器与网站', section: s?.alerts, to: '/alerts' },
-    { title: '24 小时文件／安全事件', value: number(s?.events?.data?.total), detail: `安全命中 ${number(s?.events?.data?.security)} · 排除探针`, section: s?.events, to: '/events' },
-    { title: '双通道待投递', value: notifications ? String(notifications.feishu.pending + notifications.email.pending) : '—', detail: notifications ? `飞书 ${notifications.feishu.pending} · 邮箱 ${notifications.email.pending}` : '飞书与邮箱独立统计', section: s?.notifications, to: '/alerts?tab=feishu' },
-    { title: '部署任务', value: number(s?.deployments?.data?.running), detail: `待恢复 ${number(s?.deployments?.data?.recovery_required)}`, section: s?.deployments, to: '/deployments' },
+    { title: '文件与安全事件 · 24 小时', value: number(s?.events?.data?.total), detail: `安全命中 ${number(s?.events?.data?.security)} · 排除探针`, section: s?.events, to: '/events' },
+    { title: '待投递通知', value: notifications ? `飞书 ${notifications.feishu.pending} / 邮箱 ${notifications.email.pending}` : '—', detail: '暂停、重试任务继续保留', section: s?.notifications, to: '/alerts?tab=feishu' },
+    { title: '部署任务', value: !s?.deployments?.data ? '未知' : s.deployments.data.running ? '执行中' : '空闲', detail: `待恢复 ${number(s?.deployments?.data?.recovery_required)}`, section: s?.deployments, to: '/deployments' },
   ]
 })
-const charts = computed(() => (['cpu_percent', 'memory_percent', 'disk_percent'] as const).map((metric, index) => {
-  const rows = sections.value?.resources?.data?.rankings[metric] || []
-  const option: EChartsOption = { grid: { left: 100, right: 35, top: 15, bottom: 25 }, tooltip: { trigger: 'axis' }, xAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } }, yAxis: { type: 'category', inverse: true, data: rows.map(row => row.name), axisLabel: { width: 85, overflow: 'truncate' } }, series: [{ type: 'bar', data: rows.map(row => row.value), itemStyle: { color: ['#168a80', '#437fa8', '#8c77ab'][index], borderRadius: [0, 3, 3, 0] }, barMaxWidth: 18 }] }
-  return { title: `${['CPU', '内存', '磁盘'][index]} 使用率前 10`, option, known: rows.length > 0 }
-}))
+const icons = { central: Monitor, metrics: Cpu, files: Document, scans: FirstAidKit, delivery: Connection, websites: Link, database: Coin, feishu: Bell, email: Message, host: Setting, watchdog: Warning, cleanup: FolderOpened, deployments: List }
+const charts = computed(() => (['cpu_percent', 'memory_percent', 'disk_percent'] as const).map((metric, index) => ({
+  title: ['CPU 使用率排名', '内存使用率排名', '磁盘使用率排名'][index]!,
+  option: rankingOption((sections.value?.resources?.data?.rankings[metric] || []).map(row => ({ name: row.name, status: 'normal', snapshot: { ok: true, values: { [metric]: row.value } } })), metric),
+})))
+const statusClass = (status: string) => ({ '正常': 'normal', '异常': 'abnormal', '维护中': 'maintenance' }[status] || 'unknown')
+function componentMetrics(key: string): [string, string][] {
+  const s = sections.value
+  switch (key) {
+    case 'central': return [['当前版本', value.value?.version || '未知'], ['采集方式', '主控主动采集']]
+    case 'metrics': return [['正常节点', number(s?.servers?.data?.fresh)], ['异常 / 未知', `${number(s?.servers?.data?.abnormal)} / ${number(s?.servers?.data?.unknown)}`]]
+    case 'files': return [['待确认事件', number(s?.monitoring?.data?.pending_events)], ['最长等待', s?.monitoring?.data?.oldest_wait_seconds == null ? '未知' : `${s.monitoring.data.oldest_wait_seconds} 秒`]]
+    case 'scans': return [['YARA / ClamAV', `${number(s?.monitoring?.data?.yara_nodes)} / ${number(s?.monitoring?.data?.clamav_nodes)}`], ['待扫描', number(s?.monitoring?.data?.pending_scans)]]
+    case 'websites': return [['网站总数', number(s?.websites?.data?.total)], ['等待检查', number(s?.websites?.data?.due)]]
+    case 'database': return [['业务数据库', 'PostgreSQL'], ['业务表与索引', s?.services?.data ? `${(s.services.data.database_bytes / 1048576).toFixed(2)} MiB` : '未知']]
+    case 'feishu': case 'email': { const d = s?.notifications?.data?.[key]; return [['通道配置', !d ? '未知' : d.enabled ? '开启' : '关闭'], ['待投递 / 重试', `${number(d?.pending)} / ${number(d?.retrying)}`]] }
+    case 'deployments': return [['正在执行', number(s?.deployments?.data?.running)], ['需要恢复', number(s?.deployments?.data?.recovery_required)]]
+    default: return []
+  }
+}
 </script>
 
 <template>
   <section class="v3-dashboard">
-    <div class="v3-page-heading"><div><h1>运行概况</h1><p class="v3-muted">{{ value?.version || '版本未知' }} · 最近更新 {{ timeText(value?.updated_at) }} · 每 30 秒刷新</p></div><el-button :loading="read.loading.value" @click="refresh">刷新</el-button></div>
+    <PageHeading title="监控总览" />
+    <div class="dashboard-heading"><div><el-tag>{{ value?.version || '版本未知' }}</el-tag><p class="muted">{{ value?.updated_at ? `最近更新：${timeText(value.updated_at)}` : '等待加载' }} · 页面每 30 秒刷新，后台标签暂停</p></div><el-button :loading="read.loading.value" @click="refresh">立即刷新</el-button></div>
     <el-alert v-if="read.error.value" :title="`${read.error.value}；保留上次数据，等待重试`" type="error" :closable="false" />
     <el-alert v-else-if="value?.stale || value?.error" title="汇总已过期或生成异常；以下为上次观测数据" type="warning" :closable="false" />
-    <div class="v3-dashboard-summary"><router-link v-for="item in summaries" :key="item.title" :to="item.to" class="v3-summary-card"><span>{{ item.title }}</span><strong>{{ item.value }}</strong><small>{{ item.detail }}</small><small v-if="item.section?.error" class="v3-expired">分区读取失败 · 上次 {{ timeText(item.section.updated_at) }}</small></router-link></div>
-    <el-card shadow="never"><div class="v3-section-heading"><h2>当前异常</h2><router-link to="/alerts">查看全部</router-link></div><p v-if="sections?.alerts?.error" class="v3-expired">{{ sections.alerts.error }} · 上次 {{ timeText(sections.alerts.updated_at) }}</p><p v-if="!sections?.alerts?.data" class="v3-muted">{{ read.loading.value ? '正在读取异常…' : '当前异常未知，尚无可用结果' }}</p><p v-else-if="sections.alerts.data.items.length === 0" class="v3-muted">{{ sections.alerts.error || value?.stale || read.error.value ? '上次观测没有异常，当前状态待确认' : '当前没有异常' }}</p><ul v-else class="v3-dashboard-alerts"><li v-for="item in sections.alerts.data.items" :key="`${item.source}:${item.id}`"><span class="v3-alert-dot">!</span><div><router-link :to="item.source === 'website' ? `/websites/${item.website}` : `/servers/${encodeURIComponent(item.node)}`">{{ item.name }}</router-link><small>{{ item.source === 'website' ? '网站状态异常' : `服务器 ${item.kind} 异常` }}</small></div><time>{{ timeText(item.since) }}</time></li></ul></el-card>
-    <div class="v3-section-heading"><h2>组件总览</h2><span class="v3-muted">缺少证据时显示未知</span></div>
-    <div class="v3-component-grid"><el-card v-for="card in components" :key="card.key" shadow="never"><div class="v3-component-heading"><h3>{{ card.title }}</h3><span :class="['v3-component-status', { good: card.status === '正常', bad: card.status === '异常' }]">{{ card.status === '正常' ? '✓' : card.status === '异常' ? '!' : '—' }} {{ card.status }}</span></div><p>{{ card.reason }}</p><footer><time>{{ timeText(card.at) }}</time><router-link :to="card.to">查看</router-link></footer></el-card></div>
+    <div class="stats dashboard-stats"><router-link v-for="item in summaries" :key="item.title" :to="item.to" class="v3-summary-card"><el-card shadow="never"><span class="muted">{{ item.title }}</span><strong>{{ item.value }}</strong><small>{{ item.detail }}</small><small v-if="item.section?.error" class="v3-expired">分区读取失败 · 上次 {{ timeText(item.section.updated_at) }}</small></el-card></router-link></div>
+    <el-card shadow="never"><div class="card-heading"><h3>当前异常</h3><router-link to="/alerts">查看全部 →</router-link></div><el-alert v-if="sections?.alerts?.error" :title="`${sections.alerts.error} · 上次 ${timeText(sections.alerts.updated_at)}`" type="warning" :closable="false" />
+      <el-table :data="sections?.alerts?.data?.items || []" :empty-text="!sections?.alerts?.data ? read.loading.value ? '正在读取异常…' : '当前异常未知，尚无可用结果' : sections.alerts.error || value?.stale || read.error.value ? '上次观测没有异常，当前状态待确认' : '当前没有异常'">
+        <el-table-column label="服务器 / 网站" min-width="170"><template #default="{ row }"><router-link :to="row.source === 'website' ? `/websites/${row.website}` : `/servers/${encodeURIComponent(row.node)}`">{{ row.name }}</router-link></template></el-table-column>
+        <el-table-column label="原因" min-width="260"><template #default="{ row }">{{ row.message || (row.source === 'website' ? '网站状态异常' : `${row.kind} 异常`) }}</template></el-table-column><el-table-column label="状态"><template #default>异常中</template></el-table-column><el-table-column label="开始时间" min-width="190"><template #default="{ row }">{{ timeText(row.since) }}</template></el-table-column>
+      </el-table>
+    </el-card>
+    <section class="component-section"><div class="card-heading"><h3>组件总览</h3><router-link to="/servers/central?tab=system">中心健康详情 →</router-link></div><div class="component-grid"><el-card v-for="card in components" :key="card.key" shadow="never" :class="['component-card', `component-${statusClass(card.status)}`]"><div class="component-heading v3-component-heading"><el-icon :size="22"><component :is="icons[card.key as keyof typeof icons] || QuestionFilled" /></el-icon><h4>{{ card.title }}</h4><el-tag :type="card.status === '正常' ? 'success' : card.status === '异常' ? 'danger' : card.status === '维护中' ? 'warning' : 'info'"><el-icon><component :is="card.status === '正常' ? CircleCheck : card.status === '异常' ? CircleClose : card.status === '已停用' ? Remove : QuestionFilled" /></el-icon> {{ card.status }}</el-tag></div><dl><template v-for="[label, text] in componentMetrics(card.key)" :key="label"><dt>{{ label }}</dt><dd>{{ text }}</dd></template></dl><p class="muted">{{ card.reason }}</p><footer><small>{{ timeText(card.at) }}</small><router-link :to="card.to">查看详情 →</router-link></footer></el-card></div></section>
     <p v-if="sections?.resources?.error" class="v3-expired">资源 {{ sections.resources.error }} · 上次 {{ timeText(sections.resources.updated_at) }}</p>
-    <div class="v3-ranking-grid"><div v-for="chart in charts" :key="chart.title"><MetricChart v-if="chart.known" :title="chart.title" :option="chart.option" /><el-card v-else shadow="never"><h2>{{ chart.title }}</h2><p class="v3-muted">暂无有效的新鲜采样</p></el-card></div></div>
-    <el-card shadow="never"><div class="v3-section-heading"><h2>服务器资源</h2><router-link to="/servers">管理全部服务器</router-link></div><p class="v3-muted">按编号展示前 20 台启用服务器；排名从全部有效采样计算。缺失数据为 —。</p><el-table :data="sections?.resources?.data?.items || []" empty-text="尚无服务器采集数据"><el-table-column label="服务器" min-width="160"><template #default="{ row }"><router-link :to="`/servers/${encodeURIComponent(row.id)}`">{{ row.name }}</router-link></template></el-table-column><el-table-column label="运行方式" min-width="110"><template #default="{ row }">{{ row.actual_mode || '未知' }}<small class="v3-muted v3-block">配置 {{ row.mode }}</small></template></el-table-column><el-table-column prop="agent_version" label="Agent 版本" min-width="130"><template #default="{ row }">{{ row.agent_version || '—' }}</template></el-table-column><el-table-column label="CPU" min-width="90"><template #default="{ row }">{{ percent(row.cpu_percent) }}</template></el-table-column><el-table-column label="内存" min-width="90"><template #default="{ row }">{{ percent(row.memory_percent) }}</template></el-table-column><el-table-column label="磁盘" min-width="90"><template #default="{ row }">{{ percent(row.disk_percent) }}</template></el-table-column><el-table-column label="采集时间" min-width="170"><template #default="{ row }">{{ timeText(row.sampled_at) }}<small v-if="row.has_error" class="v3-expired v3-block">采集异常</small></template></el-table-column></el-table></el-card>
+    <div class="chart-grid ranking-grid"><MetricChart v-for="chart in charts" :key="chart.title" :title="chart.title" :option="chart.option" /></div>
+    <el-card shadow="never"><div class="card-heading"><h3>服务器资源</h3><router-link to="/servers">管理服务器 →</router-link></div><el-table :data="sections?.resources?.data?.items || []" empty-text="尚无服务器采集数据"><el-table-column label="服务器" min-width="160"><template #default="{ row }"><router-link :to="`/servers/${encodeURIComponent(row.id)}`">{{ row.name }}</router-link></template></el-table-column><el-table-column label="采集状态" min-width="100"><template #default="{ row }">{{ row.has_error ? '采集异常' : row.sampled_at ? '已采集' : '未知' }}</template></el-table-column><el-table-column v-for="[metric, label] in [['cpu_percent','CPU'], ['memory_percent','内存'], ['disk_percent','磁盘']]" :key="metric" :label="label" min-width="90"><template #default="{ row }">{{ percent(row[metric!]) }}</template></el-table-column><el-table-column label="运行方式" min-width="110"><template #default="{ row }">{{ row.actual_mode === 'docker' ? 'Docker 容器' : row.actual_mode === 'native' ? '直接运行 Go' : '未知' }}</template></el-table-column><el-table-column label="Agent / 中心版本" min-width="140"><template #default="{ row }">{{ row.agent_version || '未知' }}</template></el-table-column><el-table-column label="最近采集" min-width="190"><template #default="{ row }">{{ timeText(row.sampled_at) }}</template></el-table-column></el-table></el-card>
   </section>
 </template>

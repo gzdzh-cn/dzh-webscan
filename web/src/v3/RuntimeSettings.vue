@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, toRaw } from 'vue'
+import { computed, onUnmounted, reactive, ref, toRaw, watch } from 'vue'
 import { V3Error, type V3SettingsEdit, type V3SettingsField, type V3SettingsPreview, type V3SettingsRequest, type V3SettingsView } from '../controlV3'
 import { timeText, useConsole } from './context'
 import { useReadScope } from './readScope'
+const props = defineProps<{group?: string}>()
 const { client, session } = useConsole(), read = useReadScope()
 const view = ref<V3SettingsView>(), draft = reactive<Record<string, string>>({})
 const secrets = reactive<Record<string, { action: 'keep' | 'replace' | 'clear'; value: string }>>({})
@@ -84,6 +85,8 @@ function closePreview() { if (busy.value) return; invalidate(); clearSecrets() }
 function runtimeDiff(f: V3SettingsField) { return text(view.value?.values[f.path]) !== text(view.value?.runtime_values[f.path]) }
 clearSecrets(); void load()
 onUnmounted(() => { disposed = true; generation++; invalidate(); clearSecrets() })
+watch(() => props.group, () => { generation++; busy.value = false; clearSecrets(); invalidate(); error.value = ''; message.value = '' })
+
 </script>
 
 <template>
@@ -91,14 +94,15 @@ onUnmounted(() => { disposed = true; generation++; invalidate(); clearSecrets() 
   <template v-else>
     <el-alert v-if="read.error.value" :title="`${read.error.value}；已有输入保留`" type="error" :closable="false" />
     <el-card shadow="never">
-      <div class="v3-job-heading"><h2>运行设置</h2><el-button :disabled="busy" :loading="read.loading.value" @click="reload">重新读取运行设置</el-button></div>
+      <div class="card-heading v3-job-heading"><h2>运行设置</h2><el-button :disabled="busy" :loading="read.loading.value" @click="reload">重新读取运行设置</el-button></div>
       <p class="v3-muted">先预览并保存，再明确应用。未设置的字段沿用运行默认；此处间隔不修改主控指标采集周期。凭据不回显。</p>
       <p v-if="!view">{{ read.loading.value ? '正在读取设置…' : '运行设置尚未读取成功' }}</p>
       <template v-else>
+        <template v-if="props.group === 'monitoring'"><h3>公共文件监控</h3><p class="small muted">当前 v3 设置接口未提供公共文件规则；以下项目只读显示，节点仍使用已保存配置包中的规则。</p><el-form label-position="top" class="form-grid v3-form-grid"><el-form-item v-for="label in ['公共监控根目录','监控文件后缀','重要文件名','必须监控的文件','忽略路径','清单核对间隔（小时）']" :key="label" :label="label"><el-input :type="label.includes('间隔') ? 'text' : 'textarea'" :rows="3" placeholder="未提供" disabled /></el-form-item></el-form></template>
         <p>运行版本 {{ view.state.runtime_version }} · 保存版本 {{ view.state.generation }} · {{ view.state.pending ? '已保存，待应用' : '已应用' }} · {{ timeText(view.state.updated_at) }}</p>
-        <details v-for="group in groups" :key="group.id" class="runtime-group" :open="group.id === 'website_monitor'">
-          <summary>{{ group.label }}</summary>
-          <el-form label-position="top" class="v3-form-grid" @submit.prevent="prepare('save')">
+        <component :is="props.group ? 'section' : 'details'" v-for="group in groups.filter(item => !props.group || props.group === item.id)" :key="group.id" class="runtime-group" :open="props.group ? undefined : group.id === 'website_monitor'">
+          <h3 v-if="props.group">{{ group.label }}</h3><summary v-else>{{ group.label }}</summary>
+          <el-form label-position="top" class="form-grid v3-form-grid" @submit.prevent="prepare('save')">
             <el-form-item v-for="field in fields(group.id)" :key="field.path" :label="field.label">
               <select v-if="field.kind === 'bool' || field.kind === 'choice'" v-model="draft[field.path]" :aria-label="field.label" :disabled="busy || read.loading.value" @change="edited">
                 <option value="" :disabled="view.values[field.path] !== undefined">未设置（沿用运行默认）</option>
@@ -116,7 +120,7 @@ onUnmounted(() => { disposed = true; generation++; invalidate(); clearSecrets() 
               </el-form-item>
             </template>
           </el-form>
-        </details>
+        </component>
         <div class="v3-save-feedback" role="status" aria-live="polite"><el-alert v-if="error" :title="error" type="error" :closable="false" /><el-alert v-else-if="message" :title="message" type="success" :closable="false" /><p v-else>{{ busy ? '正在校验、备份并处理设置…' : dirty ? '有未保存修改，请预览后保存。' : view.state.pending ? '已保存配置尚未应用；应用前将再次预览。' : '配置与运行状态一致。' }}</p></div>
         <div class="runtime-actions"><el-button type="primary" :loading="busy" :disabled="!dirty || read.loading.value" @click="prepare('save')">预览并保存设置</el-button><el-button :disabled="!view.state.pending || dirty || busy || read.loading.value" @click="prepare('apply')">预览应用已保存设置</el-button></div>
       </template>

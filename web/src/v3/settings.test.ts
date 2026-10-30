@@ -24,7 +24,7 @@ function fixture() {
   vi.spyOn(client, 'servers').mockResolvedValue({ items: [], next_cursor: '', limit: 50 }); return { client, ...reads }
 }
 async function mount(component: Component, client = fixture().client, role: 'admin' | 'operator' | 'viewer' = 'admin', props = {}) {
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: Settings }] }); await router.push('/settings'); await router.isReady()
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: Settings }] }); await router.push('/settings?tab=retention'); await router.isReady()
   host = document.createElement('div'); document.body.append(host); app = createApp(component, props); app.use(router); installElements(app); app.provide(consoleContext, { client, session: ref({ username: 'admin', role, csrf: 'csrf' }) }); app.mount(host); await settle(); return router
 }
 function button(text: string, root: ParentNode = host) { const value = Array.from(root.querySelectorAll('button')).find(value => value.textContent?.trim() === text); if (!value) throw new Error(`button missing: ${text}`); return value }
@@ -33,7 +33,7 @@ beforeEach(() => { vi.useFakeTimers(); Object.defineProperty(document, 'hidden',
 afterEach(() => { app?.unmount(); app = undefined; host?.remove(); document.querySelectorAll('.el-overlay').forEach(value => value.remove()); cancelReadRequests(true); vi.useRealTimers(); vi.restoreAllMocks() })
 
 it('shows five periods and unknown evidence, with no single or batch deletion in settings', async () => {
-  await mount(Settings); expect(host.querySelectorAll('input').length).toBe(5); expect(host.textContent).toContain('未知，尚无心跳证据'); expect(host.textContent).toContain('1.00 MiB'); expect(host.textContent).not.toContain('删除已选')
+  await mount(Settings); expect(host.querySelectorAll('input[inputmode="numeric"]').length).toBe(5); expect(host.textContent).toContain('未知，尚无心跳证据'); expect(host.textContent).toContain('1.00 MiB'); expect(host.textContent).not.toContain('删除已选')
   expect(Array.from(host.querySelectorAll('button')).some(value => value.textContent?.trim() === '删除')).toBe(false)
 })
 it('validates integer days and confirms shortening before any write', async () => {
@@ -47,23 +47,23 @@ it('validates integer days and confirms shortening before any write', async () =
 it('keeps dirty input and old version until explicitly discarding the draft', async () => {
   const f = fixture(); await mount(Settings, f.client); input('普通文件及运行事件', '60'); await settle(); f.status.mockResolvedValue(status(2))
   button('重新读取').click(); await settle(); expect(f.status).toHaveBeenCalledTimes(1); button('保留草稿', document.querySelector('.v3-node-dialog')!).click(); await settle()
-  expect(host.querySelector<HTMLInputElement>('input')!.value).toBe('60'); expect(host.textContent).toContain('配置版本 1')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="普通文件及运行事件"]')!.value).toBe('60'); expect(host.textContent).toContain('配置版本 1')
   button('重新读取').click(); await settle(); button('放弃草稿并读取', document.querySelector('.v3-node-dialog')!).click(); await settle()
-  expect(host.querySelector<HTMLInputElement>('input')!.value).toBe('30'); expect(host.textContent).toContain('配置版本 2')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="普通文件及运行事件"]')!.value).toBe('30'); expect(host.textContent).toContain('配置版本 2')
 })
 it('uses stable retry keys, preserves failed drafts and gives changed requests new keys', async () => {
   const f = fixture(), save = vi.spyOn(f.client, 'saveRetentionPolicy').mockRejectedValue(new Error('配置版本冲突'))
   await mount(Settings, f.client); input('普通文件及运行事件', '60'); await settle(); button('保存并应用保留期限').click(); await settle(); button('保存并应用保留期限').click(); await settle()
-  expect(save.mock.calls[0]?.[2]).toBe(save.mock.calls[1]?.[2]); expect(host.textContent).toContain('配置版本冲突'); expect(host.querySelector<HTMLInputElement>('input')!.value).toBe('60')
+  expect(save.mock.calls[0]?.[2]).toBe(save.mock.calls[1]?.[2]); expect(host.textContent).toContain('配置版本冲突'); expect(host.querySelector<HTMLInputElement>('input[aria-label="普通文件及运行事件"]')!.value).toBe('60')
   input('普通文件及运行事件', '61'); await settle(); button('保存并应用保留期限').click(); await settle(); expect(save.mock.calls[2]?.[2]).not.toBe(save.mock.calls[1]?.[2])
 })
 it('restricts retention edits to administrators', async () => {
-  await mount(Settings, fixture().client, 'operator'); expect(host.textContent).toContain('只有管理员'); expect(host.querySelector<HTMLInputElement>('input')!.disabled).toBe(true)
+  await mount(Settings, fixture().client, 'operator'); expect(host.textContent).toContain('只有管理员'); expect(host.querySelector<HTMLInputElement>('input[aria-label="普通文件及运行事件"]')!.disabled).toBe(true)
   expect(Array.from(host.querySelectorAll('button')).some(value => value.textContent?.trim() === '保存并应用保留期限')).toBe(false)
 })
 it('aborts a retention read on tab switch and ignores its late failure', async () => {
   const f = fixture(); let reject!: (error: Error) => void; f.status.mockImplementation(() => new Promise((_, no) => { reject = no }))
-  await mount(Settings, f.client); const signal = f.status.mock.calls[0]?.[0]!; button('存储与清理').click(); await settle(); expect(signal.aborted).toBe(true)
+  const router = await mount(Settings, f.client); const signal = f.status.mock.calls[0]?.[0]!; await router.push('/settings?tab=storage'); await settle(); expect(signal.aborted).toBe(true)
   reject(new Error('旧页面错误')); await settle(); expect(host.textContent).not.toContain('旧页面错误')
 })
 it('rejects recent cutoffs and invalidates preview when scope changes', async () => {

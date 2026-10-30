@@ -9,14 +9,15 @@ export interface V3Node {
   id: string; name: string; endpoint: string; server_name: string
   enabled: boolean; mode: 'native' | 'docker'
   version: number; applied_version: number; shard: number
+  status?: V3ServerDetail['status']; collection_state?: 'normal' | 'unreachable' | 'stale' | 'unknown' | 'disabled'
   configuration?: { registered_version: number; delivered_version: number; runtime_enabled: boolean | null; runtime_mode: string; runtime_endpoint: string }
 }
-export type V3NodeInput = Omit<V3Node, 'version' | 'applied_version' | 'shard' | 'configuration'>
+export type V3NodeInput = Omit<V3Node, 'version' | 'applied_version' | 'shard' | 'configuration' | 'status' | 'collection_state'>
 export interface V3Page<T> { items: T[]; next_cursor: string }
 export interface V3ServerDetail {
   node: V3Node
   status: null | { sampled_at: number | null; updated_at: string; error: string; metrics_error: string; events_error: string; protocol_error: string
-    metrics: Record<'cpu_percent' | 'memory_percent' | 'disk_percent' | 'uptime', number | null>
+    metrics: Record<'cpu_percent' | 'memory_percent' | 'disk_percent' | 'uptime', number | null> & Record<string, number | null>
     info: Record<'hostname' | 'kernel' | 'architecture' | 'agent_version' | 'agent_mode', string | null> }
   latest_deployment: V3DeploymentJob | null
 }
@@ -336,6 +337,9 @@ export class ControlV3 {
     // replayed by the normal JSON read/reconnect loop.
     return this.send<Blob>(`retention/jobs/${encodeURIComponent(id)}/download`, 'GET', undefined, undefined, signal, 'jsonl')
   }
+  notificationStats(channel: 'feishu' | 'email', node = '', signal?: AbortSignal) {
+    return this.read<{items: {day:string;delivered:number;pending:number;retrying:number}[];timezone:string;group_by:string}>(`notifications/stats?${queryParams({channel,node})}`, signal)
+  }
   notifications(filter: V3NotificationFilter, signal?: AbortSignal) {
     return this.read<V3Page<V3Notification> & { start: string; end: string }>(`notifications?${queryParams({ ...filter })}`, signal)
   }
@@ -346,10 +350,13 @@ export class ControlV3 {
     return this.send<{ version: number; policy: V3RetentionPolicy; shortened: boolean; message: string }>(
       'retention/policy', 'PUT', { policy, expected_version: expectedVersion }, idempotencyKey)
   }
-  servers(q = '', cursor = '', limit = 50, signal?: AbortSignal) {
-    return this.read<V3Page<V3Node> & { limit: number }>(`servers?${queryParams({ q, cursor, limit })}`, signal)
+  servers(q = '', cursor = '', limit = 50, signal?: AbortSignal, status = '') {
+    return this.read<V3Page<V3Node> & { limit: number }>(`servers?${queryParams({ q, cursor, limit, status })}`, signal)
   }
   server(id: string, signal?: AbortSignal) { return this.read<V3ServerDetail>(`servers/${encodeURIComponent(id)}`, signal) }
+  serverMetrics(id: string, start: string, end: string, signal?: AbortSignal) {
+    return this.read<{ points: import('./charts').MetricPoint[]; resolution_seconds: number; start: number; end: number }>(`servers/${encodeURIComponent(id)}/metrics?${queryParams({ start, end })}`, signal)
+  }
   // Callers keep the same key for an explicitly retried operation. Writes are
   // never replayed by the reconnect loop or combined with unsaved form state.
   saveServer(node: V3NodeInput, expectedVersion: number, idempotencyKey: string) {

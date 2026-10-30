@@ -7,7 +7,7 @@ import { useReadScope } from './readScope'
 
 const hoursOptions = [24, 168, 720]
 export const refreshIntervals = [10, 30, 60, 120, 300]
-type Conditions = { node: string; q: string; operation: string; hours: number; include_probes: boolean }
+type Conditions = { node: string; q: string; operation: string; hours: number; include_probes: boolean; limit: number }
 export function useEventQuery() {
   const { client, session } = useConsole(), route = useRoute(), router = useRouter()
   const scope = useReadScope()
@@ -17,6 +17,7 @@ export function useEventQuery() {
     operation: typeof route.query.operation === 'string' ? route.query.operation : '',
     hours: hoursOptions.includes(Number(route.query.hours)) ? Number(route.query.hours) : 24,
     include_probes: route.query.include_probes === 'true',
+    limit: [20,50,100].includes(Number(route.query.limit)) ? Number(route.query.limit) : 20,
   })
   const draft = reactive(parse()), submitted = ref<Conditions>(), items = ref<V3Event[]>([])
   const queried = ref(false), attempted = ref(false), ready = ref(false), lastUpdated = ref(0)
@@ -43,7 +44,7 @@ export function useEventQuery() {
     await scope.run(async signal => {
       for (;;) {
         const filter: V3EventFilter = { node: conditions.node, q: conditions.q, operation: conditions.operation,
-          include_probes: conditions.include_probes, ...range, cursor: pageCursor, limit: 20 }
+          include_probes: conditions.include_probes, ...range, cursor: pageCursor, limit: conditions.limit }
         const data = await client.events(filter, signal, false)
         // Cleanup can empty a previously valid cursor page. Walk only the
         // already visited cursors, keeping the exact submitted query/window.
@@ -61,6 +62,11 @@ export function useEventQuery() {
     if (draft.operation === 'probe' && !draft.include_probes) { scope.error.value = '请先开启包含链路探针'; return }
     submitted.value = { ...draft }; ready.value = false; previous.value = []; cursor.value = ''; queryWindow.value = { start: '', end: '' }
     void load(true, true)
+  }
+  function resize(value: number) {
+    const pendingDraft = changed.value
+    draft.limit = value
+    if (queried.value && !pendingDraft) submit()
   }
   function page(forward: boolean) {
     if (!ready.value || scope.loading.value) return
@@ -103,5 +109,5 @@ export function useEventQuery() {
   })
   onUnmounted(() => { disposed = true; stop(); clearInterval(timer); document.removeEventListener('visibilitychange', visibility) })
   return { draft, items, queried, attempted, ready, loading: scope.loading, error: scope.error, changed,
-    auto, interval, countdown, lastUpdated, hidden, cursor, next, previous, detail, checked, submit, page, refresh }
+    auto, interval, countdown, lastUpdated, hidden, cursor, next, previous, detail, checked, submit, page, refresh, resize }
 }

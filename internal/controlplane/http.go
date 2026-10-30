@@ -127,6 +127,10 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v3/servers/") {
+		if strings.HasSuffix(r.URL.Path, "/metrics") {
+			a.serverTrends(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/servers/"), "/metrics"))
+			return
+		}
 		a.serverDetail(w, r)
 		return
 	}
@@ -391,14 +395,28 @@ func (a *API) nodes(w http.ResponseWriter, r *http.Request, id identity) {
 		}
 		after = string(raw)
 	}
-	items, e := a.Store.Nodes(r.Context(), after, r.URL.Query().Get("q"), limit, nil)
+	state := r.URL.Query().Get("status")
+	switch state {
+	case "", "normal", "unreachable", "stale", "unknown", "disabled":
+	default:
+		failure(w, 400, "invalid_status", "采集状态不正确")
+		return
+	}
+	items, e := a.Store.consoleNodes(r.Context(), after, r.URL.Query().Get("q"), state, limit, a.Config.Collector.IntervalSeconds)
 	if e != nil {
 		failure(w, 503, "query_failed", "服务器查询失败")
 		return
 	}
 	next := ""
 	if len(items) == limit {
-		next = base64.RawURLEncoding.EncodeToString([]byte(items[len(items)-1].ID))
+		var last struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(items[len(items)-1], &last) != nil {
+			failure(w, 503, "query_failed", "服务器查询失败")
+			return
+		}
+		next = base64.RawURLEncoding.EncodeToString([]byte(last.ID))
 	}
 	reply(w, 200, map[string]any{"items": items, "next_cursor": next, "limit": limit})
 }

@@ -193,3 +193,12 @@ it('pauses refreshing after a failed manual replacement without labeling the old
   expect(button('下一页').disabled).toBe(true)
   button('查询').click(); await settle(); await vi.advanceTimersByTimeAsync(10_000); await settle(); expect(read).toHaveBeenCalledTimes(4)
 })
+
+it('never submits dirty event filters merely because page size changes', async () => {
+ const client=new ControlV3(),read=vi.spyOn(client,'events').mockResolvedValue(page('original'))
+ await mount('/events?q=已提交',client);button('查询').click();await settle();keyword('草稿');await settle()
+ host.querySelector<HTMLInputElement>('[aria-label="每页条数"]')!.click();await settle()
+ Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(el=>el.textContent?.trim()==='50 条／页')!.click();await settle()
+ expect(read).toHaveBeenCalledTimes(1);expect(host.textContent).toContain('筛选条件已修改')
+ button('查询').click();await settle();expect(read.mock.calls.at(-1)?.[0]).toMatchObject({q:'草稿',limit:50,cursor:''})
+})

@@ -40,7 +40,7 @@ it('reads durable application progress from string cursors, stops at completion 
   expect(f.logs.mock.calls[1]?.slice(0, 3)).toEqual([id, '1', 100]); expect(host.textContent).toContain('本次应用完成')
   expect(host.querySelectorAll('.v3-logs li')).toHaveLength(2)
   await vi.advanceTimersByTimeAsync(30000); expect(f.logs).toHaveBeenCalledTimes(2)
-  expect(Array.from(host.querySelectorAll('button')).map(b => b.textContent?.trim())).toEqual(['刷新应用进度'])
+  expect(Array.from(host.querySelectorAll('button')).map(b => b.textContent?.trim())).toEqual(['返回部署任务', '刷新应用进度'])
 })
 it('keeps last progress on failure, retries without resetting the cursor, and stops when unmounted', async () => {
   const f = fixture(); await mount(f.client)

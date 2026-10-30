@@ -8,12 +8,14 @@ import { cancelReadRequests } from '../connection'
 import { consoleContext } from './context'
 import Websites from './Websites.vue'
 
+vi.mock('element-plus/es/components/message/style/css', () => ({}))
+
 let app: App | undefined, host: HTMLDivElement
 const site = (id = 1): V3Site => ({ id, name: `业务网站 ${id}`, url: `https://site${id}.example.test/`, node: 'node-a', keyword: '欢迎', slow_alert: true, paused: false, version: 3, state: { status: 'normal', last: { time: 1792200000, ok: true, latency: 0, http_status: 200, cert_expires: 0, reason: '' }, checks: 1, passed: 1, failures: 0, successes: 1 } })
 const summary = (): V3WebsiteOverview => ({ total: 1, normal: 1, down: 0, pending: 0, paused: 0, migration_pending: 0, unknown: 0, due: 0, notification_outbox: { pending: 0, oldest_wait_seconds: null }, notification_worker: { heartbeat: null, healthy: null }, scheduler: { heartbeat: null, healthy: null } })
 async function settle() { for (let i = 0; i < 40; i++) { await Promise.resolve(); await nextTick() } }
 function fixture() {
-  const client = new ControlV3(), list = vi.spyOn(client, 'websites').mockResolvedValue({ items: [site()], next_cursor: '', limit: 20 })
+  const client = new ControlV3(); vi.spyOn(client, 'websiteIncidents').mockResolvedValue({items: [], next_cursor: ''}); const list = vi.spyOn(client, 'websites').mockResolvedValue({ items: [site()], next_cursor: '', limit: 20 })
   const detail = vi.spyOn(client, 'website').mockImplementation(async id => site(id)), overview = vi.spyOn(client, 'websiteOverview').mockResolvedValue(summary())
   vi.spyOn(client, 'servers').mockResolvedValue({ items: [], next_cursor: '', limit: 20 })
   return { client, list, detail, overview }
@@ -44,7 +46,7 @@ it('loads only the requested server-side page and leaves unsent keyword out of p
 
 it('saves a new website with visible error feedback and reuses its key only for the same retried content', async () => {
   const f = fixture(), save = vi.spyOn(f.client, 'saveWebsite').mockRejectedValueOnce(new Error('磁盘暂时不可用')).mockResolvedValue({ id: 2, version: 1, message: '网站配置已保存' })
-  await mount('/websites', f.client); button('添加网站').click(); await settle()
+  await mount('/websites', f.client); button('＋ 添加网站').click(); await settle()
   const fields = dialog().querySelectorAll<HTMLInputElement>('input.el-input__inner')
   input(fields[0]!, '新增网站'); input(fields[1]!, 'https://new.example.test/'); await settle()
   button('保存', dialog()).click(); await settle()
@@ -69,7 +71,7 @@ it('validates fields before saving and preserves the edited version and paused s
 
 it('queues an explicit check without claiming that the check has completed', async () => {
   const f = fixture(), check = vi.spyOn(f.client, 'checkWebsite').mockResolvedValue({ id: 1, message: '已加入检测队列' })
-  await mount('/websites', f.client); button('检测').click(); await settle()
+  await mount('/websites', f.client); button('检查').click(); await settle()
   expect(check.mock.calls[0]?.slice(0, 2)).toEqual([1, 3]); expect(host.textContent).toContain('当前结果尚未更新')
   expect(host.textContent).not.toContain('检测成功')
 })
@@ -113,13 +115,13 @@ it('cancels earlier query results and errors when navigating, and does not mix d
   f.detail.mockImplementationOnce(() => new Promise(yes => { resolve = yes }))
   const router = await mount('/websites/1', f.client), signal = f.detail.mock.calls[0]?.[1]!
   await router.push('/websites/2'); await settle(); resolve(site(1)); await settle()
-  expect(signal.aborted).toBe(true); expect(host.querySelector('h1')?.textContent).toBe('业务网站 2')
+  expect(signal.aborted).toBe(true); expect(host.querySelector('h1')?.textContent).toBe('网站详情'); expect(host.textContent).toContain('业务网站 2'); expect(host.textContent).not.toContain('业务网站 1')
   expect(f.list).not.toHaveBeenCalled(); expect(f.overview).not.toHaveBeenCalled()
 })
 
 it('pauses refresh while editing and in the background, and stops after unmount', async () => {
   const f = fixture(); await mount('/websites', f.client)
-  button('添加网站').click(); await settle(); await vi.advanceTimersByTimeAsync(60_000); expect(f.list).toHaveBeenCalledTimes(1)
+  button('＋ 添加网站').click(); await settle(); await vi.advanceTimersByTimeAsync(60_000); expect(f.list).toHaveBeenCalledTimes(1)
   button('取消', dialog()).click(); await settle(); await vi.advanceTimersByTimeAsync(30_000); expect(f.list).toHaveBeenCalledTimes(2)
   Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(60_000)
   expect(f.list).toHaveBeenCalledTimes(2)
@@ -130,11 +132,11 @@ it('pauses refresh while editing and in the background, and stops after unmount'
 it('retains old summary and results after failure and displays missing summary as unknown', async () => {
   const f = fixture(); f.overview.mockRejectedValueOnce(new Error('统计不可用')).mockResolvedValueOnce(summary())
   await mount('/websites', f.client)
-  expect(Array.from(host.querySelectorAll('.v3-stats strong')).map(el => el.textContent)).toEqual(['—', '—', '—', '—', '—', '—'])
+  expect(Array.from(host.querySelectorAll('.website-summary strong')).map(el => el.textContent)).toEqual(['—', '—', '—', '—', '—', '—'])
   button('刷新').click(); await settle(); f.overview.mockRejectedValue(new Error('统计暂时失败')); f.list.mockRejectedValue(new Error('网站读取失败'))
   button('刷新').click(); await settle()
   expect(host.textContent).toContain('业务网站 1'); expect(host.textContent).toContain('上一次统计保留')
-  expect(host.querySelector('.v3-stats strong')?.textContent).toBe('1')
+  expect(host.querySelector('.website-summary strong')?.textContent).toBe('1')
 })
 
 it('returns to a known previous page after deletion leaves the current page empty', async () => {
@@ -144,4 +146,11 @@ it('returns to a known previous page after deletion leaves the current page empt
     .mockResolvedValueOnce({ items: [], next_cursor: '', limit: 20 }).mockResolvedValue({ items: [site(2)], next_cursor: '', limit: 20 })
   const router = await mount('/websites', f.client); button('下一页').click(); await settle(); button('下一页').click(); await settle(); button('刷新').click(); await settle()
   expect(router.currentRoute.value.query.cursor).toBe('two'); expect(host.textContent).toContain('业务网站 2')
+})
+
+it('pauses a website with its saved version and retries the same intent safely',async()=>{
+ const f=fixture(),save=vi.spyOn(f.client,'saveWebsite').mockRejectedValue(new Error('连接中断'))
+ await mount('/websites',f.client);button('暂停').click();await settle();button('暂停').click();await settle()
+ expect(save.mock.calls[0]?.slice(0,2)).toEqual([{id:1,name:site().name,url:site().url,node:'node-a',keyword:'欢迎',slow_alert:true,paused:true},3])
+ expect(save.mock.calls[0]?.[2]).toBe(save.mock.calls[1]?.[2]);expect(host.textContent).toContain('连接中断')
 })

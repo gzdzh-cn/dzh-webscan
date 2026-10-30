@@ -8,6 +8,8 @@ import { cancelReadRequests } from '../connection'
 import { consoleContext } from './context'
 import Alerts from './Alerts.vue'
 
+vi.mock('../MetricChart.vue', () => ({ default: { props: ['title'], template: '<div class="chart">{{ title }}</div>' } }))
+
 let app: App | undefined, host: HTMLDivElement
 const state = (): V3HealthState => ({ key: 'node-a:cpu', node: 'node-a', kind: 'cpu', phase: 'firing', since: 1792200000, last: 1792200030, recovery: 0, reminder: 0, message: 'CPU 持续偏高', severity: 'warning' })
 const record = (): V3HealthRecord => ({ id: 'health-old', node: 'node-a', kind: 'cpu', phase: 'resolved', time: 1792200000, message: 'CPU 已恢复', state: state(), record_key: 'server-health:health-old', can_delete: true, delete_reason: '' })
@@ -16,6 +18,7 @@ const notification = (done = false): V3Notification => ({ id: '9007199254740993'
 async function settle() { for (let i = 0; i < 40; i++) { await Promise.resolve(); await nextTick() } }
 function fixture() {
   const client = new ControlV3()
+  vi.spyOn(client,'notificationStats').mockResolvedValue({items:[],timezone:'Asia/Shanghai',group_by:'created_at'})
   const reads = { current: vi.spyOn(client, 'currentAlerts').mockResolvedValue({ items: [state()], next_cursor: '' }),
     history: vi.spyOn(client, 'alertHistory').mockResolvedValue({ items: [record()], next_cursor: '', start: 'a', end: 'b' }),
     websites: vi.spyOn(client, 'websiteIncidents').mockResolvedValue({ items: [incident()], next_cursor: '' }),

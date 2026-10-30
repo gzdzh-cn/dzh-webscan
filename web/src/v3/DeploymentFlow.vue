@@ -105,7 +105,7 @@ defineExpose({ begin })
 </script>
 <template>
  <section class="v3-deployment-flow">
-  <h2>SSH 认证</h2><p v-if="saved" class="v3-muted">{{ configured ? '已配置，留空保留。' : '已有凭据不回显，留空保留；未配置时需填写认证信息。' }}</p>
+  <h3>连接认证</h3><p v-if="saved" class="v3-muted">{{ configured ? '已配置，留空保留。' : '已有凭据不回显，留空保留；未配置时需填写认证信息。' }}</p>
   <el-alert v-if="upgrade" title="升级使用已保存配置；本次不保存编辑弹窗中的草稿。" type="info" :closable="false" />
   <el-button v-if="unfinishedJob" type="primary" @click="emit('job', unfinishedJob)">打开未完成任务</el-button>
   <el-form label-position="top" :disabled="busy">
@@ -116,7 +116,7 @@ defineExpose({ begin })
    <el-form-item v-else label="SSH 密码"><el-input v-model="password" type="password" show-password autocomplete="new-password" /></el-form-item>
   </el-form>
   <div v-if="fingerprint?.result" class="v3-deploy-confirm"><h3>确认 SSH 主机指纹</h3><p>{{ fingerprint.result.host }}:{{ fingerprint.result.port }}</p><code>{{ fingerprint.result.fingerprint }}</code><p>确认有效期 10 分钟，指纹变化会停止操作。</p><el-button type="primary" :loading="busy || fileReading" @click="confirmFingerprint">确认指纹并准备部署</el-button></div>
-  <div v-if="preview" class="v3-deploy-confirm"><h3>{{ kind === 'upgrade' ? '升级' : '安装' }}预览</h3><dl class="v3-detail-grid"><dt>范围</dt><dd>仅 {{ node.id }}，主控保持运行</dd><dt>部署方式</dt><dd>{{ preview.target.mode }}</dd><dt>当前版本</dt><dd>{{ preview.current?.release || '无法确认旧基线' }}</dd><dt>目标版本</dt><dd>{{ preview.target.release }}</dd><dt>目标摘要</dt><dd><code>{{ preview.target.sha256 }}</code></dd><dt>配置版本</dt><dd>{{ preview.version }}</dd></dl><el-button type="primary" :loading="busy || fileReading" @click="confirm">确认并创建部署任务</el-button></div>
+  <div v-if="preview" class="v3-deploy-confirm"><h3>{{ kind === 'upgrade' ? '升级' : '安装' }}预览</h3><div class="detail-grid v3-detail-grid"><div><span>范围</span><strong>仅 {{ node.id }}，主控保持运行</strong></div><div><span>部署方式</span><strong>{{ preview.target.mode }}</strong></div><div><span>当前版本</span><strong>{{ preview.current?.release || '无法确认旧基线' }}</strong></div><div><span>目标版本</span><strong>{{ preview.target.release }}</strong></div><div><span>目标摘要</span><strong><code>{{ preview.target.sha256 }}</code></strong></div><div><span>配置版本</span><strong>{{ preview.version }}</strong></div></div><el-button type="primary" :loading="busy || fileReading" @click="confirm">确认并创建部署任务</el-button></div>
   <el-alert v-if="error" :title="error" type="error" :closable="false" /><p v-else-if="message" role="status">{{ message }}</p>
  </section>
 </template>

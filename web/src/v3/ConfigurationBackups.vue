@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import CursorPagination from './CursorPagination.vue'
+import { useCursorPage } from './cursorPage'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { V3ConfigurationBackup, V3ConfigurationDeletePreview, V3ConfigurationDeleteJob } from '../controlV3'
@@ -6,6 +8,8 @@ import { timeText, useConsole } from './context'
 import { useReadScope } from './readScope'
 import ConfigurationDeleteTask from './ConfigurationDeleteTask.vue'
 import ConfigurationRestorePanel from './ConfigurationRestorePanel.vue'
+
+const pagination = useCursorPage(), pageLimit = pagination.limit
 
 const { client, session } = useConsole(), route = useRoute(), router = useRouter(), read = useReadScope()
 const admin = computed(() => session.value?.role === 'admin')
@@ -75,7 +79,7 @@ watch(mode, clearSecrets)
 async function load() {
   if (!admin.value) return
   const after = cursor.value
-  await read.run(signal => client.configurationBackups(after, 20, signal), result => {
+  await read.run(signal => client.configurationBackups(after, pageLimit.value, signal), result => {
     clearSelection(); rows.value = result.items; next.value = result.next_cursor; loaded.value = true; deleteAvailable.value = result.delete_available; savedRestoreAvailable.value = result.saved_restore_available === true
     if (!result.items.length && after) void router.replace({ query: { ...route.query, deployment_cursor: previous.get(after) || undefined } })
   })
@@ -140,14 +144,14 @@ async function download(row: V3ConfigurationBackup, encrypted = false) {
   } catch (e) { feedback(e) }
   finally { if (alive) busy.value = false }
 }
-watch(cursor, () => { clearSelection(); read.cancel(); void load() }, { immediate: true })
+watch([cursor,pageLimit], () => { clearSelection(); read.cancel(); void load() }, { immediate: true })
 void loadJobs()
 onUnmounted(() => { alive = false; operation.abort(); clearTimeout(expiryTimer); clearSecrets() })
 </script>
 
 <template>
   <el-card shadow="never">
-    <div class="v3-job-heading"><h2>部署配置存档</h2><div v-if="admin" class="v3-actions"><el-button :disabled="busy || !secure" @click="openImport">导入配置备份</el-button><el-button type="primary" :loading="busy && !importing && !exporting" :disabled="busy" @click="create">手动备份部署配置</el-button></div></div>
+    <div class="card-heading v3-job-heading"><h2>部署配置存档</h2><div v-if="admin" class="v3-actions"><el-button :disabled="busy || !secure" @click="openImport">导入配置备份</el-button><el-button type="primary" :loading="busy && !importing && !exporting" :disabled="busy" @click="create">手动备份部署配置</el-button></div></div>
     <p class="v3-muted">备份包含主控启动时配置、数据库中已保存的设置和子服务器配置；不包含后来修改的磁盘 YAML，也不表示配置已生效。</p>
     <p class="v3-muted">不包含监控数据库、历史、后台密码及外部私钥、PKI、独立凭据文件。完整灾备仍需一致性数据库备份、独立密钥和配套文件。</p>
     <el-alert title="配置备份可恢复到保存配置，之后仍需独立应用；导入、导出及删除不会切换运行状态。" type="info" :closable="false" />
@@ -171,7 +175,7 @@ onUnmounted(() => { alive = false; operation.abort(); clearTimeout(expiryTimer);
         <el-table-column label="删除" width="100"><template #default="{ row }"><el-button link type="danger" :disabled="busy || !deleteAvailable || !row.can_delete" :title="row.delete_reason" @click="previewDelete([row])">删除</el-button></template></el-table-column>
         <template #empty>{{ read.loading.value ? '正在读取…' : read.error.value ? '存档读取失败' : loaded ? '暂无部署配置存档' : '尚未读取' }}</template>
       </el-table>
-      <div class="v3-pagination"><el-button :disabled="!cursor || read.loading.value || busy" @click="page(false)">上一页</el-button><span>每页 20 条</span><el-button :disabled="!next || read.loading.value || busy" @click="page(true)">下一页</el-button></div>
+      <CursorPagination :previous="!!cursor" :next="!!next" :limit="pageLimit" :loading="read.loading.value || busy" @previous="page(false)" @next="page(true)" @resize="size => { previous.clear(); router.push({query: {...route.query, deployment_cursor: undefined, limit: String(size)}}) }" />
       <ConfigurationRestorePanel ref="restorePanel" @changed="load" />
       <h3>本账号删除任务</h3>
       <el-alert v-if="jobRead.error.value" :title="`${jobRead.error.value}；已读取任务保留`" type="error" :closable="false" />

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App } from 'vue'
+import { createApp, h, nextTick, ref, type App } from 'vue'
 import { ControlV3, V3Error, type V3SettingsView, type V3SettingsPreview } from '../controlV3'
 import { installElements } from '../elements'
 import { consoleContext } from './context'
@@ -66,4 +66,15 @@ it('requires explicit discard before reload and preserves input when reloading f
 it('ignores late preview after unmount and restricts all settings reads to admin', async () => {
   const f = fixture(); let resolve!: (v: V3SettingsPreview) => void; f.inspect.mockImplementation(() => new Promise(yes => { resolve = yes })); await mount(f); input('网站检测间隔（秒）', '44'); await settle(); button('预览并保存设置').click(); await settle(); app!.unmount(); app = undefined; resolve(preview()); await settle(); expect(f.save).not.toHaveBeenCalled(); expect(document.body.textContent).not.toContain('确认仅保存')
   host.remove(); const other = fixture(); await mount(other, 'operator'); expect(other.load).not.toHaveBeenCalled(); expect(host.textContent).toContain('只有管理员')
+})
+
+it('clears temporary credentials and ignores late preview when switching old-style groups',async()=>{
+ const f=fixture(),group=ref('email');let resolve!:(v:V3SettingsPreview)=>void
+ f.inspect.mockImplementation(()=>new Promise(yes=>{resolve=yes}))
+ host=document.createElement('div');document.body.append(host);app=createApp({setup:()=>()=>h(RuntimeSettings,{group:group.value})});installElements(app)
+ app.provide(consoleContext,{client:f.client,session:ref({username:'admin',role:'admin' as const,csrf:'csrf'})});app.mount(host);await settle()
+ select('SMTP 密码／授权码操作','replace');await settle();input('SMTP 密码／授权码','temporary-private-secret');button('预览并保存设置').click();await settle()
+ group.value='website_monitor';await settle();resolve(preview());await settle()
+ expect(document.body.textContent).not.toContain('确认仅保存');expect(host.querySelector('[aria-label="SMTP 密码／授权码"]')).toBeNull()
+ group.value='email';await settle();expect(host.querySelector('[aria-label="SMTP 密码／授权码"]')).toBeNull();expect(f.save).not.toHaveBeenCalled()
 })

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import CursorPagination from './CursorPagination.vue'
+import { useCursorPage } from './cursorPage'
+import PageHeading from './PageHeading.vue'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { queryParams } from '../api'
@@ -6,11 +9,17 @@ import type { V3HealthRecord, V3HealthState, V3HistoryCategory, V3Node, V3Notifi
 import { timeText, useConsole } from './context'
 import { useReadScope } from './readScope'
 import HistoryDelete from './HistoryDelete.vue'
+import MetricChart from '../MetricChart.vue'
+import type { EChartsOption } from 'echarts'
 
 type Tab = 'current' | 'history' | 'feishu' | 'email'
 type AlertRow = { id: string; node: string; name: string; kind: string; message: string; status: string; time: string | number; ended?: number | null;
   record_key: string; can_delete: boolean; delete_reason: string; site?: number; attempts?: number; nextTry?: string | null; event?: string; category?: V3HistoryCategory }
+const pagination = useCursorPage(), pageLimit = pagination.limit
+
 const { client, session } = useConsole(), route = useRoute(), router = useRouter(), read = useReadScope(), options = useReadScope()
+const statsRead = useReadScope(), stats = ref<{day:string;delivered:number;pending:number;retrying:number}[]>([])
+const chart = computed<EChartsOption>(() => ({tooltip:{trigger:'axis'},legend:{bottom:0},grid:{left:45,right:20,top:20,bottom:55},xAxis:{type:'category',data:stats.value.map(v=>v.day)},yAxis:{type:'value'},series:[['delivered',filters.tab === 'email' ? '已提交邮件服务器' : '已送达'],['pending','待发送'],['retrying','重试中']].map(([key,label])=>({name:label!,type:'bar',stack:'messages',data:stats.value.map(v=>v[key as 'delivered'|'pending'|'retrying'])}))}))
 const filters = reactive({ tab: 'current' as Tab, source: 'server', node: '', site: 0, hours: 24, phase: '', state: '' })
 const rows = ref<AlertRow[]>([]), nodes = ref<V3Node[]>([]), next = ref(''), checked = ref<AlertRow[]>([]), detail = ref<AlertRow>()
 const loaded = ref(false), appliedKey = ref(''), updated = ref(0), deletion = ref<InstanceType<typeof HistoryDelete>>()
@@ -21,7 +30,7 @@ const categories = computed<V3HistoryCategory[]>(() => [notifications.value ? fi
 const kindLabels: Record<string, string> = { cpu: 'CPU 使用率', memory: '内存使用率', disk: '磁盘空间', inode: 'inode 使用率', clock: '时钟同步', node_unreachable: '采集失联', unreachable: '采集失联', agent: '文件监控心跳', scanner: '安全扫描', coverage: '监控目录覆盖', backlog: '事件积压', dropped: '事件丢弃', outage: '网站访问', certificate: '证书有效期', slow: '响应缓慢' }
 const phaseLabels: Record<string, string> = { firing: '异常中', resolved: '已恢复', reminder: '持续提醒', completed: '已完成', migration_pending: '等待迁移切换', paused: '已暂停', sending: '正在发送', waiting: '等待前序通知', retrying: '等待重试', pending: '待发送' }
 function conditions() {
-  return { tab: filters.tab, source: notifications.value ? undefined : filters.source, node: filters.node, site: !notifications.value && filters.source === 'website' ? filters.site || undefined : undefined,
+  return { limit: pageLimit.value === 20 ? undefined : pageLimit.value, tab: filters.tab, source: notifications.value ? undefined : filters.source, node: filters.node, site: !notifications.value && filters.source === 'website' ? filters.site || undefined : undefined,
     hours: current.value ? undefined : filters.hours, phase: !notifications.value && !current.value && filters.source === 'server' ? filters.phase : undefined,
     state: notifications.value ? filters.state : undefined }
 }
@@ -57,18 +66,18 @@ async function load(roll = false, replace = false) {
   const window = { ...range }
   await read.run(async signal => {
     if (channel) {
-      const page = await client.notifications({ channel: selected.tab as 'feishu' | 'email', node: selected.node, state: selected.state as '' | 'pending' | 'completed', ...window, cursor: after, limit: 20 }, signal)
+      const page = await client.notifications({ channel: selected.tab as 'feishu' | 'email', node: selected.node, state: selected.state as '' | 'pending' | 'completed', ...window, cursor: after, limit: pageLimit.value }, signal)
       return { ...page, items: page.items.map(notificationRow) }
     }
     if (selected.source === 'website') {
-      const page = await client.websiteIncidents(selected.site || undefined, after, 20, { node: selected.node, current: active, ...(active ? {} : window) }, signal)
+      const page = await client.websiteIncidents(selected.site || undefined, after, pageLimit.value, { node: selected.node, current: active, ...(active ? {} : window) }, signal)
       return { ...page, items: page.items.map(value => incidentRow(value, active)) }
     }
     if (active) {
-      const page = await client.currentAlerts(selected.node, after, 20, signal)
+      const page = await client.currentAlerts(selected.node, after, pageLimit.value, signal)
       return { ...page, items: page.items.map(healthRow) }
     }
-    const page = await client.alertHistory({ node: selected.node, phase: selected.phase as '' | 'firing' | 'resolved' | 'reminder', ...window, cursor: after, limit: 20 }, signal)
+    const page = await client.alertHistory({ node: selected.node, phase: selected.phase as '' | 'firing' | 'resolved' | 'reminder', ...window, cursor: after, limit: pageLimit.value }, signal)
     return { ...page, items: page.items.map(healthRow) }
   }, page => {
     rows.value = page.items; next.value = page.next_cursor; checked.value = []; loaded.value = true; appliedKey.value = key; updated.value = Date.now()
@@ -82,6 +91,7 @@ async function load(roll = false, replace = false) {
   })
   if (!disposed && token === generation) schedule()
 }
+function loadStats() { if (notifications.value) void statsRead.run(signal => client.notificationStats(filters.tab as 'feishu'|'email', filters.node, signal), value => { stats.value = value.items }); else statsRead.cancel() }
 async function sync() {
   const before = route.fullPath
   await router.push({ path: '/alerts', query: Object.fromEntries(queryParams(conditions())) })
@@ -90,7 +100,7 @@ async function sync() {
 function page(value: string) { if (value) previousCursors.set(value, cursor.value); void router.push({ path: '/alerts', query: Object.fromEntries(queryParams({ ...conditions(), cursor: value })) }) }
 function chooseTab(value: Tab) { filters.tab = value; void sync() }
 function loadOptions(q = '') { void options.run(signal => client.servers(q, '', 20, signal), page => { nodes.value = page.items }) }
-function visibility() { clearTimeout(timer); if (document.hidden) { generation++; read.cancel() } else void load(true, true) }
+function visibility() { clearTimeout(timer); if (document.hidden) { generation++; read.cancel(); statsRead.cancel() } else {void load(true, true);loadStats()} }
 watch(() => route.fullPath, () => {
   const previousKey = queryKey.value
   filters.tab = ['current', 'history', 'feishu', 'email'].includes(String(route.query.tab)) ? route.query.tab as Tab : 'current'
@@ -100,7 +110,7 @@ watch(() => route.fullPath, () => {
   filters.phase = ['firing', 'resolved', 'reminder'].includes(String(route.query.phase)) ? String(route.query.phase) : ''
   filters.state = ['pending', 'completed'].includes(String(route.query.state)) ? String(route.query.state) : ''
   checked.value = []; detail.value = undefined
-  void load(previousKey !== queryKey.value, true)
+  void load(previousKey !== queryKey.value, true); stats.value = []; loadStats()
 }, { immediate: true })
 onMounted(() => { loadOptions(); document.addEventListener('visibilitychange', visibility) })
 onUnmounted(() => { disposed = true; generation++; clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) })
@@ -108,16 +118,17 @@ onUnmounted(() => { disposed = true; generation++; clearTimeout(timer); document
 
 <template>
   <section>
-    <div class="v3-page-heading"><div><h1>告警中心</h1><p class="v3-muted">每 30 秒更新，后台标签暂停。当前异常通过监控恢复或维护处理。</p></div><div class="v3-actions"><span v-if="updated" class="v3-muted">最近更新：{{ timeText(updated) }}</span><el-button :loading="read.loading.value" @click="load(true, true)">刷新</el-button></div></div>
-    <el-card shadow="never"><nav class="v3-alert-tabs" aria-label="告警分类"><el-button v-for="[value, label] in [['current', '当前异常'], ['history', '告警历史'], ['feishu', '飞书通知'], ['email', '邮箱通知']]" :key="value" :type="filters.tab === value ? 'primary' : ''" @click="chooseTab(value as Tab)">{{ label }}</el-button></nav>
-      <div class="v3-event-filters"><el-select v-if="!notifications" v-model="filters.source" aria-label="告警来源" @change="sync"><el-option value="server" label="服务器" /><el-option value="website" label="网站" /></el-select><el-select v-model="filters.node" aria-label="服务器筛选" clearable :value-on-clear="''" filterable remote :remote-method="loadOptions" :loading="options.loading.value" placeholder="全部服务器（输入名称搜索）" @change="sync"><el-option v-if="filters.node && !nodes.some(node => node.id === filters.node)" :value="filters.node" :label="filters.node" /><el-option v-for="node in nodes" :key="node.id" :value="node.id" :label="`${node.name} · ${node.id}`" /></el-select><el-select v-if="!current" v-model="filters.hours" aria-label="历史时间范围" @change="sync"><el-option v-for="[value, label] in [[24, '最近 24 小时'], [168, '最近 7 天'], [720, '最近 30 天']]" :key="value" :value="value" :label="String(label)" /></el-select><el-select v-if="filters.tab === 'history' && filters.source === 'server'" v-model="filters.phase" clearable :value-on-clear="''" aria-label="告警阶段" placeholder="全部告警阶段" @change="sync"><el-option v-for="value in ['firing', 'resolved', 'reminder']" :key="value" :value="value" :label="phaseLabels[value]" /></el-select><el-select v-if="notifications" v-model="filters.state" clearable :value-on-clear="''" aria-label="通知状态" placeholder="全部通知状态" @change="sync"><el-option value="pending" label="未完成" /><el-option value="completed" label="已完成" /></el-select></div>
+    <PageHeading title="告警中心"><span v-if="updated" class="small muted">最近更新：{{ timeText(updated) }}</span><el-button :loading="read.loading.value" @click="load(true, true)">刷新</el-button></PageHeading>
+    <el-card shadow="never"><div class="card-heading"><span></span><router-link :to="{path:'/settings',query:{tab:'storage',node:filters.node}}">存储与清理 →</router-link></div><nav class="v3-alert-tabs" aria-label="告警分类"><el-button v-for="[value, label] in [['current', '当前异常'], ['history', '告警历史'], ['feishu', '飞书通知'], ['email', '邮箱通知']]" :key="value" :type="filters.tab === value ? 'primary' : ''" @click="chooseTab(value as Tab)">{{ label }}</el-button></nav>
+      <div class="filters v3-event-filters"><el-select v-if="!notifications" v-model="filters.source" aria-label="告警来源" @change="sync"><el-option value="server" label="服务器" /><el-option value="website" label="网站" /></el-select><el-select v-model="filters.node" aria-label="服务器筛选" clearable :value-on-clear="''" filterable remote :remote-method="loadOptions" :loading="options.loading.value" placeholder="全部服务器（输入名称搜索）" @change="sync"><el-option v-if="filters.node && !nodes.some(node => node.id === filters.node)" :value="filters.node" :label="filters.node" /><el-option v-for="node in nodes" :key="node.id" :value="node.id" :label="`${node.name} · ${node.id}`" /></el-select><el-select v-if="!current" v-model="filters.hours" aria-label="历史时间范围" @change="sync"><el-option v-for="[value, label] in [[24, '最近 24 小时'], [168, '最近 7 天'], [720, '最近 30 天']]" :key="value" :value="value" :label="String(label)" /></el-select><el-select v-if="filters.tab === 'history' && filters.source === 'server'" v-model="filters.phase" clearable :value-on-clear="''" aria-label="告警阶段" placeholder="全部告警阶段" @change="sync"><el-option v-for="value in ['firing', 'resolved', 'reminder']" :key="value" :value="value" :label="phaseLabels[value]" /></el-select><el-select v-if="notifications" v-model="filters.state" clearable :value-on-clear="''" aria-label="通知状态" placeholder="全部通知状态" @change="sync"><el-option value="pending" label="未完成" /><el-option value="completed" label="已完成" /></el-select></div>
       <div v-if="!notifications && filters.source === 'website' && filters.site" class="v3-history-toolbar"><span>当前网站：{{ rows.find(row => row.site === filters.site)?.name || `网站 #${filters.site}` }}</span><el-button text @click="filters.site = 0; sync()">清除网站筛选</el-button></div><el-alert v-if="options.error.value" title="服务器选项读取失败，可重新搜索；当前筛选保留。" type="warning" :closable="false" /><el-alert v-if="stale" title="正在更新筛选，上一次查询结果暂时保留。" type="info" :closable="false" /><el-alert v-if="read.error.value" :title="`${read.error.value}${loaded ? '；保留上一次结果。' : ''}`" type="error" :closable="false" />
       <div v-if="!current && canWrite && loaded && !stale" class="v3-history-toolbar"><HistoryDelete ref="deletion" :records="checked" :categories="categories" :label="notifications ? '通知历史' : '告警历史'" @done="load(true, true)" /><span class="v3-muted">保护最近 24 小时、当前异常和未完成任务。</span></div>
       <el-empty v-if="!loaded" :description="read.error.value ? '告警读取失败，请重试' : '正在读取告警…'" />
-      <el-table v-else :data="rows" row-key="record_key" :aria-busy="read.loading.value" :empty-text="emptyText" @selection-change="checked = $event"><el-table-column v-if="!current && canWrite" type="selection" :selectable="(row: AlertRow) => !stale && row.can_delete" width="48" /><el-table-column label="时间" min-width="185"><template #default="{ row }">{{ timeText(row.time) }}</template></el-table-column><el-table-column :label="notifications ? '收件人 / 目标' : '服务器 / 网站'" min-width="170"><template #default="{ row }">{{ row.name }}<small v-if="row.site && row.node" class="v3-block v3-muted">{{ row.node }}</small></template></el-table-column><el-table-column label="类型" min-width="140"><template #default="{ row }">{{ kindLabels[row.kind] || (row.kind === 'email' ? '邮箱通知' : row.kind === 'feishu' ? '飞书通知' : row.kind) }}</template></el-table-column><el-table-column label="内容" min-width="280"><template #default="{ row }"><el-button link type="primary" class="v3-event-content" @click="detail = row">{{ row.message || '查看记录详情' }}</el-button></template></el-table-column><el-table-column label="状态" min-width="140"><template #default="{ row }"><el-tag :type="row.status === 'firing' ? 'danger' : row.status === 'resolved' ? 'success' : 'info'">{{ phaseLabels[row.status] || '未知' }}</el-tag><small v-if="row.attempts !== undefined" class="v3-block v3-muted">尝试 {{ row.attempts }} 次</small></template></el-table-column><el-table-column v-if="!current" label="删除保护" min-width="220"><template #default="{ row }"><el-button v-if="canWrite" text type="danger" :disabled="stale || !row.can_delete" @click="deletion?.open([row])">删除</el-button><small class="v3-block v3-muted">{{ row.delete_reason || '可删除历史' }}</small></template></el-table-column></el-table>
-      <div v-if="loaded" class="v3-pagination"><el-button :disabled="!cursor || read.loading.value" @click="page('')">回到首页</el-button><span>每页最多 20 条</span><el-button :disabled="!next || read.loading.value" @click="page(next)">下一页</el-button></div>
+      <el-table v-else :data="rows" row-key="record_key" :aria-busy="read.loading.value" :empty-text="emptyText" @selection-change="checked = $event"><el-table-column v-if="!current && canWrite" type="selection" :selectable="(row: AlertRow) => !stale && row.can_delete" width="48" /><el-table-column label="时间（北京时间）" min-width="185"><template #default="{ row }">{{ timeText(row.time) }}</template></el-table-column><el-table-column :label="notifications ? '收件人 / 目标' : '服务器 / 网站'" min-width="170"><template #default="{ row }">{{ row.name }}<small v-if="row.site && row.node" class="v3-block v3-muted">{{ row.node }}</small></template></el-table-column><el-table-column label="类型" min-width="140"><template #default="{ row }">{{ kindLabels[row.kind] || (row.kind === 'email' ? '邮箱通知' : row.kind === 'feishu' ? '飞书通知' : row.kind) }}</template></el-table-column><el-table-column label="问题 / 内容" min-width="280"><template #default="{ row }"><el-button link type="primary" class="v3-event-content" @click="detail = row">{{ row.message || '查看记录详情' }}</el-button></template></el-table-column><el-table-column label="状态" min-width="140"><template #default="{ row }"><el-tag :type="row.status === 'firing' ? 'danger' : row.status === 'resolved' ? 'success' : 'info'">{{ phaseLabels[row.status] || '未知' }}</el-tag><small v-if="row.attempts !== undefined" class="v3-block v3-muted">尝试 {{ row.attempts }} 次</small></template></el-table-column><el-table-column label="结束时间 / 持续时长" min-width="190"><template #default="{ row }">{{ row.ended ? timeText(row.ended) : row.status === 'firing' ? '持续异常' : '未提供' }}</template></el-table-column><el-table-column v-if="!current" label="删除保护" min-width="220"><template #default="{ row }"><el-button v-if="canWrite" text type="danger" :disabled="stale || !row.can_delete" @click="deletion?.open([row])">删除</el-button><small class="v3-block v3-muted">{{ row.delete_reason || '可删除历史' }}</small></template></el-table-column></el-table>
+      <CursorPagination v-if="loaded" :previous="!!cursor" :next="!!next" :limit="pageLimit" :loading="read.loading.value || stale" @previous="page(previousCursors.get(cursor) || '')" @next="page(next)" @resize="pagination.resize" />
       <p v-if="notifications" class="v3-muted">已完成不代表收件人已读；邮件到达收件箱仍需核对实际收件。关闭通知通道时，未完成记录保留并暂停。</p>
     </el-card>
-    <el-dialog :model-value="!!detail" title="告警与通知详情" class="v3-node-dialog" width="760px" @update:model-value="detail = undefined"><dl v-if="detail" class="v3-detail-grid"><dt>记录 ID</dt><dd>{{ detail.id }}</dd><dt>服务器</dt><dd>{{ detail.node || '监控中心' }}</dd><dt>对象</dt><dd>{{ detail.name }}</dd><dt>状态</dt><dd>{{ phaseLabels[detail.status] || '未知' }}</dd><dt>时间</dt><dd>{{ timeText(detail.time) }}</dd><dt>结束 / 完成</dt><dd>{{ timeText(detail.ended) }}</dd><template v-if="detail.attempts !== undefined"><dt>尝试次数</dt><dd>{{ detail.attempts }}</dd><dt>计划发送时间</dt><dd>{{ timeText(detail.nextTry) }}</dd></template><dt>内容</dt><dd>{{ detail.message }}</dd><dt>删除保护</dt><dd>{{ detail.delete_reason || '可删除历史' }}</dd></dl><template #footer><el-button @click="detail = undefined">关闭</el-button></template></el-dialog>
+    <template v-if="notifications"><el-alert v-if="statsRead.error.value" :title="`${statsRead.error.value}；统计未更新`" type="warning" :closable="false" /><MetricChart :title="filters.tab === 'email' ? '最近 7 天邮箱通知结果' : '最近 7 天飞书通知结果'" :option="chart" /><p class="small muted">按北京时间及任务创建日期统计当前结果，包含暂停任务。已提交邮件服务器不代表进入收件箱或已读。</p></template>
+    <el-dialog :model-value="!!detail" title="告警与通知详情" class="v3-node-dialog" width="760px" @update:model-value="detail = undefined"><div v-if="detail" class="detail-grid v3-detail-grid"><div><span>记录 ID</span><strong>{{ detail.id }}</strong></div><div><span>服务器</span><strong>{{ detail.node || '监控中心' }}</strong></div><div><span>对象</span><strong>{{ detail.name }}</strong></div><div><span>状态</span><strong>{{ phaseLabels[detail.status] || '未知' }}</strong></div><div><span>时间</span><strong>{{ timeText(detail.time) }}</strong></div><div><span>结束 / 完成</span><strong>{{ timeText(detail.ended) }}</strong></div><template v-if="detail.attempts !== undefined"><div><span>尝试次数</span><strong>{{ detail.attempts }}</strong></div><div><span>计划发送时间</span><strong>{{ timeText(detail.nextTry) }}</strong></div></template><div><span>内容</span><strong>{{ detail.message }}</strong></div><div><span>删除保护</span><strong>{{ detail.delete_reason || '可删除历史' }}</strong></div></div><template #footer><el-button @click="detail = undefined">关闭</el-button></template></el-dialog>
   </section>
 </template>

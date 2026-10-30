@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-30",
+  "baseline": "8422158e5cb454cf0b87b20f75351acc04192c86",
+  "head": "06e9ae0e57deb401e3b76e0a6172b1c70e944e9c",
+  "synthetic": true,
+  "page_pairs": 24,
+  "screenshots": 48,
+  "viewports": {
+    "desktop": [
+      1440,
+      1000
+    ],
+    "mobile": [
+      390,
+      844
+    ]
+  },
+  "frontend_tests": 220,
+  "go_race_tests": 16,
+  "production_changed": false,
+  "committed": false,
+  "limits": "See V3-UI-RESTORATION.md"
+}

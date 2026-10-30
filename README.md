@@ -2,7 +2,7 @@
 
 一个中文后台，集中查看**服务器资源、网站访问、证书有效期和文件安全**。发现异常后，通过飞书和邮箱提醒，并保留可查询的故障与通知历史。
 
-**v3.0.0 · 单中心正式版** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases/tag/v3.0.0) · [v3 安装入口](docs/INSTALL-v3.0.0.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.0.md) · [验收记录](docs/V3-FORMAL-RELEASE-READINESS.md)
+**v3.0.1 · 单中心正式版** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases/tag/v3.0.1) · [v3 安装入口](docs/INSTALL-v3.0.0.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.1.md) · [验收记录](docs/V3-FORMAL-RELEASE-READINESS.md)
 
 v3 主控主动采集子控，业务数据使用 PostgreSQL，指标使用 VictoriaMetrics。保留原版后台风格，接通网页安装、独立升级、任务日志和继续／回退；普通子控操作不重启主控。
 

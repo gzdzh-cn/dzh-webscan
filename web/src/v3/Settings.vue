@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageHeading from './PageHeading.vue'
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { V3RetentionPolicy, V3RetentionPolicyView, V3RetentionStatus } from '../controlV3'
@@ -9,7 +10,11 @@ import Audit from './Audit.vue'
 import RuntimeSettings from './RuntimeSettings.vue'
 
 const { client, session } = useConsole(), route = useRoute(), router = useRouter(), read = useReadScope()
-const tab = computed(() => ['runtime', 'storage', 'audit'].includes(String(route.query.tab)) ? String(route.query.tab) : 'retention')
+const groupLabels: Record<string,string> = {monitoring:'公共监控', website_monitor:'网站检测', feishu:'飞书通知', email:'邮箱通知', retention:'历史与备份', storage:'存储与清理', audit:'操作审计'}
+const tab = computed(() => route.query.storage === '1' ? 'storage' : route.query.group === '历史与备份' ? 'retention' : ['runtime','retention','storage','audit'].includes(String(route.query.tab)) ? String(route.query.tab) : 'runtime')
+const runtimeGroup = computed(() => ['monitoring','website_monitor','feishu','email'].includes(String(route.query.group)) ? String(route.query.group) : 'monitoring')
+const category = computed(() => tab.value === 'runtime' ? runtimeGroup.value : tab.value)
+function chooseCategory(value: string) { void router.push({path:'/settings', query: {tab:['retention','storage','audit'].includes(value) ? value : 'runtime', group:['retention','storage','audit'].includes(value) ? undefined : value}}) }
 const fields: { key: keyof V3RetentionPolicy; label: string }[] = [
   { key: 'sqlite_events_days', label: '普通文件及运行事件' }, { key: 'security_events_days', label: '安全扫描命中事件' },
   { key: 'website_incidents_days', label: '网站故障历史' }, { key: 'server_alerts_days', label: '服务器告警历史' },
@@ -66,24 +71,24 @@ const bytes = (value?: number) => value === undefined ? '—' : `${(value / 1024
 </script>
 
 <template>
-  <section class="v3-page-heading"><div><h1>系统设置</h1><p class="v3-muted">运行设置、历史保留、存储与清理及操作审计。</p></div></section>
-  <nav class="v3-alert-tabs" aria-label="设置分类"><el-button v-for="item in [{ id: 'runtime', label: '运行设置' }, { id: 'retention', label: '历史保留' }, { id: 'storage', label: '存储与清理' }, { id: 'audit', label: '操作审计' }]" :key="item.id" :type="tab === item.id ? 'primary' : 'default'" @click="router.push({ path: '/settings', query: { tab: item.id } })">{{ item.label }}</el-button></nav>
+  <PageHeading title="系统设置" />
+  <el-card shadow="never"><div class="filters"><el-select :model-value="category" aria-label="设置分类" :disabled="busy" @update:model-value="chooseCategory(String($event))"><el-option v-for="(label,key) in groupLabels" :key="key" :value="key" :label="label" /></el-select><router-link to="/backups?tab=deployment">部署配置备份 →</router-link></div><p class="muted">修改主控已保存配置，保存前自动备份；应用前请核对变更预览。</p></el-card>
   <template v-if="tab === 'retention'">
     <el-alert v-if="read.error.value" :title="`${read.error.value}；已有内容保留`" type="error" :closable="false" />
-    <el-card shadow="never"><div class="v3-job-heading"><h2>历史保留期限</h2><el-button :loading="read.loading.value" :disabled="busy" @click="reload">重新读取</el-button></div>
+    <el-card shadow="never"><div class="card-heading v3-job-heading"><h2>历史保留期限</h2><el-button :loading="read.loading.value" :disabled="busy" @click="reload">重新读取</el-button></div>
       <p class="v3-muted">按各类记录独立计算。当前异常、未完成任务和待投递通知继续受保护；调大期限不能找回已清理记录。</p>
       <p v-if="!baseline">{{ read.loading.value ? '正在读取保留期限…' : '保留期限尚未读取成功' }}</p>
       <template v-else>
         <p class="v3-muted">配置版本 {{ baseline.version }} · 更新时间 {{ timeText(baseline.updated_at) }}</p>
         <el-alert v-if="changedElsewhere" title="配置已被其他操作修改。当前草稿已保留，请重新读取后再提交。" type="warning" :closable="false" />
-        <el-form label-position="top" class="v3-form-grid" @submit.prevent="prepare"><el-form-item v-for="field in fields" :key="field.key" :label="`${field.label}（天）`"><el-input v-model="draft[field.key]" :aria-label="field.label" inputmode="numeric" :disabled="busy || !admin" @input="edited" /></el-form-item></el-form>
+        <el-form label-position="top" class="form-grid v3-form-grid" @submit.prevent="prepare"><el-form-item v-for="field in fields" :key="field.key" :label="`${field.label}（天）`"><el-input v-model="draft[field.key]" :aria-label="field.label" inputmode="numeric" :disabled="busy || !admin" @input="edited" /></el-form-item></el-form>
         <div class="v3-save-feedback" role="status" aria-live="polite"><el-alert v-if="error" :title="error" type="error" :closable="false" /><el-alert v-else-if="message" :title="message" type="success" :closable="false" /><p v-else>{{ busy ? '正在保存并应用保留期限…' : dirty ? '保留期限已修改，尚未保存。' : admin ? '各项支持 1～3650 天整数，保存后生效。' : '只有管理员可以修改保留期限。' }}</p></div>
         <el-button v-if="admin" type="primary" :loading="busy" :disabled="!dirty || changedElsewhere || read.loading.value" @click="prepare">保存并应用保留期限</el-button>
       </template>
     </el-card>
-    <el-card v-if="status" shadow="never"><h2>自动清理状态</h2><dl class="v3-detail-grid"><dt>工作器</dt><dd>{{ status.worker_healthy === null ? '未知，尚无心跳证据' : status.worker_healthy ? '正常' : '异常' }} {{ status.reason }}</dd><dt>心跳时间</dt><dd>{{ timeText(status.worker_heartbeat) }}</dd><dt>业务表及索引</dt><dd>{{ bytes(status.managed_storage_bytes) }}（当前 PostgreSQL 应用 schema）</dd><dt>最近清理</dt><dd>{{ status.last_job ? `${status.last_job.status === 'succeeded' ? '已完成' : status.last_job.status === 'running' ? '执行中' : '已取消'} · 已清理 ${status.last_job.deleted} 条` : '暂无清理任务' }}</dd></dl><p class="v3-muted">删除记录不等于立即释放磁盘。可复用空间由数据库后续写入使用；此处不包含时序库、导出文件或其他项目的数据。</p></el-card>
+    <el-card v-if="status" shadow="never"><h2>自动清理状态</h2><div class="detail-grid v3-detail-grid"><div><span>工作器</span><strong>{{ status.worker_healthy === null ? '未知，尚无心跳证据' : status.worker_healthy ? '正常' : '异常' }} {{ status.reason }}</strong></div><div><span>心跳时间</span><strong>{{ timeText(status.worker_heartbeat) }}</strong></div><div><span>业务表及索引</span><strong>{{ bytes(status.managed_storage_bytes) }}（当前 PostgreSQL 应用 schema）</strong></div><div><span>最近清理</span><strong>{{ status.last_job ? `${status.last_job.status === 'succeeded' ? '已完成' : status.last_job.status === 'running' ? '执行中' : '已取消'} · 已清理 ${status.last_job.deleted} 条` : '暂无清理任务' }}</strong></div></div><p class="v3-muted">删除记录不等于立即释放磁盘。可复用空间由数据库后续写入使用；此处不包含时序库、导出文件或其他项目的数据。</p></el-card>
   </template>
-  <RuntimeSettings v-else-if="tab === 'runtime'" />
+  <RuntimeSettings v-else-if="tab === 'runtime'" :group="runtimeGroup" />
   <HistoryStorage v-else-if="tab === 'storage'" />
   <Audit v-else />
   <el-dialog v-model="confirm" title="确认缩短保留期限" width="530px" class="v3-node-dialog"><p>缩短期限后，符合保护规则的旧历史将被自动永久清理。删除不可逆，调大期限不能恢复。</p><p>账号、网站配置、当前异常和未完成任务不属于本次历史清理范围。</p><template #footer><el-button @click="confirm = false">返回修改</el-button><el-button type="danger" @click="save">确认保存并应用</el-button></template></el-dialog>

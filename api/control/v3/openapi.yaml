@@ -3,7 +3,8 @@ info:
   title: Webscan v3 Control API
   version: 3.0.0-dev
   description: |
-    基础重构验证接口，尚未替换 v2 后台。当前不提供生产迁移或 HA 安装。
+    v3 主控后台接口；UI 使用 v2.0.46 展示结构及 v3 数据模型。
+    生产迁移及 HA 安装的可用性以对应验收记录为准。
     时间为 RFC3339，分页采用不透明游标。写操作需 CSRF；服务器保存还需
     Idempotency-Key 与 expected_version。配置保存不等于已下发或部署。
 servers:
@@ -171,10 +172,12 @@ paths:
   /api/v3/servers:
     get:
       operationId: listServers
+      description: 单次查询返回当前页的安全采集展示字段；不返回节点私有配置或凭据。采集状态与已保存配置、已应用版本独立判断。
       parameters:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/Limit'}
-        - {name: q, in: query, schema: {type: string}, description: 名称或 ID 关键词，按字面匹配}
+        - {name: q, in: query, schema: {type: string}, description: 名称、节点 ID 或指标地址关键词，按字面匹配}
+        - {name: status, in: query, schema: {type: string, enum: ['', normal, unreachable, stale, unknown, disabled]}, description: 按当前运行登记及采集新鲜度过滤}
       responses:
         '200':
           description: 按 ID 升序；next_cursor 为空时结束
@@ -238,29 +241,44 @@ paths:
                 required: [node, status, latest_deployment]
                 properties:
                   node: {$ref: '#/components/schemas/Node'}
-                  status:
-                    type: object
-                    nullable: true
-                    properties:
-                      sampled_at: {type: integer, format: int64, nullable: true, description: Unix 毫秒}
-                      updated_at: {type: string, format: date-time}
-                      error: {type: string}
-                      metrics_error: {type: string}
-                      events_error: {type: string}
-                      protocol_error: {type: string}
-                      metrics:
-                        type: object
-                        properties:
-                          cpu_percent: {type: number, nullable: true}
-                          memory_percent: {type: number, nullable: true}
-                          disk_percent: {type: number, nullable: true}
-                          uptime: {type: number, nullable: true}
-                      info:
-                        type: object
-                        description: 主机名、内核、架构及 Agent 版本／运行方式的白名单字段；缺失值为 null
+                  status: {$ref: '#/components/schemas/ConsoleNodeStatus'}
                   latest_deployment:
                     allOf: [{$ref: '#/components/schemas/DeploymentJob'}]
                     nullable: true
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 节点不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}/metrics:
+    get:
+      operationId: getServerConsoleMetrics
+      description: 固定节点和指标白名单的只读历史曲线。最多 31 天、1000 个时间点、64 条时序和 8 MiB 响应；上游超时 10 秒。时间点缺少有效样本时 ok=false、values 为空，不补零；超过 60 秒的旧样本不延长成连续曲线。当前提供资源及链路聚合曲线，分设备历史不包含在此接口中。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+      responses:
+        '200':
+          description: 按时间升序的曲线；time、start、end 为 Unix 秒
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [points, resolution_seconds, start, end]
+                properties:
+                  start: {type: integer, format: int64}
+                  end: {type: integer, format: int64}
+                  resolution_seconds: {type: integer, minimum: 30}
+                  points:
+                    type: array
+                    maxItems: 1000
+                    items:
+                      type: object
+                      required: [time, ok, values]
+                      properties:
+                        time: {type: integer, format: int64}
+                        ok: {type: boolean}
+                        values: {type: object, additionalProperties: {type: number}}
+        '400': {description: 时间范围无效}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {description: 节点不存在}
         '503': {$ref: '#/components/responses/Unavailable'}
@@ -865,6 +883,39 @@ paths:
         '400': {description: 账号、类别、时间或分页参数不正确}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '405': {description: 不支持写入、修改或删除}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications/stats:
+    get:
+      operationId: getNotificationConsoleStatistics
+      description: 只读聚合最近七个北京时间自然日的通知任务当前结果，按任务创建日分组；包含暂停任务，已完成表示通知工作器已确认提交，不代表邮件已读。与列表采用相同通道和节点范围，聚合不依赖当前页，不返回消息正文、凭据或供应商响应。
+      parameters:
+        - {name: channel, in: query, required: true, schema: {type: string, enum: [feishu, email]}}
+        - {name: node, in: query, schema: {type: string}}
+      responses:
+        '200':
+          description: 固定七天，空日期计数为零；数据库失败返回 503，不能作为空统计
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  timezone: {type: string, const: Asia/Shanghai}
+                  group_by: {type: string, const: created_at}
+                  channel: {type: string, enum: [feishu, email]}
+                  node: {type: string}
+                  items:
+                    type: array
+                    minItems: 7
+                    maxItems: 7
+                    items:
+                      type: object
+                      properties:
+                        day: {type: string, format: date}
+                        delivered: {type: integer, minimum: 0}
+                        pending: {type: integer, minimum: 0}
+                        retrying: {type: integer, minimum: 0}
+        '400': {description: 通道或服务器条件无效}
+        '401': {$ref: '#/components/responses/Unauthorized'}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/notifications:
     get:
@@ -2189,6 +2240,10 @@ components:
         version: {type: integer, readOnly: true}
         applied_version: {type: integer, readOnly: true}
         shard: {type: integer, readOnly: true}
+        collection_state: {type: string, enum: [normal, unreachable, stale, unknown, disabled], readOnly: true}
+        status:
+          allOf: [{$ref: '#/components/schemas/ConsoleNodeStatus'}]
+          readOnly: true
         configuration:
           type: object
           readOnly: true
@@ -2200,6 +2255,26 @@ components:
             runtime_enabled: {type: [boolean, 'null'], description: 'null 表示尚未登记'}
             runtime_mode: {type: string}
             runtime_endpoint: {type: string}
+    ConsoleNodeStatus:
+      type: object
+      nullable: true
+      properties:
+        sampled_at: {type: integer, format: int64, nullable: true, description: Unix 毫秒}
+        updated_at: {type: string, format: date-time}
+        error: {type: string}
+        metrics_error: {type: string}
+        events_error: {type: string}
+        protocol_error: {type: string}
+        metrics:
+          type: object
+          properties:
+            cpu_percent: {type: number, nullable: true}
+            memory_percent: {type: number, nullable: true}
+            disk_percent: {type: number, nullable: true}
+            uptime: {type: number, nullable: true}
+        info:
+          type: object
+          description: 主机名、内核、架构及 Agent 版本／运行方式的白名单字段；缺失值为 null
     Event:
       type: object
       required: [node, id, received_at, payload, source, record_key, can_delete, delete_reason]

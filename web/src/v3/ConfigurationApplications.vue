@@ -1,12 +1,15 @@
 <script setup lang="ts">
+import PageHeading from './PageHeading.vue'
+import CursorPagination from './CursorPagination.vue'
+import { useCursorPage } from './cursorPage'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { queryParams } from '../api'
 import { V3Error, type V3ConfigurationApplication, type V3ConfigurationApplicationLog, type V3ConfigurationApplicationAction, type V3ConfigurationApplicationActions } from '../controlV3'
 import { timeText, useConsole } from './context'
 import { useReadScope } from './readScope'
 
 const { client, session } = useConsole(), route = useRoute(), router = useRouter(), read = useReadScope()
+const pagination = useCursorPage()
 const admin = computed(() => session.value?.role === 'admin')
 const items = ref<V3ConfigurationApplication[]>([]), job = ref<V3ConfigurationApplication>(), logs = ref<V3ConfigurationApplicationLog[]>([])
 const next = ref(''), cursor = ref('0'), clipped = ref(false)
@@ -65,11 +68,10 @@ async function refresh() {
       backlog = result.items.length === 100
     })
   } else {
-    await read.run(signal => client.configurationApplications(String(route.query.stage || ''), String(route.query.cursor || ''), 20, signal), page => { items.value = page.items; next.value = page.next_cursor })
+    await read.run(signal => client.configurationApplications(String(route.query.stage || ''), String(route.query.cursor || ''), pagination.limit.value, signal), page => { items.value = page.items; next.value = page.next_cursor })
   }
   if (!disposed && current === generation && !document.hidden && admin.value && id && (backlog || read.error.value || !job.value || ['queued', 'running'].includes(job.value.status))) timer = setTimeout(() => void refresh(), backlog ? 0 : 3000)
 }
-function page(value: string) { void router.push({ path: '/configuration-applications', query: Object.fromEntries(queryParams({ stage: route.query.stage, cursor: value })) }) }
 function visibility() { generation++; clearTimeout(timer); if (document.hidden) read.cancel(); else void refresh() }
 watch([() => route.fullPath, admin, () => session.value?.username], () => {
   generation++; clearTimeout(timer); read.cancel(); writeGeneration++; writeController.abort(); writeController = new AbortController(); pending.value = undefined; actions.value = {}; writing.value = false; writeError.value = ''; items.value = []; job.value = undefined; logs.value = []; next.value = ''; cursor.value = '0'; clipped.value = false
@@ -81,7 +83,7 @@ onUnmounted(() => { disposed = true; generation++; writeGeneration++; writeContr
 
 <template>
   <section v-if="admin">
-    <div class="v3-page-heading"><div><router-link to="/deployments" class="v3-back">← 返回部署任务</router-link><h1>配置应用{{ route.params.id ? '进度与日志' : '任务' }}</h1><p class="v3-muted">运行中每 3 秒更新。继续或回退需确认当前任务版本；历史成功不代表当前配置版本。</p></div><el-button :loading="read.loading.value" :disabled="writing || !!pending" @click="refresh">刷新应用进度</el-button></div>
+    <PageHeading :title="route.params.id ? '配置应用进度与日志' : '配置应用任务'" back="/deployments" back-label="返回部署任务"><el-button :loading="read.loading.value" :disabled="writing || !!pending" @click="refresh">刷新应用进度</el-button></PageHeading>
     <el-alert v-if="read.error.value" :title="`${read.error.value}；上次读取结果保留`" type="error" :closable="false" />
     <el-alert v-if="writeError" :title="writeError" type="error" :closable="false" />
     <el-card v-if="pending" shadow="never" class="v3-application-confirmation" aria-label="配置应用操作确认">
@@ -98,11 +100,11 @@ onUnmounted(() => { disposed = true; generation++; writeGeneration++; writeContr
     </div>
     <el-card v-if="!route.params.id" shadow="never">
       <el-table :data="items" row-key="id" empty-text="暂无配置应用任务"><el-table-column label="状态" min-width="140"><template #default="{ row }">{{ statusText(row) }}</template></el-table-column><el-table-column label="阶段" min-width="140"><template #default="{ row }">{{ phaseText(row.phase) }}</template></el-table-column><el-table-column prop="controller" label="当前操作人" min-width="120" /><el-table-column label="更新时间" min-width="180"><template #default="{ row }">{{ timeText(row.updated_at) }}</template></el-table-column><el-table-column label="进度" width="120"><template #default="{ row }"><router-link :to="`/configuration-applications/${encodeURIComponent(row.id)}`">查看应用日志</router-link></template></el-table-column></el-table>
-      <div class="v3-pagination"><el-button :disabled="!route.query.cursor || read.loading.value" @click="page('')">回到首页</el-button><span>每页最多 20 条</span><el-button :disabled="!next || read.loading.value" @click="page(next)">下一页</el-button></div>
+      <CursorPagination :previous="!!route.query.cursor" :next="!!next" :limit="pagination.limit.value" :loading="read.loading.value" @previous="pagination.previous" @next="pagination.go(next)" @resize="pagination.resize" />
     </el-card>
     <template v-else-if="job">
-      <el-card shadow="never"><h2>{{ statusText(job) }} · {{ phaseText(job.phase) }}</h2><p v-if="job.recovery_hold" role="status">任务已冻结，需管理员检查恢复资料；未完成生效验收。</p><p v-else-if="job.recovery_required" role="status">本任务仍承担继续或回退职责，请保留原任务和恢复资料。</p><el-alert v-if="job.error_code" :title="codeText(job.error_code)" type="error" :closable="false" /><dl class="v3-detail-grid"><dt>任务 ID</dt><dd>{{ job.id }}</dd><dt>配置候选代次</dt><dd>{{ job.generation }}</dd><dt>操作人</dt><dd>{{ job.controller }}</dd><dt>更新时间</dt><dd>{{ timeText(job.updated_at) }}</dd></dl><router-link to="/backups?tab=deployment">查看部署配置备份与恢复记录 →</router-link></el-card>
-      <el-card shadow="never"><div class="v3-job-heading"><h2>应用进程日志</h2><span class="v3-muted">已读至 #{{ cursor }}</span></div><p v-if="clipped" class="v3-muted">页面保留最近 1000 行，完整记录仍保存在主控。</p><ol v-if="logs.length" class="v3-logs" aria-label="配置应用进程日志"><li v-for="line in logs" :key="line.cursor"><time>{{ timeText(line.created_at) }}</time><span class="v3-log-phase">{{ phaseText(line.phase) }}</span><span>{{ codeText(line.code) }}</span></li></ol><el-empty v-else description="暂无阶段日志" /></el-card>
+      <el-card shadow="never"><h2>{{ statusText(job) }} · {{ phaseText(job.phase) }}</h2><p v-if="job.recovery_hold" role="status">任务已冻结，需管理员检查恢复资料；未完成生效验收。</p><p v-else-if="job.recovery_required" role="status">本任务仍承担继续或回退职责，请保留原任务和恢复资料。</p><el-alert v-if="job.error_code" :title="codeText(job.error_code)" type="error" :closable="false" /><div class="detail-grid v3-detail-grid"><div><span>任务 ID</span><strong>{{ job.id }}</strong></div><div><span>配置候选代次</span><strong>{{ job.generation }}</strong></div><div><span>操作人</span><strong>{{ job.controller }}</strong></div><div><span>更新时间</span><strong>{{ timeText(job.updated_at) }}</strong></div></div><router-link to="/backups?tab=deployment">查看部署配置备份与恢复记录 →</router-link></el-card>
+      <el-card shadow="never"><div class="card-heading v3-job-heading"><h2>应用进程日志</h2><span class="v3-muted">已读至 #{{ cursor }}</span></div><p v-if="clipped" class="v3-muted">页面保留最近 1000 行，完整记录仍保存在主控。</p><ol v-if="logs.length" class="v3-logs" aria-label="配置应用进程日志"><li v-for="line in logs" :key="line.cursor"><time>{{ timeText(line.created_at) }}</time><span class="v3-log-phase">{{ phaseText(line.phase) }}</span><span>{{ codeText(line.code) }}</span></li></ol><el-empty v-else description="暂无阶段日志" /></el-card>
     </template>
     <p v-else-if="route.params.id">{{ read.loading.value ? '正在读取应用任务…' : '暂未读取到任务，请刷新重试' }}</p>
   </section>
