@@ -2,7 +2,7 @@
 
 一个中文后台，集中查看**服务器资源、网站访问、证书有效期和文件安全**。发现异常后，通过飞书和邮箱提醒，并保留可查询的故障与通知历史。
 
-**源码版本 v3.0.0 · 单中心** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases) · [v3 安装与升级](docs/V3-SINGLE-INSTALL.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.0.md) · [验收记录](docs/V3-FORMAL-RELEASE-READINESS.md)
+**v3.0.0 · 单中心正式版** · [GitHub 发布](https://github.com/gzdzh-cn/dzh-webscan/releases/tag/v3.0.0) · [v3 安装入口](docs/INSTALL-v3.0.0.md) · [后台指南](docs/V3-CONSOLE.md) · [发布说明](docs/RELEASE-v3.0.0.md) · [验收记录](docs/V3-FORMAL-RELEASE-READINESS.md)
 
 v3 主控主动采集子控，业务数据使用 PostgreSQL，指标使用 VictoriaMetrics。保留原版后台风格，接通网页安装、独立升级、任务日志和继续／回退；普通子控操作不重启主控。
 
@@ -48,36 +48,15 @@ v2.0.39 将采集、部署、配置生效状态分开展示，未完成任务可
 
 ## v3 安装与打开后台
 
-按 [v3 单中心安装与升级](docs/V3-SINGLE-INSTALL.md) 准备固定版本镜像、签名资料和独立数据目录。主控由应用容器、PostgreSQL 17、VictoriaMetrics 和宿主管理服务组成；安装完成后通过 HTTPS 后台管理子控。
+按 [v3 正式安装入口](docs/INSTALL-v3.0.0.md) 下载并验证固定版本镜像、签名资料和安装请求；[发布回执](docs/RELEASE-v3.0.0-RECEIPT.md) 列出真实源码提交、摘要及验收范围。主控由应用容器、PostgreSQL 17、VictoriaMetrics 和宿主管理服务组成；安装完成后通过 HTTPS 后台管理子控。
 
 浏览器访问主控 TCP 443；主控连接子控 SSH 实际端口及 TCP 19100。旧推送节点迁移完成前保留原 TCP 19443。已有试运行中心先预览升级，保留原 Vault 和数据库；v2 数据不自动导入。
 
-## v2 安装与打开后台（旧版）
+## v2 归档维护
 
-在 Linux amd64 主服务器的 root SSH 终端执行：
+`latest` 已指向 v3。v2 的旧安装菜单和在线升级命令不能用于跨版本升级；维护旧系统请使用已固定的 v2 产物。旧主控数据先保留，迁移到 PostgreSQL 需另行核对，不自动导入。
 
-```bash
-bash -o pipefail -c 'curl -fsSL https://github.com/gzdzh-cn/dzh-webscan/releases/download/v2.0.46/install.sh | bash'
-```
-
-按向导填写配置，保存后选择 **1、安装**。可先只安装主服务器，以后从后台添加子服务器。日常管理在主服务器任意目录输入 `webscan`；再次执行安装命令保留已有 YAML、账号和数据，只更新入口并进入菜单，不自动升级服务。[完整安装与重复执行说明 →](docs/INSTALLATION.md)
-
-| 打开方式 | 默认地址与端口 |
-|---|---|
-| IP 直接访问 | `http://主服务器IP:19444/login` 或 `https://主服务器IP:19444/login`，与实际 SSL 设置一致；云安全组与防火墙放行 TCP 19444 |
-| 宝塔 HTTPS 域名反代 | `https://monitor.example.com/login`；对外开放 443，同机后台可绑定 `127.0.0.1:19444` |
-
-初始账号见安装结果；后台修改密码后使用新密码。子服务器默认还需 SSH 22、指标 19100；主服务器事件接收端口为 19443。[登录与宝塔反代](docs/WEBSITE.md#宝塔域名反向代理) · [全部端口及访问方向](docs/NODE-DEPLOYMENT.md#端口与安全)
-
-## v2 已安装用户升级（旧版）
-
-已完成 v2.0.35 节点整合的系统，更新当前后台只需升级主服务器：
-
-```bash
-webscan --upgrade --central-only
-```
-
-旧三容器节点尚未整合时执行 `webscan --upgrade`；旧 legacy 架构先按[迁移教程](docs/MIGRATION.md)迁入历史并切换。升级保留账号、网站和历史；发布镜像或下载部署包不会自动切换运行服务。[升级、继续任务与回退 →](docs/OPERATIONS.md)
+[v2 安装归档](docs/INSTALLATION.md) · [旧版维护](docs/OPERATIONS.md) · [v3 安装与升级细节](docs/V3-SINGLE-INSTALL.md)
 
 ## 详细文档
 
