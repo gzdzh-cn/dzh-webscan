@@ -79,7 +79,7 @@ func TestSingleInstallDisposableDockerStack(t *testing.T) {
 	if err := ReleaseCommand(context.Background(), ReleaseOptions{Action: "init-key", Output: signing}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReleaseCommand(context.Background(), ReleaseOptions{Action: "sign", Output: signed, KeyFile: filepath.Join(signing, "signing.key"), Release: "v3.0.0-local-test", Helper: filepath.Join(artifacts, "webscan"), NativeBundle: filepath.Join(artifacts, "agent-native.tar.gz"), AgentImage: os.Getenv("WEBSCAN_V3_TEST_SINGLE_AGENT_IMAGE")}, io.Discard); err != nil {
+	if err := ReleaseCommand(context.Background(), ReleaseOptions{Action: "sign", Output: signed, KeyFile: filepath.Join(signing, "signing.key"), Release: deploymentFixtureRelease(t), Helper: filepath.Join(artifacts, "webscan"), NativeBundle: filepath.Join(artifacts, "agent-native.tar.gz"), AgentImage: os.Getenv("WEBSCAN_V3_TEST_SINGLE_AGENT_IMAGE")}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	s.ReleaseTrust = &DeploymentTrustConfig{VaultKeyFile: filepath.Join(s.Root, "vault.key"), PublicKeyFile: filepath.Join(signing, "signing.pub"), ManifestFile: filepath.Join(signed, "release.json"), SignatureFile: filepath.Join(signed, "release.sig"), HelperFile: filepath.Join(artifacts, "webscan"), NativeBundleFile: filepath.Join(artifacts, "agent-native.tar.gz")}
@@ -754,7 +754,7 @@ func TestSingleUpgradeExistingDisposableDockerStack(t *testing.T) {
 		}
 	}
 	signed := filepath.Join(parent, "upgrade-signed-"+token()[:12])
-	if e = ReleaseCommand(ctx, ReleaseOptions{Action: "sign", Output: signed, KeyFile: filepath.Join(parent, "test-signing", "signing.key"), Release: "v3.0.0-local-test", Helper: filepath.Join(artifacts, "webscan"), NativeBundle: filepath.Join(artifacts, "agent-native.tar.gz"), AgentImage: os.Getenv("WEBSCAN_V3_TEST_SINGLE_AGENT_IMAGE")}, io.Discard); e != nil {
+	if e = ReleaseCommand(ctx, ReleaseOptions{Action: "sign", Output: signed, KeyFile: filepath.Join(parent, "test-signing", "signing.key"), Release: deploymentFixtureRelease(t), Helper: filepath.Join(artifacts, "webscan"), NativeBundle: filepath.Join(artifacts, "agent-native.tar.gz"), AgentImage: os.Getenv("WEBSCAN_V3_TEST_SINGLE_AGENT_IMAGE")}, io.Discard); e != nil {
 		t.Fatal(e)
 	}
 	trust := *s.ReleaseTrust

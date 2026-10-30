@@ -8,6 +8,16 @@ main() {
 cd "$(dirname "$0")/.."
 task_mode="${1:-native}"
 case "$task_mode" in native|docker|web-native|web-docker|transition|sidecars|legacy-group|pure-compose|recovery|docker-recovery|name-change|docker-name-change) ;; *) printf 'Usage: %s [native|docker|web-native|web-docker|transition|sidecars|legacy-group|pure-compose|recovery|docker-recovery|name-change|docker-name-change]\n' "$0" >&2; exit 2 ;; esac
+task_release="${WEBSCAN_V3_KERNEL_RELEASE:-v3.0.0-local-test}"
+if [[ ! "$task_release" =~ ^v[0-9][A-Za-z0-9._-]{1,80}$ ]]; then echo 'Invalid explicit acceptance release.' >&2; exit 2; fi
+task_helper="${WEBSCAN_V3_KERNEL_HELPER:-}"
+task_native="${WEBSCAN_V3_KERNEL_NATIVE_BUNDLE:-}"
+if [[ -n "$task_helper" || -n "$task_native" || "$task_release" != v3.0.0-local-test ]]; then
+  [[ "$task_mode" == web-native || "$task_mode" == web-docker ]] || { echo 'Exact release artifact acceptance requires a web lifecycle mode.' >&2; exit 2; }
+  for task_artifact in "$task_helper" "$task_native"; do
+    [[ "$task_artifact" == /* && -f "$task_artifact" && ! -L "$task_artifact" ]] || { echo 'Explicit regular helper and native artifacts required.' >&2; exit 2; }
+  done
+fi
 task_root="$(pwd)"
 mkdir -p .cache/verification/v3
 task_output_root="${WEBSCAN_V3_KERNEL_OUTPUT_ROOT:-$task_root/.cache/verification/v3}"
@@ -44,9 +54,14 @@ if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name
 task_guest="$(docker image inspect "$task_guest_name" --format '{{.Id}}')"
 task_tools="$(docker image inspect webscan-v3-kernel-tools:local --format '{{.Id}}')"
 docker image inspect "$task_guest" "$task_tools" > "$task_run/images.json"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -ldflags '-X webscan/internal/deploy.Release=v3.0.0-local-test' \
-  -o "$task_run/webscan" ./cmd/webscan
+if [[ -n "$task_helper" ]]; then
+  cp "$task_helper" "$task_run/webscan"
+else
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags '-X webscan/internal/deploy.Release=v3.0.0-local-test' \
+    -o "$task_run/webscan" ./cmd/webscan
+fi
+printf '%s\n' "$task_release" > "$task_run/release"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o "$task_run/nodeops.test" ./internal/nodeops
 if [[ "$task_mode" == web-native || "$task_mode" == web-docker ]]; then
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o "$task_run/controlplane.test" ./internal/controlplane
@@ -65,10 +80,10 @@ PGPROOF
   task_central="${WEBSCAN_V3_WEB_KERNEL_CENTRAL_IMAGE:?explicit immutable current central image required}"
   if [[ ! "$task_central" =~ @sha256:[a-f0-9]{64}$ ]]; then printf 'Immutable central image required.\n' >&2; exit 2; fi
   docker image inspect --platform linux/amd64 "$task_central" > "$task_run/central-image.json"
-  python3 - "$task_run" <<'CENTRALPROOF'
-import json,pathlib,sys
+  WEBSCAN_V3_TEST_RELEASE="$task_release" python3 - "$task_run" <<'CENTRALPROOF'
+import json,os,pathlib,sys
 root=pathlib.Path(sys.argv[1]); image=json.loads((root/'central-image.json').read_text())[0]
-if image['Os']!='linux' or image['Architecture']!='amd64' or image.get('Config',{}).get('Labels',{}).get('org.opencontainers.image.version')!='v3.0.0-local-test':
+if image['Os']!='linux' or image['Architecture']!='amd64' or image.get('Config',{}).get('Labels',{}).get('org.opencontainers.image.version')!=os.environ['WEBSCAN_V3_TEST_RELEASE']:
     raise SystemExit('Current built-in Linux amd64 central test image required')
 (root/'central-image-id').write_text(image['Id']+'\n')
 CENTRALPROOF
@@ -87,10 +102,10 @@ docker rm -v "$task_export" > "$task_run/export-cleanup.txt"
 printf '%s\n' "$task_mode" > "$task_run/mode"
 if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name-change ]]; then
   task_agent="${WEBSCAN_V3_AGENT_KERNEL_IMAGE:-docker.io/gzdzh/webscan-agent@sha256:0b47dd5c6c5fa84cdb9b30c6ecd8998ff1c81f05dd106cba4be3b6c0e4a8c078}"
-  docker image inspect "$task_agent" > "$task_run/agent-image.json"
-  docker image save --output "$task_run/agent-image.tar" "$task_agent"
-  python3 - "$task_run" <<'PY'
-import hashlib, io, json, pathlib, sys, tarfile
+  docker image inspect --platform linux/amd64 "$task_agent" > "$task_run/agent-image.json"
+  docker image save --platform linux/amd64 --output "$task_run/agent-image.tar" "$task_agent"
+  WEBSCAN_V3_TEST_RELEASE="$task_release" WEBSCAN_V3_TEST_NATIVE="$task_native" python3 - "$task_run" <<'PY'
+import hashlib, io, json, os, pathlib, shutil, sys, tarfile
 from scripts.v3_saved_image_config import saved_image_config
 root = pathlib.Path(sys.argv[1])
 with tarfile.open(root / 'tools.tar.gz', 'r:gz') as archive:
@@ -100,11 +115,15 @@ files['webscan'] = ((root / 'webscan').read_bytes(), 0o755)
 files['VERSION'] = (b'v3.0.0-local-test\n', 0o644)
 files['SHA256SUMS'] = (''.join(hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
     for name, (data, mode) in sorted(files.items()) if name != 'SHA256SUMS').encode(), 0o644)
-with tarfile.open(root / 'agent-native.tar.gz', 'w:gz') as archive:
-    for name, (data, mode) in sorted(files.items()):
-        entry = tarfile.TarInfo(name)
-        entry.size, entry.mode = len(data), mode
-        archive.addfile(entry, io.BytesIO(data))
+if os.environ['WEBSCAN_V3_TEST_NATIVE']:
+    # Preserve the signed release bytes. Never rebuild or relabel a pilot bundle.
+    shutil.copyfile(os.environ['WEBSCAN_V3_TEST_NATIVE'], root / 'agent-native.tar.gz')
+else:
+    with tarfile.open(root / 'agent-native.tar.gz', 'w:gz') as archive:
+        for name, (data, mode) in sorted(files.items()):
+            entry = tarfile.TarInfo(name)
+            entry.size, entry.mode = len(data), mode
+            archive.addfile(entry, io.BytesIO(data))
 image = json.loads((root / 'agent-image.json').read_text())[0]
 if image['Os'] != 'linux' or image['Architecture'] != 'amd64' or not image.get('RepoDigests'):
     raise SystemExit('immutable amd64 Agent fixture required')
@@ -117,9 +136,10 @@ reference = ('docker.io/library/' + image['RepoDigests'][0] if '/' not in image[
 # Current-source fixtures must also exercise the readable version alias through
 # Docker load, launch, restart and rollback. Old pilot fixtures stay untagged;
 # they cannot be presented as the new test release.
-if image.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.version') == 'v3.0.0-local-test':
+release = os.environ['WEBSCAN_V3_TEST_RELEASE']
+if image.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.version') == release:
     repository, digest_value = reference.split('@')
-    reference = repository + ':v3.0.0-local-test@' + digest_value
+    reference = repository + ':' + release + '@' + digest_value
 proof = {'mode': 'docker', 'metrics_port': 19100, 'monitor_directories': ['/'],
          'artifact_bytes': 0, 'clamav': False, 'agent_image': reference,
          'image_archive_sha256': digest.hexdigest(), 'image_archive_bytes': archive.stat().st_size,
@@ -169,6 +189,7 @@ rm -f rootfs/.dockerenv rootfs/run/.containerenv
 mkdir -p rootfs/v3-tests rootfs/etc/systemd/system/multi-user.target.wants
 cp webscan nodeops.test rootfs/v3-tests/
 cp mode rootfs/v3-tests/mode
+cp release rootfs/v3-tests/release
 printf '%s\n' "${WEBSCAN_V3_DOCKER_CONTAINERD:-0}" > rootfs/v3-tests/containerd-store
 if [ "$WEBSCAN_V3_KERNEL_MODE" != native ] && [ "$WEBSCAN_V3_KERNEL_MODE" != recovery ] && [ "$WEBSCAN_V3_KERNEL_MODE" != name-change ]; then
   cp agent-native.tar.gz agent-image.tar image-proof.json rootfs/v3-tests/
@@ -221,6 +242,7 @@ cat /sys/fs/cgroup/cgroup.controllers
 export WEBSCAN_V3_TEST_SYSTEMD_GUEST=1
 export WEBSCAN_V3_TEST_NODE_BINARY=/v3-tests/webscan
 export WEBSCAN_V3_TEST_BUNDLE=1
+export WEBSCAN_V3_TEST_RELEASE="$(cat /v3-tests/release)"
 if [ "$(cat /v3-tests/mode)" != native ] && [ "$(cat /v3-tests/mode)" != recovery ] && [ "$(cat /v3-tests/mode)" != name-change ]; then
   # This is an independent engine inside the full networkless guest. It has
   # no external socket, bridge, iptables mutations or registry access.

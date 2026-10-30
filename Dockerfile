@@ -19,11 +19,11 @@ FROM ${RUNTIME_IMAGE} AS runtime
 ARG RELEASE
 LABEL org.opencontainers.image.version=$RELEASE
 COPY config/bootstrap-ca.crt /etc/ssl/certs/ca-certificates.crt
-RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates=20250419~deb12u1 tzdata=2026c-0+deb12u1 \
+RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates=20250419~deb12u2 tzdata=2026f-0+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/usr/local/bin/webscan"]
 FROM runtime AS agent-base
-RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends yara=4.2.3-4 clamdscan=1.4.3+dfsg-1~deb12u2 \
+RUN sed -i s,http://deb.debian.org,https://deb.debian.org,g /etc/apt/sources.list.d/debian.sources && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends yara=4.2.3-4 clamdscan=1.4.6+dfsg-0+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /webscan /usr/local/bin/webscan
 CMD ["agent", "--config", "/etc/webscan-v1/runtime.json"]

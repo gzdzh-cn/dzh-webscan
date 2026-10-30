@@ -23,6 +23,20 @@ type trustToolFixture struct {
 	sign                                                ReleaseOptions
 }
 
+// Formal artifact acceptance uses the same fixtures with the exact published
+// release. Ordinary tests retain their isolated, non-release default.
+func deploymentFixtureRelease(t *testing.T) string {
+	t.Helper()
+	version := os.Getenv("WEBSCAN_V3_TEST_RELEASE")
+	if version == "" {
+		return "v3.0.0-local-test"
+	}
+	if !releaseVersion.MatchString(version) || len(version) > 128 {
+		t.Fatal("invalid explicit acceptance release")
+	}
+	return version
+}
+
 func newTrustToolFixture(t *testing.T) trustToolFixture {
 	t.Helper()
 	f := trustToolFixture{root: privateTestDir(t)}
@@ -40,7 +54,7 @@ func newTrustToolFixture(t *testing.T) trustToolFixture {
 	if err := VaultCommand(context.Background(), VaultOptions{Action: "init-key", Output: f.vault}, &out); err != nil {
 		t.Fatal(err)
 	}
-	f.sign = ReleaseOptions{Action: "sign", Output: f.signed, KeyFile: filepath.Join(f.signing, "signing.key"), Release: "v3.0.0-local-test", Helper: f.helper, NativeBundle: f.native, AgentImage: "docker.io/gzdzh/webscan-agent@sha256:" + strings.Repeat("a", 64), ImageArchive: f.image, ImageConfigSHA256: strings.Repeat("b", 64)}
+	f.sign = ReleaseOptions{Action: "sign", Output: f.signed, KeyFile: filepath.Join(f.signing, "signing.key"), Release: deploymentFixtureRelease(t), Helper: f.helper, NativeBundle: f.native, AgentImage: "docker.io/gzdzh/webscan-agent@sha256:" + strings.Repeat("a", 64), ImageArchive: f.image, ImageConfigSHA256: strings.Repeat("b", 64)}
 	if err := ReleaseCommand(context.Background(), f.sign, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +67,19 @@ func (f trustToolFixture) verify() ReleaseOptions {
 
 func (f trustToolFixture) config() DeploymentTrustConfig {
 	return DeploymentTrustConfig{VaultKeyFile: filepath.Join(f.vault, "vault.key"), PublicKeyFile: filepath.Join(f.signing, "signing.pub"), ManifestFile: filepath.Join(f.signed, "release.json"), SignatureFile: filepath.Join(f.signed, "release.sig"), HelperFile: f.helper, NativeBundleFile: f.native, ImageArchiveFile: f.image}
+}
+
+func TestOfflineReleaseExplicitAcceptanceVersion(t *testing.T) {
+	t.Setenv("WEBSCAN_V3_TEST_RELEASE", "v3.0.0")
+	f := newTrustToolFixture(t)
+	var out bytes.Buffer
+	if err := ReleaseCommand(context.Background(), f.verify(), &out); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil || result["release"] != "v3.0.0" || result["artifacts_verified"] != true {
+		t.Fatal("explicit acceptance release not retained", out.String(), err)
+	}
 }
 
 func TestOfflineReleaseRoundTripIndependentTrustAndNoSecretOutput(t *testing.T) {

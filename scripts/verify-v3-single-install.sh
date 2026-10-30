@@ -42,9 +42,17 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -ldflags '-X webscan/internal/deploy.Release=v3.0.0-local-test' \
-  -o "$task_run/webscan" ./cmd/webscan
+task_release="${WEBSCAN_V3_SINGLE_RELEASE:-v3.0.0-local-test}"
+[[ "$task_release" =~ ^v[0-9][A-Za-z0-9._-]{1,80}$ ]] || exit 2
+if [[ -n "${WEBSCAN_V3_SINGLE_HELPER:-}" ]]; then
+  [[ "$WEBSCAN_V3_SINGLE_HELPER" == /* && -f "$WEBSCAN_V3_SINGLE_HELPER" && ! -L "$WEBSCAN_V3_SINGLE_HELPER" ]] || exit 2
+  cp "$WEBSCAN_V3_SINGLE_HELPER" "$task_run/webscan"
+else
+  [[ "$task_release" == v3.0.0-local-test ]] || { echo 'Formal acceptance requires the exact release helper.' >&2; exit 2; }
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags '-X webscan/internal/deploy.Release=v3.0.0-local-test' \
+    -o "$task_run/webscan" ./cmd/webscan
+fi
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o "$task_run/controlplane.test" ./internal/controlplane
 docker create --name "$task_extract" --platform linux/amd64 --network none --entrypoint /bin/true "$WEBSCAN_V3_TEST_SINGLE_CENTRAL_IMAGE" > "$task_run/extract.id"
 docker cp "$task_extract:/usr/local/lib/webscan/agent-native.tar.gz" "$task_run/agent-native.tar.gz"
@@ -85,6 +93,7 @@ docker create --name "$task_runner" --platform linux/amd64 --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$task_mount_source:$task_mount" -v "$task_run:/evidence:ro" \
   -e WEBSCAN_V3_TEST_SINGLE_STACK=1 -e "WEBSCAN_V3_TEST_SINGLE_ROOT=$task_mount" \
+  -e "WEBSCAN_V3_TEST_RELEASE=$task_release" \
   -e "WEBSCAN_V3_TEST_SINGLE_BIND=$task_is_bind" \
   -e "WEBSCAN_V3_TEST_SINGLE_EXISTING=$task_existing" \
   -e WEBSCAN_V3_TEST_SINGLE_BINARY=/evidence/webscan \

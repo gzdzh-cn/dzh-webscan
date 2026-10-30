@@ -278,7 +278,7 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 	jobStatus(id, "succeeded")
 	if mode == "docker" {
 		ref, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Config.Image}}", "webscan-agent-go").Output()
-		if err != nil || strings.TrimSpace(string(ref)) != strings.SplitN(proof.AgentImage, "@", 2)[0] || !strings.Contains(proof.AgentImage, ":v3.0.0-local-test@sha256:") {
+		if err != nil || strings.TrimSpace(string(ref)) != strings.SplitN(proof.AgentImage, "@", 2)[0] || !strings.Contains(proof.AgentImage, ":"+actual.sign.Release+"@sha256:") {
 			t.Fatal("readable version reference not retained", err)
 		}
 	}

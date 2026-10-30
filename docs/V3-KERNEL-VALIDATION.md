@@ -133,3 +133,9 @@ bash scripts/verify-v3-kernel-lifecycle.sh web-docker
 ```
 
 测试先读取并确认指纹、加密保存凭据、异步准备和确认安装，再通过 mTLS 采集验证真实文件事件进入 PostgreSQL。之后保存新配置并升级，在真实备份完成后故意丢弃响应，分别从公开接口继续及回退，核对任务状态、可操作标记、原登录，以及主控容器 ID、PID、启动时间和重启次数保持不变。两个模式的结果须分别记录；新增入口或用例不等于通过，也不能据此宣称物理主机已做完整重启验收。
+
+## 正式发布产物复核
+
+网页联合模式可显式设置 `WEBSCAN_V3_KERNEL_RELEASE`、`WEBSCAN_V3_KERNEL_HELPER` 和 `WEBSCAN_V3_KERNEL_NATIVE_BUNDLE`。后两项必须同时提供绝对文件路径；正式版本不能临时编译一个同名程序代替发布产物。测试复制原始程序与 native 包字节，保留清单、摘要、版本、平台及实际进程校验，不重新打包或重标试运行产物。中心镜像的 OCI 版本标签也必须匹配指定版本。
+
+`verify-v3-single-install.sh` 对应支持 `WEBSCAN_V3_SINGLE_RELEASE` 和 `WEBSCAN_V3_SINGLE_HELPER`；native 包直接取自指定的实际 Agent 镜像。未提供这些变量时，两个脚本仍沿用隔离本地测试版本。正式复核前后的原始文件 SHA256 必须一致，签名及仓库下载验证另行执行。
