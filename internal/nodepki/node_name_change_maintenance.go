@@ -7,11 +7,12 @@ import (
 	"time"
 )
 
-// NameChangeVerificationTimeout is the existing helper operation budget. A
-// live host inspection hashes the installed bundle and queries real managers
-// and kernel limits; it is not a five-second certificate publication. The
-// caller's earlier deadline and the authorization expiry always take priority.
-const NameChangeVerificationTimeout = 30 * time.Second
+// NameChangeVerificationTimeout bounds a complete live maintenance inspection:
+// two inventories, installed bundle hashes and real manager/kernel checks.
+// Individual host queries remain bounded separately. A shared thirty-second
+// budget can cancel valid Docker 29 evidence after earlier queries succeeded.
+// Caller cancellation and the absolute authorization expiry take priority.
+const NameChangeVerificationTimeout = 90 * time.Second
 
 // PublishNodeNameChangeTrust advances only an EXISTING trust floor, after the
 // pinned SSH operation has produced the exact authorized local-key request.

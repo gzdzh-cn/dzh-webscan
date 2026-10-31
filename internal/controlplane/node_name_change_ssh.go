@@ -113,7 +113,7 @@ func (w *sshNodeNameChange) phase(ctx context.Context, l Lease, id, operation st
 	if err != nil || len(raw) > nodeops.MaxNameChangeBytes {
 		return empty, errNodeNameChange
 	}
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, nodepki.NameChangeVerificationTimeout+15*time.Second)
 	defer cancel()
 	ctx, deadline := context.WithDeadline(ctx, j.ExpiresAt)
 	defer deadline()

@@ -87,7 +87,7 @@ func (w *sshRootRotation) operation(ctx context.Context, l Lease, id string, ind
 func (w *sshRootRotation) call(ctx context.Context, l Lease, j rootRotationTask, index int, operation, expected string) (nodeops.RootRotationOutput, error) {
 	var empty nodeops.RootRotationOutput
 	m, state := j.Members[index], j.State[index]
-	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, nodepki.NameChangeVerificationTimeout+15*time.Second)
 	defer cancel()
 	ctx, deadline := context.WithDeadline(ctx, j.ExpiresAt)
 	defer deadline()

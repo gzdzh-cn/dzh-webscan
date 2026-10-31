@@ -74,7 +74,7 @@ func CommandIdentityRecovery(ctx context.Context, in io.Reader, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, nodepki.NameChangeVerificationTimeout)
 	defer cancel()
 	response, err := NewLocalRuntime().identityRecovery(ctx, r)
 	if err != nil {
