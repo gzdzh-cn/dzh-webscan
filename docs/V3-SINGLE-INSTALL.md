@@ -2,7 +2,7 @@
 
 证书维护程序升级说明见本文末尾“独立升级证书维护程序”。原安装资料及 CA/Vault 必须保留，不能用覆盖旧程序或重新生成密钥处理数据库版本不一致。
 
-全新安装流程只创建独立单中心，不接管 v2 或迁移拓扑；已有试运行中心使用本文末尾的专用升级模板。v3.0.0 单中心已发布，先阅读 [正式安装入口](INSTALL-v3.0.0.md) 和 [发布回执](RELEASE-v3.0.0-RECEIPT.md)，不要在现有数据目录执行全新安装。
+全新安装流程只创建独立单中心，不接管 v2 或迁移拓扑；已有试运行中心使用本文末尾的专用升级模板。v3.0.3 单中心已发布，先阅读 [正式安装入口](INSTALL-v3.0.3.md) 和 [发布回执](RELEASE-v3.0.3-RECEIPT.md)，不要在现有数据目录执行全新安装。
 
 一台中心机器运行三个容器：中心 Go 程序（合并 API、采集、通知和网站检测）、PostgreSQL 17、VictoriaMetrics。systemd 管理整套服务的开机启动，Docker 保持容器重启策略。本机 API、数据库和时序库均只监听回环地址；外部 HTTPS 入口必须预先准备，此工具不修改 Nginx、防火墙或业务网站。
 
@@ -20,7 +20,7 @@
   "api_port": 19444,
   "postgres_port": 5432,
   "metrics_port": 8428,
-  "runtime_image": "docker.io/gzdzh/webscan-central:v3.0.0@sha256:<已核验摘要>",
+  "runtime_image": "docker.io/gzdzh/webscan-central:v3.0.3@sha256:<已核验摘要>",
   "postgres_image": "docker.io/library/postgres@sha256:<已核验摘要>",
   "metrics_image": "docker.io/victoriametrics/victoria-metrics@sha256:<已核验摘要>",
   "rules_file": "/opt/webscan-v3/release/rules.yar",
@@ -35,7 +35,7 @@
 }
 ```
 
-上例中的占位摘要不可执行；v3.0.0 的实际摘要及可修改请求见 Release 附件。镜像可同时包含版本标签和摘要，生成的 Compose 保留完整引用，便于识别版本；仅有标签、没有摘要的请求仍拒绝。旧的仅摘要请求保持兼容。
+上例中的占位摘要不可执行；v3.0.3 的实际摘要及可修改请求见 Release 附件。镜像可同时包含版本标签和摘要，生成的 Compose 保留完整引用，便于识别版本；仅有标签、没有摘要的请求仍拒绝。旧的仅摘要请求保持兼容。
 
 目录须为尚不存在的绝对规范路径，只接受 ASCII 字母、数字、`_`、`-`、`.` 和 `/`。三个本机端口须互不相同，范围 `1024～65535`；缺省使用上例值。请求不含数据库密码或管理员密码。
 
@@ -69,7 +69,7 @@ webscan control-v3 --action resume-single-install --source /受控目录/install
 
 ## 当前边界
 
-format 3 已配置发布信任、共享 Vault 和独立宿主 SSH 执行器；网页操作仍须由能力接口确认执行器、签发器和准备工作器的真实心跳。旧 format 1／2 的原始禁用状态不会被改写。新格式接入本机采集器续签及 CRL 维护，但安装返回不等于全部节点生命周期已经验收。本版使用受控 CLI，尚未接入旧式公开安装菜单。最终签名产物复核已完成，真实宿主开机恢复仍未由容器测试认证，结果见 [发布回执](RELEASE-v3.0.0-RECEIPT.md)。
+format 3 已配置发布信任、共享 Vault 和独立宿主 SSH 执行器；网页操作仍须由能力接口确认执行器、签发器和准备工作器的真实心跳。旧 format 1／2 的原始禁用状态不会被改写。新格式接入本机采集器续签及 CRL 维护，但安装返回不等于全部节点生命周期已经验收。本版使用受控 CLI，尚未接入旧式公开安装菜单。最终签名产物及真实隔离 Linux/systemd 整机重启恢复已通过，普通容器测试不能替代该门禁；实际范围见 [发布回执](RELEASE-v3.0.3-RECEIPT.md)。
 
 ## 本机证书维护
 
@@ -126,9 +126,9 @@ bash scripts/verify-v3-single-install.sh
 
 ```bash
 webscan control-v3 --action preview-single-web-upgrade \
-  --source /私有目录/upgrade-request.json --output /私有目录/upgrade-v3.0.0
+  --source /私有目录/upgrade-request.json --output /私有目录/upgrade-v3.0.3
 webscan control-v3 --action prepare-single-web-upgrade \
-  --source /私有目录/upgrade-request.json --output /私有目录/upgrade-v3.0.0
+  --source /私有目录/upgrade-request.json --output /私有目录/upgrade-v3.0.3
 ```
 
 输出包括新的 API／宿主配置、Compose、宿主 unit 及文件摘要。原 PG 和指标服务定义保持不变，中心只挂载明确的状态目录、现有密钥和必要只读文件，不挂载 CA 私钥或 Docker socket。新目录已有内容则拒绝覆盖。

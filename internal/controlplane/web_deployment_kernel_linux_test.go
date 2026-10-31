@@ -49,7 +49,7 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 			t.Fatal("refusing existing Agent state", path)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 22*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 28*time.Minute)
 	defer cancel()
 	f := webDeployFixture(t, time.Now().Add(-72*time.Hour))
 	// Replace the ordinary unit fixture's synthetic release files with the

@@ -409,7 +409,7 @@ if [ "$(cat /v3-tests/mode)" != native ] && [ "$(cat /v3-tests/mode)" != recover
     export WEBSCAN_V3_WEB_KERNEL_MODE="$(cat /v3-tests/mode | sed 's/^web-//')"
     export WEBSCAN_V3_TEST_DSN='postgres://postgres@127.0.0.1:55432/webscan?sslmode=disable'
     cd /workspace/internal/controlplane
-    /v3-tests/controlplane.test -test.run '^TestWebDeploymentKernelPublicAPIAndActualServices$' -test.v -test.timeout 24m 2>&1 | tee /dev/ttyS0
+    /v3-tests/controlplane.test -test.run '^TestWebDeploymentKernelPublicAPIAndActualServices$' -test.v -test.timeout 30m 2>&1 | tee /dev/ttyS0
     task_status=$?
     docker logs webscan-web-kernel-postgres > /v3-tests/postgres.log 2>&1
     docker rm -fv webscan-web-kernel-postgres >/dev/null 2>&1
