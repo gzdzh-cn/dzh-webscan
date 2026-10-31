@@ -38,15 +38,19 @@ type NodeNamePruningIntent struct {
 }
 
 type NodeNamePruningRequest struct {
-	Format      int                   `json:"format"`
-	Kind        string                `json:"kind"`
-	Intent      NodeNamePruningIntent `json:"intent"`
-	Certificate []byte                `json:"certificate"`
-	CSR         []byte                `json:"csr"`
-	Proof       []byte                `json:"proof"`
+	Format                  int                   `json:"format"`
+	Kind                    string                `json:"kind"`
+	Intent                  NodeNamePruningIntent `json:"intent"`
+	Certificate             []byte                `json:"certificate"`
+	CSR                     []byte                `json:"csr"`
+	Proof                   []byte                `json:"proof"`
+	OriginalRequest         json.RawMessage       `json:"original_request,omitempty"`
+	ContinuationCertificate []byte                `json:"continuation_certificate,omitempty"`
 }
 
 const namePruningKind = "ssh-node-name-pruning"
+const namePruningContinuationKind = "ssh-node-name-pruning-continuation"
+const namePruningReconciliationKind = "ssh-node-name-pruning-pending"
 
 func validNamePruningIntent(i NodeNamePruningIntent, now time.Time) bool {
 	if _, err := Identity(Node, i.Node); err != nil || i.Format != 1 || !recoverySHA(i.AuthoritySHA256) || !recoverySHA(i.CertificateSHA256) || !recoverySHA(i.ConfigurationSHA256) || i.RuntimeEpoch < 1 || !canonicalPruningNames(i.ActiveName, i.Names) || !recoverySHA(i.Challenge) || i.IssuedAt.IsZero() || i.IssuedAt.After(now) || !now.Before(i.ExpiresAt) || !i.ExpiresAt.After(i.IssuedAt) || i.ExpiresAt.Sub(i.IssuedAt) > 10*time.Minute {
@@ -101,7 +105,13 @@ func namePruningProof(r NodeNamePruningRequest) ([]byte, error) {
 	if err != nil || len(raw) > MaxRenewalBytes {
 		return nil, ErrIdentity
 	}
-	return append([]byte("webscan-v3/node-name-pruning-proof/v1\x00"), raw...), nil
+	domain := "webscan-v3/node-name-pruning-proof/v1\x00"
+	if r.Kind == namePruningContinuationKind {
+		domain = "webscan-v3/node-name-pruning-continuation-proof/v1\x00"
+	} else if r.Kind == namePruningReconciliationKind {
+		domain = "webscan-v3/node-name-pruning-pending-proof/v1\x00"
+	}
+	return append([]byte(domain), raw...), nil
 }
 
 func ParseNodeNamePruningRequest(raw []byte) (NodeNamePruningRequest, error) {
@@ -110,7 +120,10 @@ func ParseNodeNamePruningRequest(raw []byte) (NodeNamePruningRequest, error) {
 		return NodeNamePruningRequest{}, ErrIdentity
 	}
 	canonical, err := json.Marshal(r)
-	if err != nil || !bytes.Equal(raw, canonical) || r.Format != 1 || r.Kind != namePruningKind || len(r.Certificate) == 0 || len(r.Certificate) > 16<<10 || len(r.CSR) == 0 || len(r.CSR) > 16<<10 || len(r.Proof) != ed25519.SignatureSize {
+	if err != nil || !bytes.Equal(raw, canonical) || r.Format != 1 || (r.Kind != namePruningKind && r.Kind != namePruningContinuationKind && r.Kind != namePruningReconciliationKind) || len(r.Certificate) == 0 || len(r.Certificate) > 16<<10 || len(r.CSR) == 0 || len(r.CSR) > 16<<10 || len(r.Proof) != ed25519.SignatureSize {
+		return NodeNamePruningRequest{}, ErrIdentity
+	}
+	if r.Kind == namePruningKind && (len(r.OriginalRequest) != 0 || len(r.ContinuationCertificate) != 0) || r.Kind != namePruningKind && (len(r.OriginalRequest) == 0 || len(r.ContinuationCertificate) == 0 || len(r.ContinuationCertificate) > 16<<10) {
 		return NodeNamePruningRequest{}, ErrIdentity
 	}
 	return r, nil
@@ -166,7 +179,21 @@ func ValidateNodeNamePruningScope(certificate []byte, active string, names []str
 }
 
 func validateNamePruning(ca, crl []byte, r NodeNamePruningRequest, expected NodeNamePruningIntent, now time.Time) (*x509.Certificate, *x509.CertificateRequest, error) {
-	if !validNamePruningIntent(expected, now) || r.Intent.SHA256() != expected.SHA256() || r.Format != 1 || r.Kind != namePruningKind || r.SHA256() == "" || len(r.Certificate) == 0 || len(r.Certificate) > 16<<10 || len(r.Proof) != ed25519.SignatureSize {
+	if r.Kind == namePruningContinuationKind || r.Kind == namePruningReconciliationKind {
+		return validateNamePruningContinuation(ca, crl, r, expected, now)
+	}
+	return validateNamePruningInitial(ca, crl, r, expected, now, false)
+}
+
+func validateNamePruningInitial(ca, crl []byte, r NodeNamePruningRequest, expected NodeNamePruningIntent, now time.Time, historical bool) (*x509.Certificate, *x509.CertificateRequest, error) {
+	checkedAt := now
+	if historical {
+		checkedAt = expected.IssuedAt
+		if checkedAt.After(now) {
+			return nil, nil, ErrIdentity
+		}
+	}
+	if !validNamePruningIntent(expected, checkedAt) || r.Intent.SHA256() != expected.SHA256() || r.Format != 1 || r.Kind != namePruningKind || len(r.OriginalRequest) != 0 || len(r.ContinuationCertificate) != 0 || r.SHA256() == "" || len(r.Certificate) == 0 || len(r.Certificate) > 16<<10 || len(r.Proof) != ed25519.SignatureSize {
 		return nil, nil, ErrIdentity
 	}
 	root, err := parseCertificate(ca)
@@ -178,7 +205,7 @@ func validateNamePruning(ca, crl []byte, r NodeNamePruningRequest, expected Node
 		return nil, nil, ErrIdentity
 	}
 	trust, err := NewTrust(ca, crl, now)
-	if err != nil || trust.Verify(old, Node, expected.Node, now) != nil {
+	if err != nil || verifyNameChangeParent(trust, root, old, expected.Node, checkedAt, historical) != nil {
 		return nil, nil, ErrRevocation
 	}
 	key, ok := old.PublicKey.(ed25519.PublicKey)
@@ -204,6 +231,10 @@ func namePruningPending(identity string, i NodeNamePruningIntent) string {
 }
 
 func readNamePruningPending(dir string, ca, crl []byte, i NodeNamePruningIntent, now time.Time) (NodeNamePruningRequest, []byte, error) {
+	return readNamePruningPendingAt(dir, ca, crl, i, now, false)
+}
+
+func readNamePruningPendingAt(dir string, ca, crl []byte, i NodeNamePruningIntent, now time.Time, historical bool) (NodeNamePruningRequest, []byte, error) {
 	var empty NodeNamePruningRequest
 	if secureDirectory(dir) != nil {
 		return empty, nil, ErrIdentity
@@ -216,7 +247,7 @@ func readNamePruningPending(dir string, ca, crl []byte, i NodeNamePruningIntent,
 	if err != nil {
 		return empty, nil, err
 	}
-	_, csr, err := validateNamePruning(ca, crl, r, i, now)
+	_, csr, err := validateNamePruningInitial(ca, crl, r, i, now, historical)
 	if err != nil {
 		return empty, nil, err
 	}
@@ -250,13 +281,13 @@ func PrepareNodeNamePruning(ctx context.Context, caFile, identityFile, trustDire
 	defer cancel()
 	ctx, finish := context.WithTimeout(ctx, 5*time.Second)
 	defer finish()
-	err := nameChangeTrust(ctx, caFile, trustDirectory, now, func(ca, crl []byte) error {
+	err := nameChangeTrust(ctx, caFile, trustDirectory, i.AuthoritySHA256, now, func(ca, crl []byte) error {
 		lock, err := authorityLock(ctx, filepath.Dir(identityFile))
 		if err != nil {
 			return err
 		}
 		defer lock.Close()
-		active, record, err := ReadIdentity(caFile, identityFile, Node, i.Node, now)
+		active, record, err := ReadIdentityWithRootState(caFile, identityFile, trustDirectory, Node, i.Node, now)
 		defer clear(active.Key)
 		if err != nil || record.CertificateSHA256 != i.CertificateSHA256 {
 			return ErrIdentity
@@ -352,7 +383,7 @@ func PrepareNodeNamePruning(ctx context.Context, caFile, identityFile, trustDire
 // ledger BEFORE delivery. This function is not a queue, authorization service
 // or retry endpoint, and it deliberately accepts no expired-intent exception.
 func SignNodeNamePruningRegistered(ctx context.Context, directory string, r NodeNamePruningRequest, expected NodeNamePruningIntent, now time.Time, lifetime time.Duration, accept func(Bundle, []byte) error) error {
-	if accept == nil || !validNamePruningIntent(expected, now) || lifetime < time.Hour || lifetime > 90*24*time.Hour || secureDirectory(directory) != nil {
+	if accept == nil || r.Kind != namePruningKind || len(r.OriginalRequest) != 0 || len(r.ContinuationCertificate) != 0 || !validNamePruningIntent(expected, now) || lifetime < time.Hour || lifetime > 90*24*time.Hour || secureDirectory(directory) != nil {
 		return ErrIdentity
 	}
 	ctx, cancel := context.WithDeadline(ctx, expected.ExpiresAt)
@@ -407,6 +438,9 @@ func ValidateNodeNamePruningCertificate(ca, crl []byte, r NodeNamePruningRequest
 	if err != nil || len(certificate) == 0 || len(certificate) > 16<<10 {
 		return ErrIdentity
 	}
+	if r.Kind != namePruningKind && !bytes.Equal(certificate, r.ContinuationCertificate) {
+		return ErrIdentity
+	}
 	return validateNameChangeLeaf(ca, crl, old, csr, expected.Node, certificate, now)
 }
 
@@ -418,20 +452,28 @@ func ActivateNodeNamePruning(ctx context.Context, caFile, identityFile, trustDir
 	if !validNamePruningIntent(expected, now) || !filepath.IsAbs(identityFile) || filepath.Clean(identityFile) != identityFile || filepath.Dir(identityFile) == trustDirectory || len(certificate) == 0 || len(certificate) > 16<<10 {
 		return out, ErrIdentity
 	}
+	if r.Kind == namePruningContinuationKind {
+		err := WithPrunedNodeIdentity(ctx, caFile, identityFile, trustDirectory, r, expected, certificate, now, func(_ context.Context, record IdentityRecord) error { out = record; return nil })
+		return out, err
+	}
 	ctx, cancel := context.WithDeadline(ctx, expected.ExpiresAt)
 	defer cancel()
 	ctx, finish := context.WithTimeout(ctx, 5*time.Second)
 	defer finish()
-	err := nameChangeTrust(ctx, caFile, trustDirectory, now, func(ca, crl []byte) error {
+	err := nameChangeTrust(ctx, caFile, trustDirectory, expected.AuthoritySHA256, now, func(ca, crl []byte) error {
 		if err := ValidateNodeNamePruningCertificate(ca, crl, r, expected, certificate, now); err != nil {
 			return err
 		}
-		saved, key, err := readNamePruningPending(namePruningPending(identityFile, expected), ca, crl, expected, now)
+		original, err := namePruningOriginal(r)
+		if err != nil {
+			return err
+		}
+		saved, key, err := readNamePruningPendingAt(namePruningPending(identityFile, original.Intent), ca, crl, original.Intent, now, r.Kind != namePruningKind)
 		defer clear(key)
-		if err != nil || saved.SHA256() != r.SHA256() {
+		if err != nil || saved.SHA256() != original.SHA256() {
 			return ErrIdentity
 		}
-		out, err = PublishIdentity(ctx, caFile, identityFile, Node, expected.Node, expected.CertificateSHA256, Bundle{CA: ca, Certificate: certificate, Key: key}, now)
+		out, err = publishIdentityMaterial(ctx, identityFile, "", Node, expected.Node, expected.CertificateSHA256, ca, nil, Bundle{CA: ca, Certificate: certificate, Key: key}, now)
 		return err
 	})
 	if err != nil {

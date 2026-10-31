@@ -1,5 +1,7 @@
 # v3 全新单中心安装与已有试运行中心升级
 
+证书维护程序升级说明见本文末尾“独立升级证书维护程序”。原安装资料及 CA/Vault 必须保留，不能用覆盖旧程序或重新生成密钥处理数据库版本不一致。
+
 全新安装流程只创建独立单中心，不接管 v2 或迁移拓扑；已有试运行中心使用本文末尾的专用升级模板。v3.0.0 单中心已发布，先阅读 [正式安装入口](INSTALL-v3.0.0.md) 和 [发布回执](RELEASE-v3.0.0-RECEIPT.md)，不要在现有数据目录执行全新安装。
 
 一台中心机器运行三个容器：中心 Go 程序（合并 API、采集、通知和网站检测）、PostgreSQL 17、VictoriaMetrics。systemd 管理整套服务的开机启动，Docker 保持容器重启策略。本机 API、数据库和时序库均只监听回环地址；外部 HTTPS 入口必须预先准备，此工具不修改 Nginx、防火墙或业务网站。
@@ -131,8 +133,44 @@ webscan control-v3 --action prepare-single-web-upgrade \
 
 输出包括新的 API／宿主配置、Compose、宿主 unit 及文件摘要。原 PG 和指标服务定义保持不变，中心只挂载明确的状态目录、现有密钥和必要只读文件，不挂载 CA 私钥或 Docker socket。新目录已有内容则拒绝覆盖。
 
-正式维护时须先核对 upgrade.json 的源摘要和文件摘要，确认不存在冲突任务；用新程序的 `migrate-db --output <0700备份目录>` 先执行备份及增量迁移。停止原宿主执行器，使用原 Compose 项目和新 Compose 的 `up -d --no-deps --pull never central` 仅重建中心应用，再安装新宿主 unit。同步更新开机启动 unit 所引用的 Compose 路径，证书维护继续使用原不可变安装资料。不要执行 `compose down`，不要替换 Vault、PG 或时序库。
+正式维护时须先核对 upgrade.json 的源摘要和文件摘要，确认不存在冲突任务；用新程序的 `migrate-db --output <0700备份目录>` 先执行备份及增量迁移。停止原宿主执行器，使用原 Compose 项目和新 Compose 的 `up -d --no-deps --pull never central` 仅重建中心应用，再安装新宿主 unit。同步更新开机启动 unit 所引用的 Compose 路径，并按下节更新证书维护程序。不要执行 `compose down`，不要替换 Vault、PG 或时序库。
 
 启动后核对 `/healthz`、能力、运行设置及实际执行器心跳，并核对 PG／时序容器 ID、密钥 ID 和登录保持。模板生成不能代替该完整升级演练；失败保留全部检查点及备份，数据库已经迁移时不能直接使用不兼容旧程序冒充恢复成功。本轮不在生产应用这些命令。
 
 Docker 29 的 containerd 镜像库可能分别返回索引和平台镜像摘要。安装器同时核对不可变引用、Linux amd64 平台、实际平台镜像及 Compose 配置；不通过放宽摘要判断来兼容。隔离验收脚本默认使用匹配的 Docker 29 客户端，避免旧客户端无法选择多平台缓存。
+
+## 独立升级证书维护程序
+
+旧安装记录固定了安装时的程序摘要。数据库升级后，继续用旧程序签发节点证书会因结构版本不一致而延后；直接覆盖原 `webscan` 会破坏安装与恢复校验。应使用独立维护升级包，绑定现有安装及新版签名工具，保留原程序、CA、Vault、安装记录和全部运行数据。
+
+在私有父目录内准备权限 `0600` 的请求文件：
+
+```json
+{
+  "format": 1,
+  "installation_file": "/var/lib/webscan-v3/single/install.json",
+  "release_public_key_file": "/opt/webscan/trust/signing.pub",
+  "release_manifest_file": "/opt/webscan/release/release.json",
+  "release_signature_file": "/opt/webscan/release/release.sig",
+  "helper_file": "/opt/webscan/release/webscan"
+}
+```
+
+公钥必须来自独立可信配置；不能仅相信下载包自带的公钥。使用本次已验证的新版工具执行：
+
+```bash
+/opt/webscan/release/webscan control-v3 --action preview-single-pki-upgrade \
+  --source /私有目录/pki-upgrade.json --output /私有目录/pki-maintenance-new
+/opt/webscan/release/webscan control-v3 --action prepare-single-pki-upgrade \
+  --source /私有目录/pki-upgrade.json --output /私有目录/pki-maintenance-new
+/私有目录/pki-maintenance-new/webscan control-v3 --action check-single-pki-upgrade \
+  --source /私有目录/pki-maintenance-new/maintenance.json
+```
+
+预览和准备不连接数据库、不激活服务。检查确认签名、摘要、权限、原安装及维护绑定，并要求维护包的结构版本与检查程序一致；`database_checked: false` 明确表示尚未检查实际数据库。实际维护还会核对正在执行的程序路径、文件摘要及内置版本与受签名发布清单一致。输出目录已存在即停止，不能覆盖旧包。包中不包含 CA 私钥或 Vault，仍使用原受限路径。维护时数据库版本必须准确匹配，不自动迁移。
+
+实际激活仅在维护窗口由管理员执行：记录现有 unit 及定时器状态，暂停该项目的 PKI **timer**，等待正在运行的 oneshot 结束；将新包的 service/timer 安装到原项目的同名 unit，执行 `systemctl daemon-reload`。随后以新包程序执行 `maintain-single-pki-upgrade`，核对 `state`、`identity` 及 `node_renewals`（后者为 `deferred`/`failed` 时节点维护并未成功），再恢复 timer 的原启用状态。
+
+**不要 stop/restart PKI service 或整套 stack。** 原 stack 可能依赖 PKI service，停止它可能连带停止数据库和时序库。维护只更新身份文件和 CRL；主控通过文件刷新继续采集，无需重建应用容器。资料检查失败时原包和身份仍保留；数据库已升级时不能恢复不兼容旧签发程序并宣称维护正常。
+
+隔离验证入口为 `bash scripts/verify-v3-pki-maintenance-upgrade.sh`。必须显式提供已缓存、固定摘要的 PostgreSQL 17 与 Linux amd64 测试镜像（`WEBSCAN_V3_PKI_TEST_PG_IMAGE`、`WEBSCAN_V3_PKI_TEST_RUNNER_IMAGE`）。脚本构建本次程序并在临时签名夹具中验证，数据库位于 tmpfs，使用禁外网网络；证据保存在 `.cache/verification/v3/pki-maintenance.*`，只清理本次创建的容器。该测试覆盖真实签名程序、版本校验及结构不匹配时不迁移，不能替代磁盘持久化、完整备份恢复或 systemd 联合验收。

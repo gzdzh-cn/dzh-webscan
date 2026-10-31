@@ -1,7 +1,6 @@
 package nodepki
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
@@ -54,21 +53,13 @@ func PrepareNodeRecoveryContinuation(ctx context.Context, caFile, identityFile, 
 		return empty, err
 	}
 	defer lock.Close()
-	ca, err := readTrustFile(caFile, 64<<10)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	pinned, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crt"), 64<<10, true)
-	if err != nil || !bytes.Equal(bytes.TrimSpace(ca), bytes.TrimSpace(pinned)) {
-		return empty, ErrIdentity
-	}
-	floor, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crl"), MaxCRLBytes, true)
+	ca, floor, err := maintenanceIssuerMaterial(caFile, trustDirectory, expected.AuthoritySHA256, now)
 	if err != nil || ValidateCRLAdvance(ca, floor, crl, now) != nil {
 		return empty, ErrRevocation
 	}
 	var result NodeRecoveryRequest
 	err = WithIdentitySnapshot(ctx, filepath.Dir(identityFile), func() error {
-		b, record, err := ReadIdentity(caFile, identityFile, Node, expected.Node, now)
+		b, record, err := ReadIdentityWithRootState(caFile, identityFile, trustDirectory, Node, expected.Node, now)
 		defer clear(b.Key)
 		if err != nil || record.CertificateSHA256 == expected.CertificateSHA256 {
 			return ErrIdentity

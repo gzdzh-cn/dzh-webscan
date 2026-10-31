@@ -39,22 +39,33 @@ type singleInstallProblem struct{ Code, Hint string }
 func (e singleInstallProblem) Error() string { return e.Hint }
 
 type singleInstallSpec struct {
-	ReleaseTrust  *DeploymentTrustConfig `json:"deployment_trust,omitempty"`
-	RulesFile     string                 `json:"rules_file,omitempty"`
-	Format        int                    `json:"format"`
-	Root          string                 `json:"root"`
-	Instance      string                 `json:"instance"`
-	PublicURL     string                 `json:"public_url"`
-	Username      string                 `json:"username"`
-	APIPort       int                    `json:"api_port"`
-	PostgresPort  int                    `json:"postgres_port"`
-	MetricsPort   int                    `json:"metrics_port"`
-	RuntimeImage  string                 `json:"runtime_image"`
-	PostgresImage string                 `json:"postgres_image"`
-	MetricsImage  string                 `json:"metrics_image"`
+	Backup        *singleInstallBackupPolicy `json:"backup_policy,omitempty"`
+	ReleaseTrust  *DeploymentTrustConfig     `json:"deployment_trust,omitempty"`
+	RulesFile     string                     `json:"rules_file,omitempty"`
+	Format        int                        `json:"format"`
+	Root          string                     `json:"root"`
+	Instance      string                     `json:"instance"`
+	PublicURL     string                     `json:"public_url"`
+	Username      string                     `json:"username"`
+	APIPort       int                        `json:"api_port"`
+	PostgresPort  int                        `json:"postgres_port"`
+	MetricsPort   int                        `json:"metrics_port"`
+	RuntimeImage  string                     `json:"runtime_image"`
+	PostgresImage string                     `json:"postgres_image"`
+	MetricsImage  string                     `json:"metrics_image"`
+}
+
+type singleInstallBackupPolicy struct {
+	Directory string `json:"directory"`
+	Keep      int    `json:"keep"`
 }
 
 func (s *singleInstallSpec) validate() error {
+	if s.Backup != nil {
+		if s.Format != 3 || s.Backup.Keep < 1 || s.Backup.Keep > 365 || !singlePKIUpgradePath(s.Backup.Directory) || singleBackupContains(s.Root, s.Backup.Directory) || singleBackupContains(s.Backup.Directory, s.Root) {
+			return errSingleInstall
+		}
+	}
 	if s.APIPort == 0 {
 		s.APIPort = 19444
 	}
@@ -181,14 +192,33 @@ func singleInstallCommand(ctx context.Context, o Options, out io.Writer) (result
 	if singleDecode(raw, &spec) != nil {
 		return errSingleInstall
 	}
+	// New installations receive the daily/seven policy once. Original
+	// immutable requests and resumes retain the absence or existing policy.
+	if o.Action != "resume-single-install" && spec.Format == 3 && spec.Backup == nil {
+		spec.Backup = &singleInstallBackupPolicy{Directory: spec.Root + "-backups", Keep: 7}
+	}
 	if err := spec.validate(); err != nil {
 		return err
+	}
+	if o.Action == "resume-single-install" && spec.Backup == nil {
+		// The caller can reuse the original request with omitted defaults. Read
+		// only this optional policy from the saved manifest; resume authenticates
+		// the entire immutable installation before any service operation.
+		installed, err := readTrustData(filepath.Join(spec.Root, "install.json"), true, 64<<10)
+		var manifest singleInstallManifest
+		if err != nil || singleDecode(installed, &manifest) != nil {
+			return errSingleInstall
+		}
+		spec.Backup = manifest.Spec.Backup
+		if err := spec.validate(); err != nil {
+			return err
+		}
 	}
 	if o.Topology != "" && o.Topology != "single" {
 		return errors.New("此安装入口只支持全新 single，HA 和已有拓扑迁移必须使用专门流程")
 	}
 	if o.Action == "preview-single-install" {
-		return json.NewEncoder(out).Encode(map[string]any{"topology": "single", "fresh_only": true, "root": spec.Root, "public_url": spec.PublicURL, "loopback_ports": []int{spec.APIPort, spec.PostgresPort, spec.MetricsPort}, "services": []string{"postgres", "metrics", "central"}, "requires_existing_https_proxy": true, "environment_verified": false})
+		return json.NewEncoder(out).Encode(map[string]any{"topology": "single", "fresh_only": true, "root": spec.Root, "public_url": spec.PublicURL, "loopback_ports": []int{spec.APIPort, spec.PostgresPort, spec.MetricsPort}, "services": []string{"postgres", "metrics", "central"}, "requires_existing_https_proxy": true, "environment_verified": false, "backup_policy": spec.Backup})
 	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Geteuid() != 0 {
 		return errors.New("单中心安装须在 Linux amd64 上以 root 执行")
@@ -373,6 +403,17 @@ func prepareSingleInstallation(ctx context.Context, s singleInstallSpec, binary 
 			return err
 		}
 	}
+	if s.Backup != nil {
+		// The destination does not exist until atomic publication. Authenticate
+		// the exact in-memory metadata already copied from independent trust.
+		trusted, _, err := verifyTrustedReleaseData(files["release.json"], files["release.sig"], files["release.pub"])
+		if err != nil {
+			return err
+		}
+		policy := singleBackupSchedule{Format: 1, Spec: singleBackupScheduleSpec{Format: 1, Directory: s.Backup.Directory, Keep: s.Backup.Keep, Request: singleBackupSpec{Format: 1, Installation: filepath.Join(s.Root, "install.json"), HostConfig: filepath.Join(s.Root, "executor.yaml"), APIConfig: filepath.Join(s.Root, "config.yaml"), ComposeFile: filepath.Join(s.Root, "compose.yaml")}}, Helper: filepath.Join(s.Root, "webscan"), Hash: trusted.manifest.Helper.SHA256, Release: trusted.manifest.Release}
+		files["backup-schedule.json"], _ = json.Marshal(policy)
+		files["backup.service"], files["backup.timer"] = singleBackupScheduleUnits(policy, filepath.Join(s.Root, "backup-schedule.json"))
+	}
 	label := digest([]byte(s.Root + digest(binary) + s.Instance))
 	files["compose.yaml"], files["stack.service"] = singleCompose(s, label), singleUnit(s, docker)
 	m := singleInstallManifest{Format: 1, Spec: s, Files: map[string]string{}}
@@ -421,6 +462,9 @@ func readSingleInstallation(s singleInstallSpec, binaryDigest string) (singleIns
 	}
 	if s.Format == 3 {
 		names = append(names, singleWebDeploymentFiles...)
+	}
+	if s.Backup != nil {
+		names = append(names, "backup-schedule.json", "backup.service", "backup.timer")
 	}
 	if len(m.Files) != len(names) || m.Files["webscan"] != binaryDigest {
 		return j, errSingleInstall
@@ -537,7 +581,18 @@ func (i singleInstaller) resume(ctx context.Context, s singleInstallSpec, binary
 	// Even a completed installation is rechecked, without resetting accounts
 	// or recreating any running container.
 	if err := i.verify(ctx, s); err != nil {
+		feedback := map[string]any{"stage": "复核已完成安装", "state": "failed"}
+		var problem singleInstallProblem
+		if errors.As(err, &problem) {
+			feedback["code"], feedback["suggestion"] = problem.Code, problem.Hint
+		}
+		_ = json.NewEncoder(out).Encode(feedback)
 		return errors.New("已完成安装当前验收失败；未重建、回退或清空任何服务")
+	}
+	if s.Backup != nil {
+		if err := i.activateSingleBackup(ctx, s); err != nil {
+			return err
+		}
 	}
 	return json.NewEncoder(out).Encode(map[string]any{"status": "installed", "topology": "single", "config": filepath.Join(s.Root, "config.yaml"), "service": singleProject(s.Root) + ".service", "https_proxy_configured": false, "executor_enabled": s.Format == 3, "pki_automatic_renewal": s.Format >= 2})
 }
@@ -782,34 +837,53 @@ func (i singleInstaller) verify(ctx context.Context, s singleInstallSpec) error 
 			}
 		}
 		if err := verifySinglePKI(s, time.Now().UTC()); err != nil {
-			return err
+			return singleInstallProblem{"pki-readiness", "采集器身份或吊销信任校验失败，请检查证书维护服务；未替换密钥"}
 		}
 	}
 	if s.Format == 3 {
 		if err := i.verifySingleWebDeployment(ctx, s); err != nil {
+			return singleInstallProblem{"executor-service", "宿主执行器服务或固定服务定义校验失败，请检查原服务状态"}
+		}
+	}
+	// Keep the original overall readiness deadline. Each service is a separate
+	// bounded probe: sharing one 12-second attempt across twelve Docker/Compose
+	// processes can repeatedly cancel a healthy later service on a slower host.
+	// No identity, platform, ownership or Compose hash check is omitted.
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	for _, service := range []string{"postgres", "metrics", "central"} {
+		if err := singleWait(ctx, func(op context.Context) error {
+			if err := i.checkContainers(op, s, []string{service}, true); err != nil {
+				return singleInstallProblem{"container-readiness", "容器运行、镜像身份或固定 Compose 配置核验未通过，请检查原服务和引擎响应"}
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
 	}
 	return singleWait(ctx, func(op context.Context) error {
-		if err := i.checkContainers(op, s, []string{"postgres", "metrics", "central"}, true); err != nil {
-			return err
-		}
 		store, err := Open(op, s.configuration())
 		if err != nil {
-			return err
+			return singleInstallProblem{"database-readiness", "无法连接已安装的业务数据库，请检查 PostgreSQL 状态"}
 		}
 		defer store.DB.Close()
-		if s.Format == 3 && !NewAPI(store, s.configuration()).deploymentAvailability(op).Available {
-			return errSingleInstall
+		if s.Format == 3 {
+			availability := NewAPI(store, s.configuration()).deploymentAvailability(op)
+			if !availability.Available {
+				return singleInstallProblem{"deployment-readiness", availability.Reason}
+			}
 		}
 		var version int
 		if err := store.DB.QueryRowContext(op, `SELECT max(version) FROM v3_schema`).Scan(&version); err != nil || version != SchemaVersion {
-			return errSingleInstall
+			return singleInstallProblem{"database-schema", "业务数据库结构未达到当前程序版本，请按原安装请求继续"}
 		}
 		if err := singleHTTPHealth(op, s.configuration().Metrics.QueryURL+"/health"); err != nil {
-			return err
+			return singleInstallProblem{"metrics-readiness", "时序库健康检查失败，请检查已安装的时序服务"}
 		}
-		return singleHTTPHealth(op, "http://"+s.configuration().Central.Listen+"/healthz")
+		if err := singleHTTPHealth(op, "http://"+s.configuration().Central.Listen+"/healthz"); err != nil {
+			return singleInstallProblem{"central-readiness", "中心健康检查失败，请检查原中心容器日志"}
+		}
+		return nil
 	})
 }
 
@@ -907,7 +981,7 @@ func singleWait(ctx context.Context, check func(context.Context) error) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.Join(ctx.Err(), err)
 		case <-time.After(time.Second):
 		}
 	}

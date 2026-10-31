@@ -221,7 +221,7 @@ func TestNodeRuntimeMissingOrChangedBaselineStopsBeforeRemote(t *testing.T) {
 func dropNodeRuntimeForTest(t *testing.T, s *Store) {
 	t.Helper()
 	dropSettingsDraftForTest(t, s)
-	mustHistoryExec(t, s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP VIEW v3_active_nodes;DROP TABLE v3_node_runtime;DROP TABLE v3_node_configurations;ALTER TABLE v3_nodes DROP COLUMN runtime_generation;DELETE FROM v3_schema WHERE version>=19`)
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP VIEW v3_active_nodes;DROP TABLE v3_node_runtime;DROP TABLE v3_node_configurations;ALTER TABLE v3_nodes DROP COLUMN runtime_generation;DELETE FROM v3_schema WHERE version>=19`)
 }
 
 func TestNodeRuntimeFirstInstallRollbackAndReinstall(t *testing.T) {

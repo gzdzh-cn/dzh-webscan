@@ -125,3 +125,60 @@ func TestFormalPublicationRejectsDirtyBuildAndReplacedArtifacts(t *testing.T) {
 		t.Fatal("dirty build accepted")
 	}
 }
+
+func TestMaintenanceReleaseCannotReuseOnlyOriginalGates(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "result.log")
+	if err := os.WriteFile(log, []byte("isolated maintenance acceptance"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := fileSHA(log)
+	for _, version := range []string{"v3.0.3", "v3.0.4", "v3.1.0", "v4.0.0"} {
+		t.Run(version, func(t *testing.T) {
+			b := buildRecord{Release: version, Commit: strings.Repeat("a", 40), Source: strings.Repeat("b", 64)}
+			r := verificationRecord{Release: b.Release, Commit: b.Commit, Source: b.Source}
+			r.Gates = (verificationRecord{}).Gates
+			raw := []byte(`{"gates":{}}`)
+			if err := json.Unmarshal(raw, &r); err != nil {
+				t.Fatal(err)
+			}
+			gate := struct {
+				Passed   bool   `json:"passed"`
+				Evidence string `json:"evidence"`
+				SHA256   string `json:"sha256"`
+			}{true, "result.log", hash}
+			path := filepath.Join(dir, "verification.json")
+			check := func() error {
+				raw, _ := json.Marshal(r)
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				return checkVerification(path, b)
+			}
+			for _, name := range formalGates {
+				r.Gates[name] = gate
+			}
+			if check() == nil {
+				t.Fatal("original gates bypassed maintenance acceptance")
+			}
+			for _, name := range maintenanceGates {
+				r.Gates[name] = gate
+			}
+			if err := check(); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range maintenanceGates {
+				delete(r.Gates, name)
+				if check() == nil {
+					t.Fatalf("missing %s accepted", name)
+				}
+				r.Gates[name] = gate
+			}
+		})
+	}
+	for _, version := range []string{"v3.0.3-beta.1", "v3.00.3", "v3.0.3-local-test", "v999999999999999999999.0.0"} {
+		if _, err := requiredFormalGates(version); err == nil {
+			t.Fatalf("invalid stable release %s accepted", version)
+		}
+	}
+}

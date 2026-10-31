@@ -300,7 +300,7 @@ func TestNodeNameChangeRegistryBackupRestoreAndUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustHistoryExec(t, old.s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE v3_node_name_prunings;DROP TABLE v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DELETE FROM v3_schema WHERE version>=33`)
+	mustHistoryExec(t, old.s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE v3_node_name_prunings;DROP TABLE v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DELETE FROM v3_schema WHERE version>=33`)
 	if err := old.s.Migrate(ctx); err == nil {
 		t.Fatal("upgrade skipped consistent backup")
 	}

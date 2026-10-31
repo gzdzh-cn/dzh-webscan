@@ -391,6 +391,14 @@ func bootstrapRoles(processes []bootstrapProcess) []string {
 }
 
 func (s *Store) runBootstrapProcess(ctx context.Context, v *Vault, launch, effective Config, activation int64, instance, role string, ready <-chan struct{}) error {
+	return s.runBootstrapProcessWithTiming(ctx, v, launch, effective, activation, instance, role, ready, 3*time.Second, 9*time.Second, 12*time.Second)
+}
+
+// A slow transaction must not restart every worker on the first transient
+// timeout. Retry only within the existing 12-second process-evidence window;
+// never extend the persisted heartbeat or accept invalid ownership. The small
+// timing seam lets integration tests exercise real PostgreSQL cancellation.
+func (s *Store) runBootstrapProcessWithTiming(ctx context.Context, v *Vault, launch, effective Config, activation int64, instance, role string, ready <-chan struct{}, interval, budget, window time.Duration) error {
 	launchValues, err := configurationBootstrapValues(launch)
 	if err != nil {
 		return err
@@ -401,7 +409,8 @@ func (s *Store) runBootstrapProcess(ctx context.Context, v *Vault, launch, effec
 	}
 	p := bootstrapProcess{Instance: instance, Member: launch.Central.Instance, Role: role, Activation: activation, LaunchDigest: digest(common.JSON(launchValues)), RuntimeDigest: digest(common.JSON(runtimeValues))}
 	registered := false
-	tick := time.NewTicker(3 * time.Second)
+	confirmed := time.Now()
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
 		select {
@@ -412,9 +421,18 @@ func (s *Store) runBootstrapProcess(ctx context.Context, v *Vault, launch, effec
 			registered = true
 		case <-tick.C:
 		}
-		op, cancel := context.WithTimeout(ctx, 3*time.Second)
+		started := time.Now()
+		remaining := window - started.Sub(confirmed)
+		if remaining <= 0 {
+			return context.DeadlineExceeded
+		}
+		op, cancel := context.WithTimeout(ctx, min(budget, remaining))
 		if registered {
-			p, err = s.touchBootstrapProcess(op, v, p)
+			var next bootstrapProcess
+			next, err = s.touchBootstrapProcess(op, v, p)
+			if err == nil {
+				p = next
+			}
 		} else {
 			var latest int64
 			err = s.DB.QueryRowContext(op, `SELECT COALESCE(max(revision),0) FROM v3_bootstrap_handoffs WHERE member=$1`, p.Member).Scan(&latest)
@@ -422,10 +440,20 @@ func (s *Store) runBootstrapProcess(ctx context.Context, v *Vault, launch, effec
 				err = errBootstrapRestart
 			}
 		}
+		timedOut := errors.Is(op.Err(), context.DeadlineExceeded)
 		cancel()
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if timedOut && !errors.Is(err, errBootstrapRestart) && !errors.Is(err, errBootstrapRuntime) && time.Since(confirmed) < window {
+				continue
+			}
 			return err
 		}
+		// Use the attempt's start as a conservative lower bound for the DB
+		// observation, not the end of a potentially slow commit.
+		confirmed = started
 	}
 }
 func (s *Store) endBootstrapProcess(ctx context.Context, v *Vault, expected bootstrapProcess) error {

@@ -107,7 +107,7 @@ show) echo 252;;
 daemon-reload|is-enabled|is-active) exit 0;;
 enable)
   case "$3" in
-    *-pki.timer) exit 0;;
+    *-pki.timer|*-backup.timer) exit 0;;
     *-executor.service)
       if test -f '%s' && kill -0 "$(cat '%s')" 2>/dev/null; then exit 0; fi
       '%s' control-v3 --config '%s' --action run --role executor > '%s' 2>&1 &

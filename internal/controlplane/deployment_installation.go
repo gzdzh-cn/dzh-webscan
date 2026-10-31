@@ -48,6 +48,9 @@ func installationMatchesPlan(j DeploymentJob, spec nodeops.Spec, configuration [
 // its immutable, digest-bound snapshot, never defaults from a decoded plan or
 // the editable current node row.
 func installationMatchesPlanTx(ctx context.Context, tx *sql.Tx, j DeploymentJob, spec nodeops.Spec) error {
+	if err := requireNodeSnapshotAvailableTx(ctx, tx, j.Node, j.Plan.TargetRuntime); err != nil {
+		return err
+	}
 	var configuration, snapshot []byte
 	err := tx.QueryRowContext(ctx, `SELECT config,to_jsonb(c) FROM v3_node_configurations c WHERE node=$1 AND id=$2 FOR SHARE`, j.Node, j.Plan.TargetRuntime).Scan(&configuration, &snapshot)
 	if err != nil {

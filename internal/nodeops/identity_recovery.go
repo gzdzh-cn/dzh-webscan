@@ -132,6 +132,10 @@ func (w *LocalRuntime) identityRecoveryWithResources(ctx context.Context, in Ide
 		return empty, errIdentityRecovery
 	}
 	defer release()
+	rotated, err := nodepki.RefreshIdentityIssuerCRL(ctx, filepath.Join(w.managedDataDirectory(), "pki-identity", "ca.crt"), filepath.Join(w.managedDataDirectory(), "pki-trust"), in.Intent.AuthoritySHA256, in.CRL, time.Now())
+	if err != nil {
+		return empty, errIdentityRecovery
+	}
 	ca, err := w.recoveryInstallation(in)
 	if err != nil {
 		return empty, errIdentityRecovery
@@ -150,19 +154,21 @@ func (w *LocalRuntime) identityRecoveryWithResources(ctx context.Context, in Ide
 			return empty, errIdentityRecovery
 		}
 	}
-	previous, err := readPrivate(filepath.Join(floor, "ca.crl"), nodepki.MaxCRLBytes)
-	if err != nil || nodepki.ValidateCRLAdvance(ca, previous, in.CRL, time.Now()) != nil {
-		return empty, errIdentityRecovery
+	if !rotated {
+		previous, err := readPrivate(filepath.Join(floor, "ca.crl"), nodepki.MaxCRLBytes)
+		if err != nil || nodepki.ValidateCRLAdvance(ca, previous, in.CRL, time.Now()) != nil {
+			return empty, errIdentityRecovery
+		}
 	}
 	caFile, active := filepath.Join(identity, "ca.crt"), filepath.Join(identity, "active.pem")
 	var request nodepki.NodeRecoveryRequest
 	if in.Operation == "prepare" {
-		request, err = nodepki.PrepareNodeRecovery(ctx, caFile, active, in.CRL, in.Intent, time.Now())
+		request, err = nodepki.PrepareNodeRecoveryWithRootState(ctx, caFile, active, floor, in.CRL, in.Intent, time.Now())
 	} else if in.Operation == "reconcile" {
 		// A prior committed issuance may or may not have reached activation.
 		// Both paths retain the original CSR. The second path requires the
 		// exact already active replacement and proves its local private key.
-		request, err = nodepki.PrepareNodeRecovery(ctx, caFile, active, in.CRL, in.Intent, time.Now())
+		request, err = nodepki.PrepareNodeRecoveryWithRootState(ctx, caFile, active, floor, in.CRL, in.Intent, time.Now())
 		if err != nil {
 			request, err = nodepki.PrepareNodeRecoveryContinuation(ctx, caFile, active, floor, in.CRL, in.Intent, in.Certificate, time.Now())
 		}
@@ -264,6 +270,18 @@ func (w *LocalRuntime) recoveryInstallation(in IdentityRecoveryInput) ([]byte, e
 // Fixed installation proof shared by separately authorized identity operations.
 // Reading a managed package never falls back to an expired installation key.
 func (w *LocalRuntime) identityMaintenanceInstallation(node string, crl []byte) ([]byte, string, error) {
+	roots, err := w.installedRootState(time.Now())
+	if err != nil {
+		return nil, "", errIdentityRecovery
+	}
+	var state *nodepki.RootSetSnapshot
+	if roots.Format != 0 {
+		state = &roots
+	}
+	return w.identityMaintenanceInstallationWithRoots(node, crl, state)
+}
+
+func (w *LocalRuntime) identityMaintenanceInstallationWithRoots(node string, crl []byte, roots *nodepki.RootSetSnapshot) ([]byte, string, error) {
 	raw, err := readPrivate(filepath.Join(w.root, "active.json"), MaxRequestBytes)
 	if err != nil {
 		return nil, "", errIdentityRecovery
@@ -290,7 +308,12 @@ func (w *LocalRuntime) identityMaintenanceInstallation(node string, crl []byte) 
 		return nil, "", errIdentityRecovery
 	}
 	defer clear(material)
-	m, err := nodeconfig.DecodeManagedRuntime(material, time.Now(), crl)
+	var m nodeconfig.Material
+	if roots == nil {
+		m, err = nodeconfig.DecodeManagedRuntime(material, time.Now(), crl)
+	} else {
+		m, err = nodeconfig.DecodeManagedRootRuntime(material, time.Now(), *roots)
+	}
 	defer clear(m.Key)
 	if err != nil || m.Node != a.Node || m.Version != a.Spec.ConfigVersion || m.SourceSHA256 != a.Spec.ConfigSourceSHA256 || m.Mode != a.Spec.Mode || m.ServerName != a.Spec.ServerName || m.MetricsPort != a.Spec.MetricsPort || m.Release != a.Spec.Release || m.BundleSHA256 != a.Spec.BundleSHA256 {
 		return nil, "", errIdentityRecovery

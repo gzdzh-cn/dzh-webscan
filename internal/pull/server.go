@@ -16,14 +16,19 @@ import (
 
 type Server struct {
 	agentv1.UnimplementedAgentServiceServer
-	Source          *Source
-	TrustUpdater    TrustUpdater
-	IdentityRenewer IdentityRenewer
+	Source             *Source
+	TrustUpdater       TrustUpdater
+	RootTrustRefresher RootTrustRefresher
+	IdentityRenewer    IdentityRenewer
 }
 
 // TrustUpdater must validate the complete pinned-CA snapshot, the collector
 // against that snapshot, and its durable floor before committing anything.
 type TrustUpdater func(context.Context, *x509.Certificate, []byte) (*agentv1.UpdateTrustResponse, error)
+
+// RootTrustRefresher may refresh only an already installed root authorization.
+// Installing or finalizing a rotation is never authorized by this RPC.
+type RootTrustRefresher func(context.Context, *x509.Certificate, []byte) (*agentv1.RefreshRootTrustResponse, error)
 
 // Optional policy rechecks certificate lifecycle state on each RPC, including
 // an existing connection. A policy failure never falls back to CN matching.
@@ -36,6 +41,10 @@ func NewServerWithTrustUpdater(source *Source, identities []string, updater Trus
 }
 
 func NewServerWithManagedIdentity(source *Source, identities []string, updater TrustUpdater, renewer IdentityRenewer, policies ...func(*x509.Certificate) error) *grpc.Server {
+	return NewServerWithRootTrust(source, identities, updater, nil, renewer, policies...)
+}
+
+func NewServerWithRootTrust(source *Source, identities []string, updater TrustUpdater, refresher RootTrustRefresher, renewer IdentityRenewer, policies ...func(*x509.Certificate) error) *grpc.Server {
 	allowed := map[string]bool{}
 	for _, v := range identities {
 		if v != "" {
@@ -67,8 +76,11 @@ func NewServerWithManagedIdentity(source *Source, identities []string, updater T
 		if i.FullMethod == agentv1.AgentService_UpdateTrust_FullMethodName && updater != nil {
 			return next(ctx, r)
 		}
+		if i.FullMethod == agentv1.AgentService_RefreshRootTrust_FullMethodName && refresher != nil {
+			return next(ctx, r)
+		}
 		check := func() error {
-			if (updater != nil || renewer != nil) && len(policies) == 0 {
+			if (updater != nil || refresher != nil || renewer != nil) && len(policies) == 0 {
 				return status.Error(codes.PermissionDenied, "子控缺少普通采集的吊销校验规则")
 			}
 			for _, policy := range policies {
@@ -90,7 +102,7 @@ func NewServerWithManagedIdentity(source *Source, identities []string, updater T
 		}
 		return result, nil
 	}))
-	agentv1.RegisterAgentServiceServer(g, &Server{Source: source, TrustUpdater: updater, IdentityRenewer: renewer})
+	agentv1.RegisterAgentServiceServer(g, &Server{Source: source, TrustUpdater: updater, RootTrustRefresher: refresher, IdentityRenewer: renewer})
 	return g
 }
 
@@ -117,6 +129,7 @@ func (s *Server) UpdateTrust(ctx context.Context, r *agentv1.UpdateTrustRequest)
 }
 func (s *Server) Capabilities(ctx context.Context, _ *agentv1.CapabilitiesRequest) (*agentv1.CapabilitiesResponse, error) {
 	result := s.Source.Capabilities()
+	result.RootTrustRefresh = s.RootTrustRefresher != nil
 	if s.IdentityRenewer != nil {
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()

@@ -87,6 +87,10 @@ func renewalProofPayload(r NodeRenewalRequest) ([]byte, error) {
 }
 
 func canonicalNodeCSR(raw []byte, id string, old *x509.Certificate) (*x509.CertificateRequest, error) {
+	return canonicalIdentityCSR(raw, Node, id, old)
+}
+
+func canonicalIdentityCSR(raw []byte, role, id string, old *x509.Certificate) (*x509.CertificateRequest, error) {
 	if len(raw) == 0 || len(raw) > 16<<10 {
 		return nil, ErrIdentity
 	}
@@ -95,7 +99,7 @@ func canonicalNodeCSR(raw []byte, id string, old *x509.Certificate) (*x509.Certi
 		return nil, ErrIdentity
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
-	if err != nil || csr.CheckSignature() != nil || csr.SignatureAlgorithm != x509.PureEd25519 || len(csr.Subject.Names) != 1 || csr.Subject.CommonName != Node+":"+id || len(csr.EmailAddresses) != 0 || len(csr.URIs) != 1 || len(old.URIs) != 1 || csr.URIs[0].String() != old.URIs[0].String() || !reflect.DeepEqual(csr.DNSNames, old.DNSNames) || len(csr.IPAddresses) != len(old.IPAddresses) {
+	if err != nil || csr.CheckSignature() != nil || csr.SignatureAlgorithm != x509.PureEd25519 || len(csr.Subject.Names) != 1 || csr.Subject.CommonName != role+":"+id || len(csr.EmailAddresses) != 0 || len(csr.URIs) != 1 || len(old.URIs) != 1 || csr.URIs[0].String() != old.URIs[0].String() || !reflect.DeepEqual(csr.DNSNames, old.DNSNames) || len(csr.IPAddresses) != len(old.IPAddresses) {
 		return nil, ErrIdentity
 	}
 	key, ok := csr.PublicKey.(ed25519.PublicKey)
@@ -197,9 +201,17 @@ func PrepareNodeRenewal(ctx context.Context, caFile, identityFile, id, expected 
 	return prepareNodeRenewal(ctx, caFile, identityFile, id, expected, now, false)
 }
 
+func PrepareNodeRenewalWithRootState(ctx context.Context, caFile, identityFile, directory, id, expected string, now time.Time) (NodeRenewalRequest, error) {
+	return prepareNodeRenewalWithRootState(ctx, caFile, identityFile, directory, id, expected, now, false)
+}
+
 // Recovery is deliberately private: ordinary preparation must never authorize
 // an expired identity, even when an old pending request already exists.
 func prepareNodeRenewal(ctx context.Context, caFile, identityFile, id, expected string, now time.Time, recovery bool) (NodeRenewalRequest, error) {
+	return prepareNodeRenewalWithRootState(ctx, caFile, identityFile, "", id, expected, now, recovery)
+}
+
+func prepareNodeRenewalWithRootState(ctx context.Context, caFile, identityFile, directory, id, expected string, now time.Time, recovery bool) (NodeRenewalRequest, error) {
 	var empty NodeRenewalRequest
 	if !filepath.IsAbs(identityFile) || filepath.Clean(identityFile) != identityFile || secureDirectory(filepath.Dir(identityFile)) != nil {
 		return empty, ErrIdentity
@@ -209,7 +221,7 @@ func prepareNodeRenewal(ctx context.Context, caFile, identityFile, id, expected 
 		return empty, err
 	}
 	defer lock.Close()
-	b, record, err := readIdentity(caFile, identityFile, Node, id, now, recovery)
+	b, record, err := readIdentityWithRootState(caFile, identityFile, directory, Node, id, now, recovery)
 	defer clear(b.Key)
 	if err != nil || record.CertificateSHA256 != expected || recovery && now.Before(record.ExpiresAt) {
 		return empty, ErrIdentity
@@ -357,6 +369,10 @@ func signNodeRenewalRegistered(ctx context.Context, directory string, r NodeRene
 // CSR key. Its mandatory policy must check the installed current CRL floor.
 // Pending keys are retained privately for response-loss reconciliation/backup.
 func ActivateNodeRenewal(ctx context.Context, caFile, identityFile, id, expected, requestSHA string, certificate []byte, now time.Time, verify func(*x509.Certificate) error) (IdentityRecord, error) {
+	return ActivateNodeRenewalWithRootState(ctx, caFile, identityFile, "", id, expected, requestSHA, certificate, now, verify)
+}
+
+func ActivateNodeRenewalWithRootState(ctx context.Context, caFile, identityFile, directory, id, expected, requestSHA string, certificate []byte, now time.Time, verify func(*x509.Certificate) error) (IdentityRecord, error) {
 	var empty IdentityRecord
 	if verify == nil || len(certificate) == 0 || len(certificate) > 16<<10 || !filepath.IsAbs(identityFile) || filepath.Clean(identityFile) != identityFile {
 		return empty, ErrIdentity
@@ -365,6 +381,25 @@ func ActivateNodeRenewal(ctx context.Context, caFile, identityFile, id, expected
 	if err != nil {
 		return empty, ErrIdentity
 	}
+	if directory != "" {
+		// The request remains same-issuer. Using the active material's issuer
+		// never grants a leaf-renewal RPC authority to perform a root change.
+		current, _, err := readIdentityWithRootState(caFile, identityFile, directory, Node, id, now, true)
+		defer clear(current.Key)
+		if err != nil {
+			return empty, err
+		}
+		ca = current.CA
+	}
+	return activateNodeRenewalMaterial(ctx, identityFile, id, expected, requestSHA, ca, certificate, now, verify, func(b Bundle) (IdentityRecord, error) {
+		return PublishIdentityWithRootState(ctx, caFile, identityFile, directory, Node, id, expected, b, now)
+	})
+}
+
+// The caller chooses and locks the approved issuer; activation still checks the
+// exact retained local CSR/key, public certificate, parent and current policy.
+func activateNodeRenewalMaterial(ctx context.Context, identityFile, id, expected, requestSHA string, ca, certificate []byte, now time.Time, verify func(*x509.Certificate) error, publish func(Bundle) (IdentityRecord, error)) (IdentityRecord, error) {
+	var empty IdentityRecord
 	pending, err := renewalPending(filepath.Dir(identityFile), expected)
 	if err != nil {
 		return empty, err
@@ -391,5 +426,5 @@ func ActivateNodeRenewal(ctx context.Context, caFile, identityFile, id, expected
 	if !ok || !bytes.Equal(public, csr.PublicKey.(ed25519.PublicKey)) || verify(leaf) != nil {
 		return empty, ErrIdentity
 	}
-	return PublishIdentity(ctx, caFile, identityFile, Node, id, expected, Bundle{CA: ca, Certificate: certificate, Key: key}, now)
+	return publish(Bundle{CA: ca, Certificate: certificate, Key: key})
 }

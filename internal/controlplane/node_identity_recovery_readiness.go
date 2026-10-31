@@ -44,7 +44,7 @@ func (w *sshNodeIdentityRecovery) observeAndConfirm(ctx context.Context, l Lease
 	if err != nil {
 		return err
 	}
-	ca, err := readTrustData(w.config.Collector.CAFile, false, 64<<10)
+	ca, _, err := provisioningCertificateIssuer(w.config, issued, time.Now())
 	if err != nil {
 		return errNodeIdentityRecovery
 	}

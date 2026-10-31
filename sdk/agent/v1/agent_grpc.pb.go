@@ -24,6 +24,7 @@ const (
 	AgentService_AckEvents_FullMethodName               = "/webscan.agent.v1.AgentService/AckEvents"
 	AgentService_ReadMetrics_FullMethodName             = "/webscan.agent.v1.AgentService/ReadMetrics"
 	AgentService_UpdateTrust_FullMethodName             = "/webscan.agent.v1.AgentService/UpdateTrust"
+	AgentService_RefreshRootTrust_FullMethodName        = "/webscan.agent.v1.AgentService/RefreshRootTrust"
 	AgentService_PrepareIdentityRenewal_FullMethodName  = "/webscan.agent.v1.AgentService/PrepareIdentityRenewal"
 	AgentService_ActivateIdentityRenewal_FullMethodName = "/webscan.agent.v1.AgentService/ActivateIdentityRenewal"
 )
@@ -41,6 +42,9 @@ type AgentServiceClient interface {
 	// Additive, optional capability. Only a full snapshot signed by the pinned
 	// CA can advance trust; it cannot change identities or configuration.
 	UpdateTrust(ctx context.Context, in *UpdateTrustRequest, opts ...grpc.CallOption) (*UpdateTrustResponse, error)
+	// Refreshes CRLs only within an administrator-installed root rotation.
+	// Cannot install a new CA or remove an existing CA.
+	RefreshRootTrust(ctx context.Context, in *RefreshRootTrustRequest, opts ...grpc.CallOption) (*RefreshRootTrustResponse, error)
 	// Optional managed identity lifecycle. The node generates and retains its
 	// replacement private key; only public CSR/certificate bytes cross the wire.
 	PrepareIdentityRenewal(ctx context.Context, in *PrepareIdentityRenewalRequest, opts ...grpc.CallOption) (*PreparedIdentityRenewal, error)
@@ -105,6 +109,16 @@ func (c *agentServiceClient) UpdateTrust(ctx context.Context, in *UpdateTrustReq
 	return out, nil
 }
 
+func (c *agentServiceClient) RefreshRootTrust(ctx context.Context, in *RefreshRootTrustRequest, opts ...grpc.CallOption) (*RefreshRootTrustResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefreshRootTrustResponse)
+	err := c.cc.Invoke(ctx, AgentService_RefreshRootTrust_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentServiceClient) PrepareIdentityRenewal(ctx context.Context, in *PrepareIdentityRenewalRequest, opts ...grpc.CallOption) (*PreparedIdentityRenewal, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PreparedIdentityRenewal)
@@ -138,6 +152,9 @@ type AgentServiceServer interface {
 	// Additive, optional capability. Only a full snapshot signed by the pinned
 	// CA can advance trust; it cannot change identities or configuration.
 	UpdateTrust(context.Context, *UpdateTrustRequest) (*UpdateTrustResponse, error)
+	// Refreshes CRLs only within an administrator-installed root rotation.
+	// Cannot install a new CA or remove an existing CA.
+	RefreshRootTrust(context.Context, *RefreshRootTrustRequest) (*RefreshRootTrustResponse, error)
 	// Optional managed identity lifecycle. The node generates and retains its
 	// replacement private key; only public CSR/certificate bytes cross the wire.
 	PrepareIdentityRenewal(context.Context, *PrepareIdentityRenewalRequest) (*PreparedIdentityRenewal, error)
@@ -166,6 +183,9 @@ func (UnimplementedAgentServiceServer) ReadMetrics(context.Context, *ReadMetrics
 }
 func (UnimplementedAgentServiceServer) UpdateTrust(context.Context, *UpdateTrustRequest) (*UpdateTrustResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateTrust not implemented")
+}
+func (UnimplementedAgentServiceServer) RefreshRootTrust(context.Context, *RefreshRootTrustRequest) (*RefreshRootTrustResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshRootTrust not implemented")
 }
 func (UnimplementedAgentServiceServer) PrepareIdentityRenewal(context.Context, *PrepareIdentityRenewalRequest) (*PreparedIdentityRenewal, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PrepareIdentityRenewal not implemented")
@@ -284,6 +304,24 @@ func _AgentService_UpdateTrust_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_RefreshRootTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshRootTrustRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).RefreshRootTrust(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_RefreshRootTrust_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).RefreshRootTrust(ctx, req.(*RefreshRootTrustRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentService_PrepareIdentityRenewal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PrepareIdentityRenewalRequest)
 	if err := dec(in); err != nil {
@@ -346,6 +384,10 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateTrust",
 			Handler:    _AgentService_UpdateTrust_Handler,
+		},
+		{
+			MethodName: "RefreshRootTrust",
+			Handler:    _AgentService_RefreshRootTrust_Handler,
 		},
 		{
 			MethodName: "PrepareIdentityRenewal",

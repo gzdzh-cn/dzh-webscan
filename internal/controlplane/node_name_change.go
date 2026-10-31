@@ -62,7 +62,7 @@ func nameChangeNodeStateTx(ctx context.Context, tx *sql.Tx, node string, expecte
 	}
 	// Bind the entire saved target, independently of the active source. Never
 	// relax the recovery/ordinary-renewal requirement on the active TLS name.
-	err = tx.QueryRowContext(ctx, `SELECT c.id FROM v3_node_configurations c JOIN v3_nodes n ON n.id=c.node WHERE n.id=$1 AND ROW(n.version,n.name,n.endpoint,n.server_name,n.enabled,n.mode,n.shard,n.config)=ROW(c.version,c.name,c.endpoint,c.server_name,c.enabled,c.mode,c.shard,c.config) ORDER BY c.id LIMIT 1`, node).Scan(&targetSnapshot)
+	err = tx.QueryRowContext(ctx, `SELECT c.id FROM v3_node_configurations c JOIN v3_nodes n ON n.id=c.node WHERE n.id=$1 AND NOT EXISTS(SELECT 1 FROM v3_node_history_retirements h WHERE h.node=c.node AND h.snapshot=c.id) AND ROW(n.version,n.name,n.endpoint,n.server_name,n.enabled,n.mode,n.shard,n.config)=ROW(c.version,c.name,c.endpoint,c.server_name,c.enabled,c.mode,c.shard,c.config) ORDER BY c.id LIMIT 1`, node).Scan(&targetSnapshot)
 	if err != nil {
 		return Node{}, "", 0, "", "", errNodeNameChange
 	}
@@ -188,7 +188,7 @@ func (s *Store) prepareNodeNameChange(ctx context.Context, c Config, v *Vault, u
 		if err != nil || digest(cert.Raw) != in.ParentSHA256 || cert.VerifyHostname(sourceName) != nil || cert.VerifyHostname(n.ServerName) == nil {
 			return nil, errNodeNameChange
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 LIMIT 1`, in.Node, in.AuthoritySHA256, cert.SerialNumber.Text(16)).Scan(&parent); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_root_identity_issuances WHERE role='node' AND subject=$1 AND authority=$2 AND serial=$3 LIMIT 1`, in.Node, in.AuthoritySHA256, cert.SerialNumber.Text(16)).Scan(&parent); err != nil {
 			return nil, errNodeNameChange
 		}
 		now := time.Now().UTC().Truncate(time.Second)
@@ -196,10 +196,11 @@ func (s *Store) prepareNodeNameChange(ctx context.Context, c Config, v *Vault, u
 		if err != nil || digest(root.Raw) != in.AuthoritySHA256 {
 			return nil, errNodeNameChange
 		}
-		configured, err := readTrustData(c.Collector.CAFile, false, 64<<10)
-		if err != nil || !bytes.Equal(bytes.TrimSpace(configured), bytes.TrimSpace(ca)) {
+		current, err := provisioningIssuerCRL(c, ca, now)
+		if err != nil || nodepki.ValidateCRLAdvance(ca, crl, current, now) != nil {
 			return nil, errNodeNameChange
 		}
+		crl = current
 		registered, err := provisioningCertificate(parent)
 		if err != nil || !bytes.Equal(registered.Raw, cert.Raw) {
 			return nil, errNodeNameChange
@@ -383,7 +384,7 @@ func (s *Store) confirmNodeNameChange(ctx context.Context, c Config, v *Vault, l
 		return errNodeNameChange
 	}
 	now := time.Now()
-	current, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	current, err := provisioningIssuerCRL(c, ca, time.Now())
 	if err != nil || nodepki.ValidateCRLAdvance(ca, floor, current, now) != nil || nodepki.ValidateNodeNameChangeCertificate(ca, current, r, j.Intent, known, now) != nil {
 		return errNodeNameChange
 	}

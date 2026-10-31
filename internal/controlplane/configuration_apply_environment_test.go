@@ -219,7 +219,7 @@ func TestConfigurationEnvironmentDatabaseIndividualPrivileges(t *testing.T) {
 		t.Fatal(e)
 	}
 	quote := func(x string) string { return pgx.Identifier{x}.Sanitize() }
-	mustHistoryExec(t, s.DB, `CREATE ROLE `+quote(role)+` LOGIN`)
+	mustHistoryExec(t, s.DB, `CREATE ROLE `+quote(role)+` LOGIN PASSWORD 'isolated-environment-permission-test-only'`)
 	t.Cleanup(func() {
 		mustHistoryExec(t, s.DB, `DROP OWNED BY `+quote(role))
 		mustHistoryExec(t, s.DB, `DROP ROLE `+quote(role))
@@ -231,7 +231,7 @@ func TestConfigurationEnvironmentDatabaseIndividualPrivileges(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	c.User = url.User(role)
+	c.User = url.UserPassword(role, "isolated-environment-permission-test-only")
 	check := func(ok bool) {
 		t.Helper()
 		r := s.checkConfigurationDatabase(context.Background(), []byte(c.String()))

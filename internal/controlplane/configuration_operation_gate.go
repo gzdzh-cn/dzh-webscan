@@ -43,7 +43,10 @@ func lockConfigurationOperationTx(ctx context.Context, tx *sql.Tx, exclusive boo
 	if err == sql.ErrNoRows {
 		return errors.New("配置操作互斥记录缺失，已停止修改")
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return rootRotationAvailableTx(ctx, tx)
 }
 
 func advanceConfigurationOperationTx(ctx context.Context, tx *sql.Tx) error {

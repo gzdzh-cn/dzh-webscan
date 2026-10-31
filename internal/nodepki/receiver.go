@@ -35,6 +35,15 @@ func NewReceiverTrust(caFile, seedFile, directory string, now time.Time) (*Recei
 	if err != nil {
 		return nil, ErrIdentity
 	}
+	if _, err := os.Lstat(directory); err == nil {
+		roots, receipt, err := readRootSet(directory, ca, now, true)
+		if err != nil {
+			return nil, err
+		}
+		if roots != nil {
+			return &ReceiverTrust{&FileTrust{rootSet: roots, rootReceipt: receipt, crlFile: filepath.Join(directory, "ca.crl"), stateDirectory: directory, ca: ca, lastCheck: now}, make(chan struct{}, 1)}, nil
+		}
+	}
 	root, err := parseCertificate(ca)
 	if err != nil || !validAuthority(root, now) {
 		return nil, ErrIdentity
@@ -82,6 +91,9 @@ func (p *ReceiverTrust) Publish(ctx context.Context, cert *x509.Certificate, raw
 	if p == nil || p.FileTrust == nil || ctx.Err() != nil {
 		return CRLReceipt{}, ErrRevocation
 	}
+	if roots, _, err := ReadRootSet(p.stateDirectory, p.ca, now); err != nil || roots != nil {
+		return CRLReceipt{}, ErrRootRotation
+	}
 	// A caller without a deadline cannot hold the trust lock indefinitely.
 	// Serialize expensive validation too, without queueing unbounded work.
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -110,6 +122,9 @@ func (p *ReceiverTrust) Publish(ctx context.Context, cert *x509.Certificate, raw
 		return CRLReceipt{}, err
 	}
 	defer lock.Close()
+	if roots, _, err := ReadRootSet(p.stateDirectory, p.ca, now); err != nil || roots != nil {
+		return CRLReceipt{}, ErrRootRotation
+	}
 	pinned, err := readIdentityFile(filepath.Join(p.stateDirectory, "ca.crt"), 64<<10, true)
 	if err != nil || !bytes.Equal(pinned, p.ca) {
 		return CRLReceipt{}, ErrIdentity

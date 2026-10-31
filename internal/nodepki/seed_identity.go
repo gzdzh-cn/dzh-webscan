@@ -15,6 +15,10 @@ import (
 // An existing incomplete directory fails closed. Like the durable CRL floor,
 // complete state-directory deletion or disk rollback requires external recovery.
 func SeedNodeIdentity(ctx context.Context, caFile, seed, directory, id string, now time.Time) (IdentityRecord, error) {
+	return SeedNodeIdentityWithRootState(ctx, caFile, seed, directory, "", id, now)
+}
+
+func SeedNodeIdentityWithRootState(ctx context.Context, caFile, seed, directory, rootState, id string, now time.Time) (IdentityRecord, error) {
 	var empty IdentityRecord
 	if _, err := Identity(Node, id); err != nil || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || !filepath.IsAbs(seed) || filepath.Clean(seed) != seed || seed == directory || secureDirectory(filepath.Dir(directory)) != nil {
 		return empty, ErrIdentity
@@ -24,7 +28,8 @@ func SeedNodeIdentity(ctx context.Context, caFile, seed, directory, id string, n
 		return empty, ErrIdentity
 	}
 	root, err := parseCertificate(ca)
-	if err != nil || !validAuthority(root, now) {
+	roots, rootsErr := identityRootSet(rootState, ca, now)
+	if err != nil || rootsErr != nil || roots == nil && !validAuthority(root, now) {
 		return empty, ErrIdentity
 	}
 	lock, err := authorityLock(ctx, filepath.Dir(directory))
@@ -33,6 +38,9 @@ func SeedNodeIdentity(ctx context.Context, caFile, seed, directory, id string, n
 	}
 	defer lock.Close()
 	if _, err := os.Lstat(directory); os.IsNotExist(err) {
+		if roots != nil {
+			return empty, ErrIdentity
+		}
 		if secureDirectory(seed) != nil {
 			return empty, ErrIdentity
 		}
@@ -80,7 +88,7 @@ func SeedNodeIdentity(ctx context.Context, caFile, seed, directory, id string, n
 	if err != nil || !bytes.Equal(root.Raw, prior.Raw) {
 		return empty, ErrIdentity
 	}
-	b, record, err := ReadIdentity(caFile, filepath.Join(directory, "active.pem"), Node, id, now)
+	b, record, err := ReadIdentityWithRootState(caFile, filepath.Join(directory, "active.pem"), rootState, Node, id, now)
 	clear(b.Key)
 	return record, err
 }

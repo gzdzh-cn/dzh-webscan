@@ -76,7 +76,7 @@ func (s *Store) localNodeNameChangeCommand(ctx context.Context, c Config, o Opti
 		if err != nil {
 			return errNodeNameChange
 		}
-		ca, err := readTrustData(c.Collector.CAFile, false, 64<<10)
+		ca, _, err := provisioningCertificateIssuer(c, parent, time.Now())
 		if err != nil {
 			return errNodeNameChange
 		}

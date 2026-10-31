@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"webscan/internal/common"
@@ -39,6 +41,32 @@ type verificationRecord struct {
 }
 
 var formalGates = []string{"settings", "security", "native-lifecycle", "docker29-lifecycle", "web-deployment-native", "web-deployment-docker29", "collection", "unchanged-central", "frontend", "go-race", "browser", "single-install", "single-upgrade"}
+
+// v3.0.3 introduces certificate and complete-backup maintenance. Historical
+// lifecycle receipts cannot stand in for these new, exact-build acceptances.
+// Future stable versions retain this floor; prereleases cannot move latest.
+var maintenanceGates = []string{"pki-maintenance-native", "pki-maintenance-docker29", "ca-rollout-native", "ca-rollout-docker29", "full-backup-restore", "backup-boot-recovery"}
+
+func requiredFormalGates(version string) ([]string, error) {
+	parts := regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).FindStringSubmatch(version)
+	if len(parts) != 4 {
+		return nil, errPublicationGate
+	}
+	var numbers [3]uint64
+	for i := range numbers {
+		n, err := strconv.ParseUint(parts[i+1], 10, 64)
+		if err != nil {
+			return nil, errPublicationGate
+		}
+		numbers[i] = n
+	}
+	out := append([]string(nil), formalGates...)
+	if numbers[0] > 3 || numbers[0] == 3 && (numbers[1] > 0 || numbers[2] >= 3) {
+		out = append(out, maintenanceGates...)
+	}
+	return out, nil
+}
+
 var releaseArtifacts = []string{"webscan", "agent-native.tar.gz", "install.sh", "build-info.json"}
 var errPublicationGate = errors.New("正式发布门禁未通过：需要已推送且干净的真实源码提交、匹配的构建产物、签名清单及全部隔离验收记录；未更新 latest")
 
@@ -86,7 +114,11 @@ func checkVerification(path string, b buildRecord) error {
 	if readReleaseJSON(path, &r) != nil || r.Release != b.Release || r.Commit != b.Commit || r.Source != b.Source {
 		return errPublicationGate
 	}
-	for _, name := range formalGates {
+	required, err := requiredFormalGates(b.Release)
+	if err != nil {
+		return err
+	}
+	for _, name := range required {
 		g, ok := r.Gates[name]
 		if !ok || !g.Passed || g.Evidence == "" || len(g.SHA256) != 64 {
 			return errPublicationGate

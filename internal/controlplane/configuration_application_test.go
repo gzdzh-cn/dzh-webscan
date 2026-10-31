@@ -428,7 +428,7 @@ func TestConfigurationApplicationDisasterRestoreRequiresExplicitRecovery(t *test
 func TestConfigurationApplicationSchema21UpgradeRequiresBackup(t *testing.T) {
 	s := testStore(t)
 	dropBootstrapRuntimeForTest(t, s)
-	mustHistoryExec(t, s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE v3_configuration_application_settings; DROP TABLE v3_configuration_application_logs; DROP TABLE v3_configuration_applications; DELETE FROM v3_schema WHERE version>=22`)
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE v3_configuration_application_settings; DROP TABLE v3_configuration_application_logs; DROP TABLE v3_configuration_applications; DELETE FROM v3_schema WHERE version>=22`)
 	if e := s.Migrate(context.Background()); e == nil {
 		t.Fatal("schema 21 migrated without backup")
 	}

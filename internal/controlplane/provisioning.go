@@ -125,34 +125,20 @@ func provisioningCertificate(raw []byte) (*x509.Certificate, error) {
 // a self-consistent but unrelated CA in an uploaded node identity. No network
 // connection, CA private key or remote side effect is needed to prepare a job.
 func validateProvisioningTrust(c Config, m nodeconfig.Material, now time.Time) error {
-	ca, err := readTrustData(c.Collector.CAFile, false, 64<<10)
-	if err != nil {
-		return errProvisioning
-	}
-	crl, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
-	if err != nil {
-		return errProvisioning
-	}
-	root, err := provisioningCertificate(ca)
-	if err != nil {
-		return errProvisioning
-	}
-	other, err := provisioningCertificate(m.CA)
-	if err != nil || !bytes.Equal(root.Raw, other.Raw) {
-		return errProvisioning
-	}
-	trust, err := nodepki.NewTrust(ca, crl, now)
+	crl, roots, err := provisioningConfigurationTrust(c, m.CA, m.Format == 3, now)
 	if err != nil {
 		return errProvisioning
 	}
 	var verifier interface {
 		Verify(*x509.Certificate, string, string, time.Time) error
-	} = trust
+	}
 	if c.Collector.RevocationStateDirectory != "" {
 		verifier, err = nodepki.NewPersistentFileTrust(c.Collector.CAFile, c.Collector.RevocationFile, c.Collector.RevocationStateDirectory, now)
-		if err != nil {
-			return errProvisioning
-		}
+	} else {
+		verifier, err = nodepki.NewTrust(m.CA, crl, now)
+	}
+	if err != nil || roots != nil && m.Format != 3 {
+		return errProvisioning
 	}
 	// Require exactly the current CRL at preparation and submission. An older,
 	// still unexpired snapshot must not install a revoked collector identity.
@@ -161,7 +147,8 @@ func validateProvisioningTrust(c Config, m nodeconfig.Material, now time.Time) e
 	}
 	if m.Format != 3 {
 		cert, err := provisioningCertificate(m.Certificate)
-		if err != nil || verifier.Verify(cert, nodepki.Node, m.Node, now) != nil || cert.VerifyHostname(m.ServerName) != nil {
+		issuerTrust, issuerErr := nodepki.NewTrust(m.CA, crl, now)
+		if err != nil || issuerErr != nil || issuerTrust.Verify(cert, nodepki.Node, m.Node, now) != nil || verifier.Verify(cert, nodepki.Node, m.Node, now) != nil || cert.VerifyHostname(m.ServerName) != nil {
 			return errProvisioning
 		}
 	}
@@ -254,11 +241,15 @@ func (s *Store) prepareLocalDeployment(ctx context.Context, c Config, t *deploym
 		}
 	}
 	defer clear(identity.Key)
-	crl, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	crl, roots, err := provisioningConfigurationTrust(c, identity.CA, managed, time.Now())
 	if err != nil {
 		return fail()
 	}
-	if err = checkIssuerFloor(ctx, s.DB, nodeconfig.Material{CA: identity.CA, CRL: crl}); err != nil {
+	format := 2
+	if managed {
+		format = 3
+	}
+	if err = checkConfigurationIssuerFloor(ctx, s.DB, c, nodeconfig.Material{Format: format, CA: identity.CA, CRL: crl}); err != nil {
 		return DeploymentRequest{}, err
 	}
 	rules, err := readTrustData(in.RulesFile, false, 1<<20)
@@ -275,7 +266,7 @@ func (s *Store) prepareLocalDeployment(ctx context.Context, c Config, t *deploym
 	if validateProvisioningTrust(c, check, time.Now()) != nil {
 		return fail()
 	}
-	prepared, err := s.PrepareNodeConfiguration(ctx, t.release, NodeConfigurationInput{Node: in.Node, Expected: in.Expected, Identity: identity, CRL: crl, Collectors: in.Collectors, Rules: rules, Directory: c.Executor.ConfigurationDirectory, ManagedIdentity: managed})
+	prepared, err := s.PrepareNodeConfiguration(ctx, t.release, NodeConfigurationInput{Node: in.Node, Expected: in.Expected, Identity: identity, CRL: crl, Collectors: in.Collectors, Rules: rules, Directory: c.Executor.ConfigurationDirectory, ManagedIdentity: managed, Roots: roots})
 	if err != nil {
 		return DeploymentRequest{}, err
 	}
@@ -337,7 +328,7 @@ func (s *Store) localDeploymentMaterial(ctx context.Context, c Config, t *deploy
 	if digest(raw) != in.RuntimeArtifact.SHA256 || uint64(len(raw)) != in.RuntimeArtifact.Bytes {
 		return nodeconfig.Material{}, errProvisioning
 	}
-	m, err := nodeconfig.Decode(raw, time.Now())
+	m, err := decodeProvisioningMaterial(c, raw, time.Now())
 	if err != nil || validateProvisioningTrust(c, m, time.Now()) != nil {
 		clear(m.Key)
 		return nodeconfig.Material{}, errProvisioning
@@ -352,7 +343,7 @@ func validateLocalDeploymentTx(ctx context.Context, tx *sql.Tx, c Config, t *dep
 	if !t.release.matches(DeploymentJob{Plan: DeploymentPlan{Request: in, Node: n}}) {
 		return errProvisioning
 	}
-	if err := checkIssuerFloor(ctx, tx, m); err != nil {
+	if err := checkConfigurationIssuerFloor(ctx, tx, c, m); err != nil {
 		return err
 	}
 	if _, err := previewCredential(ctx, tx, t, in); err != nil {

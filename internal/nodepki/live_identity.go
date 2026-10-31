@@ -125,9 +125,15 @@ type LiveIdentity struct {
 	record         IdentityRecord
 	last           time.Time
 	lastError      error
+	rootState      string
+	rootSet        *RootSet
 }
 
 func NewLiveIdentity(caFile, file, role, id string, now time.Time) (*LiveIdentity, error) {
+	return NewLiveIdentityWithRootState(caFile, file, "", role, id, now)
+}
+
+func NewLiveIdentityWithRootState(caFile, file, directory, role, id string, now time.Time) (*LiveIdentity, error) {
 	if !filepath.IsAbs(file) || filepath.Clean(file) != file || secureDirectory(filepath.Dir(file)) != nil {
 		return nil, ErrIdentity
 	}
@@ -135,7 +141,7 @@ func NewLiveIdentity(caFile, file, role, id string, now time.Time) (*LiveIdentit
 	if err != nil {
 		return nil, ErrIdentity
 	}
-	l := &LiveIdentity{ca: ca, file: file, role: role, id: id}
+	l := &LiveIdentity{ca: ca, file: file, role: role, id: id, rootState: directory}
 	if _, err := l.Certificate(now); err != nil {
 		return nil, err
 	}
@@ -158,7 +164,25 @@ func (l *LiveIdentity) certificateLocked(now time.Time) (*tls.Certificate, error
 		var record IdentityRecord
 		raw, err := readIdentityFile(l.file, MaxIdentityBytes, true)
 		if err == nil {
-			pair, record, err = identityPair(raw, l.ca, l.role, l.id, now, false)
+			var roots *RootSet
+			roots, err = identityRootSet(l.rootState, l.ca, now)
+			if err == nil && l.rootSet != nil {
+				if roots == nil {
+					err = ErrRootRotation
+				} else if !bytes.Equal(l.rootSet.raw, roots.raw) {
+					previous, e1 := ParseRootSetSnapshot(l.rootSet.raw)
+					next, e2 := ParseRootSetSnapshot(roots.raw)
+					if e1 != nil || e2 != nil || ValidateRootSetAdvance(l.ca, previous, next, now) != nil {
+						err = ErrRootRotation
+					}
+				}
+			}
+			if err == nil {
+				// Observe a valid trust advance even when the leaf is stale or
+				// damaged. A later disk rollback must not reauthorize that leaf.
+				l.rootSet = roots
+				pair, record, _, err = identityPairForRoots(raw, l.ca, roots, l.role, l.id, now, false)
+			}
 		}
 		clear(raw)
 		if err == nil && l.pair != nil && record.ExpiresAt.Before(l.record.ExpiresAt) {
@@ -202,6 +226,18 @@ func (l *LiveIdentity) GetClientCertificate(info *tls.CertificateRequestInfo) (*
 // A prior private copy is durably preserved before replacement. No process or
 // service is restarted, and a failed validation leaves the active file intact.
 func PublishIdentity(ctx context.Context, caFile, file, role, id, expected string, b Bundle, now time.Time) (IdentityRecord, error) {
+	return publishIdentity(ctx, caFile, file, "", "", role, id, expected, b, now)
+}
+
+// PublishIdentityWithRootState renews a leaf under its currently active issuer.
+// It does not change issuers: crossing to the approved successor requires the
+// separate privileged rotation operation. Lock order matches backup: trust,
+// then identity. A concurrent finalization cannot race the activation.
+func PublishIdentityWithRootState(ctx context.Context, caFile, file, directory, role, id, expected string, b Bundle, now time.Time) (IdentityRecord, error) {
+	return publishIdentity(ctx, caFile, file, directory, "", role, id, expected, b, now)
+}
+
+func publishIdentity(ctx context.Context, caFile, file, directory, rotation, role, id, expected string, b Bundle, now time.Time) (IdentityRecord, error) {
 	var empty IdentityRecord
 	if _, err := Identity(role, id); err != nil || !filepath.IsAbs(file) || filepath.Clean(file) != file || file == caFile || secureDirectory(filepath.Dir(file)) != nil {
 		return empty, ErrIdentity
@@ -209,6 +245,56 @@ func PublishIdentity(ctx context.Context, caFile, file, role, id, expected strin
 	ca, err := readTrustFile(caFile, 64<<10)
 	if err != nil {
 		return empty, ErrIdentity
+	}
+	var roots *RootSet
+	if directory != "" {
+		if directory == filepath.Dir(file) || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || secureDirectory(directory) != nil {
+			return empty, ErrIdentity
+		}
+		lock, err := authorityLock(ctx, directory)
+		if err != nil {
+			return empty, err
+		}
+		defer lock.Close()
+		roots, err = identityRootSet(directory, ca, now)
+		if err != nil {
+			return empty, err
+		}
+	}
+	return publishIdentityMaterial(ctx, file, rotation, role, id, expected, ca, roots, b, now)
+}
+
+// Internal callers must already hold the authoritative trust lock and validate
+// the exact active issuer/CRL. Only identity publication takes place here.
+func publishIdentityMaterial(ctx context.Context, file, rotation, role, id, expected string, ca []byte, roots *RootSet, b Bundle, now time.Time) (IdentityRecord, error) {
+	var empty IdentityRecord
+	if _, err := Identity(role, id); err != nil || !filepath.IsAbs(file) || filepath.Clean(file) != file || secureDirectory(filepath.Dir(file)) != nil {
+		return empty, ErrIdentity
+	}
+	if roots != nil {
+		// Select only an already approved issuer; the old immutable anchor is
+		// retained for signature history and is never overwritten.
+		pinned, err := parseCertificate(b.CA)
+		if err != nil {
+			return empty, ErrIdentity
+		}
+		accepted := false
+		for _, root := range roots.roots {
+			accepted = accepted || bytes.Equal(root.Raw, pinned.Raw)
+		}
+		if !accepted {
+			return empty, ErrIdentity
+		}
+		ca = b.CA
+	}
+	if rotation != "" {
+		if roots == nil {
+			return empty, ErrRootRotation
+		}
+		snapshot, err := ParseRootSetSnapshot(roots.raw)
+		if err != nil || RootAuthorizationSHA256(snapshot.Dual) != rotation || !bytes.Equal(b.CA, snapshot.Dual.NewCA) {
+			return empty, ErrRootRotation
+		}
 	}
 	pinned, err := parseCertificate(ca)
 	other, e2 := parseCertificate(b.CA)
@@ -220,9 +306,12 @@ func PublishIdentity(ctx context.Context, caFile, file, role, id, expected strin
 	if len(raw) > MaxIdentityBytes {
 		return empty, ErrIdentity
 	}
-	_, record, err := identityPair(raw, ca, role, id, now, false)
+	pair, record, err := identityPair(raw, ca, role, id, now, false)
 	if err != nil {
 		return empty, ErrIdentity
+	}
+	if roots != nil && roots.Verify(pair.Leaf, role, id, now) != nil {
+		return empty, ErrRevocation
 	}
 	lock, err := authorityLock(ctx, filepath.Dir(file))
 	if err != nil {
@@ -232,12 +321,35 @@ func PublishIdentity(ctx context.Context, caFile, file, role, id, expected strin
 	old, err := readIdentityFile(file, MaxIdentityBytes, true)
 	if err == nil {
 		defer clear(old)
-		_, prior, e := identityPair(old, ca, role, id, now, true)
+		var prior IdentityRecord
+		var priorPair *tls.Certificate
+		var e error
+		if rotation == "" {
+			_, prior, e = identityPair(old, ca, role, id, now, true)
+		} else {
+			priorPair, prior, _, e = identityPairForRoots(old, nil, roots, role, id, now, true)
+		}
 		if e != nil {
 			return empty, ErrIdentity
 		}
 		if record.CertificateSHA256 == prior.CertificateSHA256 {
 			return record, nil
+		}
+		if rotation != "" {
+			at := pair.Leaf.NotBefore.Add(5 * time.Minute)
+			if at.After(now) {
+				return empty, ErrIdentity
+			}
+			valid := false
+			for i, root := range roots.roots {
+				if priorPair.Leaf.CheckSignatureFrom(root) == nil && roots.trust[i].validAt(now) && verifyRootParentAt(roots.trust[i], priorPair.Leaf, role, id, at) == nil {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return empty, ErrRevocation
+			}
 		}
 		if expected != prior.CertificateSHA256 || !record.ExpiresAt.After(prior.ExpiresAt) {
 			return empty, ErrIdentity
@@ -246,7 +358,7 @@ func PublishIdentity(ctx context.Context, caFile, file, role, id, expected strin
 			return empty, err
 		}
 	} else {
-		if _, e := os.Lstat(file); !os.IsNotExist(e) || expected != "" {
+		if _, e := os.Lstat(file); !os.IsNotExist(e) || expected != "" || rotation != "" {
 			return empty, ErrIdentity
 		}
 	}

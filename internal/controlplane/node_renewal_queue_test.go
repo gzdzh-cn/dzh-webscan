@@ -283,7 +283,7 @@ func TestNodeRenewalQueueDeliveryRechecksTrustAndExactReceipt(t *testing.T) {
 func TestNodeRenewalQueueMigrationBackupAndRestore(t *testing.T) {
 	f, n, l, raw := renewalRelayFixture(t)
 	ctx := context.Background()
-	mustHistoryExec(t, f.s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE v3_node_renewal_jobs;DELETE FROM v3_schema WHERE version>=31`)
+	mustHistoryExec(t, f.s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE v3_node_renewal_jobs;DELETE FROM v3_schema WHERE version>=31`)
 	if err := f.s.Migrate(ctx); err == nil {
 		t.Fatal("schema 30 upgraded without backup")
 	}

@@ -194,7 +194,7 @@ func TestNodeRenewalSingleHostMaintenanceDatabaseBoundary(t *testing.T) {
 	if c.NodePKI.Enabled || c.NodePKI.AuthorityDirectory != "" {
 		t.Fatal("collector configuration gained private signing authority")
 	}
-	mustHistoryExec(t, store.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE v3_node_renewal_jobs;DELETE FROM v3_schema WHERE version>=31`)
+	mustHistoryExec(t, store.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE v3_node_renewal_jobs;DELETE FROM v3_schema WHERE version>=31`)
 	if _, err := maintainSingleNodeRenewals(context.Background(), spec); err == nil {
 		t.Fatal("maintenance silently adopted/migrated an old database")
 	}

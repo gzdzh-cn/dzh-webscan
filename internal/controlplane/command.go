@@ -20,12 +20,28 @@ type Options struct {
 }
 
 func Command(ctx context.Context, o Options, in io.Reader, out io.Writer) error {
+	if o.Action == "prepare-single-backup-schedule" || o.Action == "configure-single-backup-schedule" || o.Action == "enable-single-backup-schedule" || o.Action == "run-single-backup" {
+		return singleBackupScheduleCommand(ctx, o, out)
+	}
+	if o.Action == "backup-single" || o.Action == "verify-single-backup" || o.Action == "restore-single-offline" {
+		return singleBackupCommand(ctx, o, out)
+	}
+	if o.Action == "backup-metrics" || o.Action == "verify-metrics-backup" || o.Action == "restore-metrics-offline" {
+		return metricsSnapshotCommand(ctx, o, out)
+	}
+	if o.Action == "preview-single-pki-upgrade" || o.Action == "prepare-single-pki-upgrade" || o.Action == "check-single-pki-upgrade" || o.Action == "maintain-single-pki-upgrade" {
+		return singlePKIUpgradeCommand(ctx, o, out)
+	}
 	if o.Action == "preview-single-web-upgrade" || o.Action == "prepare-single-web-upgrade" {
 		return singleWebUpgradeCommand(ctx, o, out)
 	}
 	identityRecoveryAction := o.Action == "prepare-node-identity-recovery" || o.Action == "run-node-identity-recovery" || o.Action == "cancel-node-identity-recovery" || o.Action == "node-identity-recovery-status"
 	nameChangeAction := o.Action == "prepare-node-name-change" || o.Action == "run-node-name-change" || o.Action == "cancel-node-name-change" || o.Action == "node-name-change-status"
-	if (identityRecoveryAction || nameChangeAction) && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Geteuid() != 0) {
+	namePruningAction := o.Action == "prepare-node-name-pruning" || o.Action == "run-node-name-pruning" || o.Action == "cancel-node-name-pruning" || o.Action == "node-name-pruning-status"
+	historyRetirementAction := o.Action == "preview-node-history-retirement" || o.Action == "retire-node-history"
+	retirementCheckpointAction := o.Action == "export-node-retirements" || o.Action == "reconcile-node-retirements"
+	rootRotationAction := o.Action == "prepare-root-rotation" || o.Action == "run-root-rotation" || o.Action == "finalize-root-rotation" || o.Action == "root-rotation-status" || o.Action == "reauthorize-root-rotation" || o.Action == "cancel-root-rotation"
+	if (identityRecoveryAction || nameChangeAction || namePruningAction || historyRetirementAction || retirementCheckpointAction || rootRotationAction) && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Geteuid() != 0) {
 		return errors.New("身份维护命令仅允许在 Linux amd64 主控宿主机以 root 执行")
 	}
 	if o.Action == "maintain-single-pki" {
@@ -76,6 +92,18 @@ func Command(ctx context.Context, o Options, in io.Reader, out io.Writer) error 
 		return e
 	}
 	defer s.DB.Close()
+	if rootRotationAction {
+		return s.localRootRotationCommand(ctx, c, o, out)
+	}
+	if retirementCheckpointAction {
+		return s.localRetirementCheckpointCommand(ctx, c, o, out)
+	}
+	if historyRetirementAction {
+		return s.localNodeHistoryRetirementCommand(ctx, o, out)
+	}
+	if namePruningAction {
+		return s.localNodeNamePruningCommand(ctx, c, o, out)
+	}
 	if nameChangeAction {
 		return s.localNodeNameChangeCommand(ctx, c, o, out)
 	}
@@ -162,7 +190,7 @@ func Command(ctx context.Context, o Options, in io.Reader, out io.Writer) error 
 		}
 		return e
 	default:
-		return errors.New("操作须为 configure、check、layout、check-deployment-trust、check-configuration-apply、queue-configuration-application、control-configuration-application、store-ssh-credential、issue-node-certificate、bind-node-provisioning、prepare-deployment、queue-deployment、queue-deployment-recovery、preview-deployment、confirm-deployment、prepare-node-name-change、run-node-name-change、cancel-node-name-change、node-name-change-status、prepare-node-identity-recovery、run-node-identity-recovery、cancel-node-identity-recovery、node-identity-recovery-status、init-db、migrate-db、backup-db、restore-db、provision-admin、reset-password、preview-v2、archive-v2、preview-settings-v2、map-settings-v2、map-websites-v2、map-website-backups-v2、map-notifications-v2、map-health-v2、map-events-v2、map-operation-audit-v2 或 run")
+		return errors.New("操作须为 configure、check、layout、check-deployment-trust、check-configuration-apply、queue-configuration-application、control-configuration-application、store-ssh-credential、issue-node-certificate、bind-node-provisioning、prepare-deployment、queue-deployment、queue-deployment-recovery、preview-deployment、confirm-deployment、prepare-node-name-change、run-node-name-change、cancel-node-name-change、node-name-change-status、prepare-node-name-pruning、run-node-name-pruning、cancel-node-name-pruning、node-name-pruning-status、prepare-node-identity-recovery、run-node-identity-recovery、cancel-node-identity-recovery、node-identity-recovery-status、init-db、migrate-db、backup-db、restore-db、provision-admin、reset-password、preview-v2、archive-v2、preview-settings-v2、map-settings-v2、map-websites-v2、map-website-backups-v2、map-notifications-v2、map-health-v2、map-events-v2、map-operation-audit-v2 或 run")
 	}
 }
 

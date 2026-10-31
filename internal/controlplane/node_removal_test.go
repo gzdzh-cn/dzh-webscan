@@ -216,7 +216,7 @@ func TestNodeRemovalWaitsForWebsiteAssociation(t *testing.T) {
 
 func TestNodeRemovalMigrationRequiresBackupAndKeepsExistingNodes(t *testing.T) {
 	s, _, _ := configurationBackupStoreFixture(t)
-	mustHistoryExec(t, s.DB, `CREATE OR REPLACE VIEW v3_active_nodes AS
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`CREATE OR REPLACE VIEW v3_active_nodes AS
  SELECT c.node AS id,c.name,c.endpoint,c.server_name,c.enabled,c.mode,c.version,n.applied_version,c.shard,c.config,r.epoch AS runtime_epoch
  FROM v3_node_runtime r JOIN v3_node_configurations c ON c.node=r.node AND c.id=r.snapshot JOIN v3_nodes n ON n.id=c.node;
  ALTER TABLE v3_nodes DROP COLUMN removed_at; DELETE FROM v3_schema WHERE version=36`)

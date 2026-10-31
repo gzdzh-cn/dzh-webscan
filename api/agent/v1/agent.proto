@@ -11,6 +11,9 @@ service AgentService {
   // Additive, optional capability. Only a full snapshot signed by the pinned
   // CA can advance trust; it cannot change identities or configuration.
   rpc UpdateTrust(UpdateTrustRequest) returns (UpdateTrustResponse);
+  // Refreshes CRLs only within an administrator-installed root rotation.
+  // Cannot install a new CA or remove an existing CA.
+  rpc RefreshRootTrust(RefreshRootTrustRequest) returns (RefreshRootTrustResponse);
   // Optional managed identity lifecycle. The node generates and retains its
   // replacement private key; only public CSR/certificate bytes cross the wire.
   rpc PrepareIdentityRenewal(PrepareIdentityRenewalRequest) returns (PreparedIdentityRenewal);
@@ -29,6 +32,7 @@ message CapabilitiesResponse {
   bool identity_renewal = 8;
   string certificate_sha256 = 9;
   int64 certificate_not_after_unix = 10;
+  bool root_trust_refresh = 11;
 }
 message FetchEventsRequest {
   uint64 epoch = 1;
@@ -95,4 +99,15 @@ message ActivatedIdentityRenewal {
   string request_sha256 = 2;
   string certificate_sha256 = 3;
   int64 certificate_not_after_unix = 4;
+}
+
+message RefreshRootTrustRequest {
+  string node_id = 1;
+  bytes snapshot_json = 2;
+}
+message RefreshRootTrustResponse {
+  string node_id = 1;
+  string snapshot_sha256 = 2;
+  string rotation = 3;
+  string phase = 4;
 }

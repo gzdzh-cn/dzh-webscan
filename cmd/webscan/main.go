@@ -56,7 +56,19 @@ func main() {
 	v3 := &gcmd.Command{Name: "control-v3", Brief: "v3 独立重构验证入口；不替换现有主控", Strict: true, Arguments: v3Args, Func: func(ctx context.Context, p *gcmd.Parser) error {
 		return controlplane.Command(ctx, controlplane.Options{Config: p.GetOpt("config").String(), Action: p.GetOpt("action").String(), Role: p.GetOpt("role").String(), Topology: p.GetOpt("topology").String(), Username: p.GetOpt("username").String(), PasswordFile: p.GetOpt("password-file").String(), Source: p.GetOpt("source").String(), NotificationsSource: p.GetOpt("notifications-source").String(), BackupDirectory: p.GetOpt("backup-directory").String(), RequestKey: p.GetOpt("request-key").String(), Snapshot: p.GetOpt("snapshot").String(), Output: p.GetOpt("output").String(), PublicURL: p.GetOpt("public-url").String(), NonInteractive: present(p, "non-interactive")}, os.Stdin, os.Stdout)
 	}}
-	nodeV3 := &gcmd.Command{Name: "node-v3", Brief: "v3 节点阶段工具（默认仅检查与准备）", Strict: true, Arguments: []gcmd.Argument{{Name: "lifecycle", Orphan: true}, {Name: "identity-recovery", Orphan: true}, {Name: "identity-name-change", Orphan: true}}, Func: func(ctx context.Context, p *gcmd.Parser) error {
+	nodeV3 := &gcmd.Command{Name: "node-v3", Brief: "v3 节点阶段工具（默认仅检查与准备）", Strict: true, Arguments: []gcmd.Argument{{Name: "lifecycle", Orphan: true}, {Name: "identity-recovery", Orphan: true}, {Name: "identity-name-change", Orphan: true}, {Name: "identity-name-pruning", Orphan: true}, {Name: "identity-root-rotation", Orphan: true}}, Func: func(ctx context.Context, p *gcmd.Parser) error {
+		if present(p, "identity-root-rotation") {
+			if present(p, "lifecycle") || present(p, "identity-recovery") || present(p, "identity-name-change") || present(p, "identity-name-pruning") {
+				return &progress.Failure{Code: "node_v3_conflicting_modes", Message: "证书换根不能与其他身份操作或部署阶段同时执行"}
+			}
+			return nodeops.CommandRootRotation(ctx, os.Stdin, os.Stdout)
+		}
+		if present(p, "identity-name-pruning") {
+			if present(p, "lifecycle") || present(p, "identity-recovery") || present(p, "identity-name-change") {
+				return &progress.Failure{Code: "node_v3_conflicting_modes", Message: "身份名称裁剪不能与其他身份操作或部署阶段同时执行"}
+			}
+			return nodeops.CommandNamePruning(ctx, os.Stdin, os.Stdout)
+		}
 		if present(p, "identity-name-change") {
 			if present(p, "lifecycle") || present(p, "identity-recovery") {
 				return &progress.Failure{Code: "node_v3_conflicting_modes", Message: "身份名称变更不能与部署阶段或身份恢复同时执行"}

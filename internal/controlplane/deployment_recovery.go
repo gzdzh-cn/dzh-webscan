@@ -117,6 +117,9 @@ func checkRecoveryRuntimeTx(ctx context.Context, tx *sql.Tx, j DeploymentJob) er
 		return errDeploymentRecovery
 	}
 	for _, b := range []deploymentRuntimeBaseline{r.From, r.Restore} {
+		if err := requireNodeSnapshotAvailableTx(ctx, tx, j.Node, b.Snapshot); err != nil {
+			return err
+		}
 		if b.Snapshot == "" {
 			if b.Version != 0 || b.Delivered != 0 || b.Digest != "" {
 				return errDeploymentRecovery

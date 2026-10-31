@@ -395,6 +395,12 @@ func TestSingleInstallHealthRejectsRedirectAndWaitCancels(t *testing.T) {
 	if singleWait(ctx, func(context.Context) error { return errors.New("unavailable") }) == nil || time.Since(started) > time.Second {
 		t.Fatal("cancelled wait hung")
 	}
+	problem := singleInstallProblem{"database-readiness", "database unavailable"}
+	err := singleWait(ctx, func(context.Context) error { return problem })
+	var reason singleInstallProblem
+	if !errors.Is(err, context.Canceled) || !errors.As(err, &reason) || reason.Code != problem.Code {
+		t.Fatal("readiness wait lost cancellation or safe failure reason", err)
+	}
 }
 
 func TestSingleInstallDatabaseAccountResumeProtectsExistingPassword(t *testing.T) {

@@ -54,6 +54,8 @@ export interface V3Dashboard {
     resources?: V3DashboardSection<{ items: V3DashboardResource[]; rankings: Record<'cpu_percent' | 'memory_percent' | 'disk_percent', { id: string; name: string; value: number }[]> }>
     monitoring?: V3DashboardSection<{ states: Partial<Record<'files' | 'scans' | 'delivery', V3DashboardCounts>> | null; pending_events: number | null; oldest_wait_seconds: number | null; pending_scans: number | null; yara_nodes: number; clamav_nodes: number }>
     services?: V3DashboardSection<{ database_bytes: number; roles: Record<string, { heartbeat: string; healthy: boolean; has_error: boolean }>; last_cleanup: null | { status: string; deleted: number; updated_at: string } }>
+    certificates?: V3DashboardSection<{ maintenance: null | { heartbeat: string; fresh: boolean; has_error: boolean; reason: string; collector_expires_at: string | null; ca_expires_at: string | null } }>
+    full_backups?: V3DashboardSection<{ policy: null | { enabled: boolean; keep: number }; latest: null | { status: string; created_at: string; updated_at: string; files: number; bytes: number; restore_validated: boolean; has_error: boolean } }>
   } }
 }
 export interface V3Site extends Site { version: number; migration_pending?: boolean }

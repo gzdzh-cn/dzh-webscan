@@ -76,7 +76,7 @@ func (s *Store) localNodeIdentityRecoveryCommand(ctx context.Context, c Config, 
 		if err != nil {
 			return errNodeIdentityRecovery
 		}
-		ca, err := readTrustData(c.Collector.CAFile, false, 64<<10)
+		ca, _, err := provisioningCertificateIssuer(c, parent, time.Now())
 		if err != nil {
 			return errNodeIdentityRecovery
 		}

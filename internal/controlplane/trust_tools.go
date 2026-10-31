@@ -161,6 +161,18 @@ func LoadTrustedRelease(manifest, signature, publicKeyFile string) (*TrustedRele
 	if err != nil {
 		return nil, nil, errSigningKey
 	}
+	raw, err := readTrustData(manifest, false, 64<<10)
+	if err != nil {
+		return nil, nil, err
+	}
+	sig, err := readTrustData(signature, false, ed25519.SignatureSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	return verifyTrustedReleaseData(raw, sig, public)
+}
+
+func verifyTrustedReleaseData(raw, signature, public []byte) (*TrustedRelease, ed25519.PublicKey, error) {
 	block, rest := pem.Decode(public)
 	if block == nil || block.Type != "PUBLIC KEY" || len(block.Headers) != 0 || len(strings.TrimSpace(string(rest))) != 0 {
 		return nil, nil, errSigningKey
@@ -170,15 +182,7 @@ func LoadTrustedRelease(manifest, signature, publicKeyFile string) (*TrustedRele
 	if err != nil || !ok || len(pub) != ed25519.PublicKeySize {
 		return nil, nil, errSigningKey
 	}
-	raw, err := readTrustData(manifest, false, 64<<10)
-	if err != nil {
-		return nil, nil, err
-	}
-	sig, err := readTrustData(signature, false, ed25519.SignatureSize)
-	if err != nil {
-		return nil, nil, err
-	}
-	r, err := VerifyReleaseManifest(raw, sig, pub)
+	r, err := VerifyReleaseManifest(raw, signature, pub)
 	return r, pub, err
 }
 

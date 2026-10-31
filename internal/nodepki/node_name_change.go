@@ -233,7 +233,7 @@ func readNameChangePendingAt(dir string, ca, crl []byte, i NodeNameChangeIntent,
 	return r, rawKey, nil
 }
 
-func nameChangeTrust(ctx context.Context, caFile, directory string, now time.Time, use func([]byte, []byte) error) error {
+func nameChangeTrust(ctx context.Context, caFile, directory, issuer string, now time.Time, use func([]byte, []byte) error) error {
 	if use == nil || !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || secureDirectory(directory) != nil {
 		return ErrRevocation
 	}
@@ -242,22 +242,9 @@ func nameChangeTrust(ctx context.Context, caFile, directory string, now time.Tim
 		return err
 	}
 	defer lock.Close()
-	ca, err := readTrustFile(caFile, 64<<10)
+	ca, crl, err := maintenanceIssuerMaterial(caFile, directory, issuer, now)
 	if err != nil {
-		return ErrIdentity
-	}
-	pinned, err := readIdentityFile(filepath.Join(directory, "ca.crt"), 64<<10, true)
-	if err != nil {
-		return ErrIdentity
-	}
-	root, e1 := parseCertificate(ca)
-	prior, e2 := parseCertificate(pinned)
-	if e1 != nil || e2 != nil || !bytes.Equal(root.Raw, prior.Raw) {
-		return ErrIdentity
-	}
-	crl, err := readIdentityFile(filepath.Join(directory, "ca.crl"), MaxCRLBytes, true)
-	if err != nil {
-		return ErrRevocation
+		return err
 	}
 	if _, err := NewTrust(ca, crl, now); err != nil {
 		return err
@@ -280,13 +267,13 @@ func PrepareNodeNameChange(ctx context.Context, caFile, identityFile, trustDirec
 	defer cancel()
 	ctx, finish := context.WithTimeout(ctx, 5*time.Second)
 	defer finish()
-	err := nameChangeTrust(ctx, caFile, trustDirectory, now, func(ca, crl []byte) error {
+	err := nameChangeTrust(ctx, caFile, trustDirectory, i.AuthoritySHA256, now, func(ca, crl []byte) error {
 		lock, err := authorityLock(ctx, filepath.Dir(identityFile))
 		if err != nil {
 			return err
 		}
 		defer lock.Close()
-		active, record, err := ReadIdentity(caFile, identityFile, Node, i.Node, now)
+		active, record, err := ReadIdentityWithRootState(caFile, identityFile, trustDirectory, Node, i.Node, now)
 		defer clear(active.Key)
 		if err != nil || record.CertificateSHA256 != i.CertificateSHA256 {
 			return ErrIdentity
@@ -486,7 +473,7 @@ func ActivateNodeNameChange(ctx context.Context, caFile, identityFile, trustDire
 	defer cancel()
 	ctx, finish := context.WithTimeout(ctx, 5*time.Second)
 	defer finish()
-	err := nameChangeTrust(ctx, caFile, trustDirectory, now, func(ca, crl []byte) error {
+	err := nameChangeTrust(ctx, caFile, trustDirectory, expected.AuthoritySHA256, now, func(ca, crl []byte) error {
 		if err := ValidateNodeNameChangeRequest(ca, crl, r, expected, now); err != nil {
 			return err
 		}
@@ -503,7 +490,7 @@ func ActivateNodeNameChange(ctx context.Context, caFile, identityFile, trustDire
 			return err
 		}
 
-		out, err = PublishIdentity(ctx, caFile, identityFile, Node, expected.Node, expected.CertificateSHA256, Bundle{CA: ca, Certificate: certificate, Key: key}, now)
+		out, err = publishIdentityMaterial(ctx, identityFile, "", Node, expected.Node, expected.CertificateSHA256, ca, nil, Bundle{CA: ca, Certificate: certificate, Key: key}, now)
 		return err
 	})
 	if err != nil {

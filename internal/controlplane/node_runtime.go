@@ -42,7 +42,7 @@ func scanActiveNode(row interface{ Scan(...any) error }) (n Node, err error) {
 func captureSavedNodeTx(ctx context.Context, tx *sql.Tx, id string) (string, error) {
 	var snapshot string
 	err := tx.QueryRowContext(ctx, `SELECT c.id FROM v3_node_configurations c JOIN v3_nodes n ON n.id=c.node
- WHERE n.id=$1 AND ROW(n.version,n.name,n.endpoint,n.server_name,n.enabled,n.mode,n.shard,n.config)=ROW(c.version,c.name,c.endpoint,c.server_name,c.enabled,c.mode,c.shard,c.config) ORDER BY c.id LIMIT 1`, id).Scan(&snapshot)
+ WHERE n.id=$1 AND NOT EXISTS(SELECT 1 FROM v3_node_history_retirements h WHERE h.node=c.node AND h.snapshot=c.id) AND ROW(n.version,n.name,n.endpoint,n.server_name,n.enabled,n.mode,n.shard,n.config)=ROW(c.version,c.name,c.endpoint,c.server_name,c.enabled,c.mode,c.shard,c.config) ORDER BY c.id LIMIT 1`, id).Scan(&snapshot)
 	if err == nil {
 		return snapshot, nil
 	}
@@ -58,6 +58,9 @@ func captureSavedNodeTx(ctx context.Context, tx *sql.Tx, id string) (string, err
 // Publishing is internal and transactional with an explicit registration or a
 // verified deployment checkpoint. Saving public form input never calls it.
 func publishNodeRuntimeTx(ctx context.Context, tx *sql.Tx, id, snapshot string, delivered int64) error {
+	if err := requireNodeSnapshotAvailableTx(ctx, tx, id, snapshot); err != nil {
+		return err
+	}
 	var epoch int64
 	if err := tx.QueryRowContext(ctx, `UPDATE v3_nodes SET runtime_generation=runtime_generation+1 WHERE id=$1 AND removed_at IS NULL RETURNING runtime_generation`, id).Scan(&epoch); err != nil {
 		return err
@@ -221,6 +224,14 @@ func (s *Store) deploymentRuntimePhaseTx(ctx context.Context, tx *sql.Tx, j Depl
 // Reconcile registration before remote work as well as in the checkpoint
 // transaction. Response loss may leave the remote ahead, never the PG pointer.
 func checkDeploymentRuntimeTx(ctx context.Context, tx *sql.Tx, j DeploymentJob) error {
+	if err := requireNodeSnapshotAvailableTx(ctx, tx, j.Node, j.Plan.TargetRuntime); err != nil {
+		return err
+	}
+	if j.Plan.PreviousRuntime != nil {
+		if err := requireNodeSnapshotAvailableTx(ctx, tx, j.Node, j.Plan.PreviousRuntime.Snapshot); err != nil {
+			return err
+		}
+	}
 	if j.Kind == "recover" || j.Plan.Recovery != nil {
 		return checkRecoveryRuntimeTx(ctx, tx, j)
 	}

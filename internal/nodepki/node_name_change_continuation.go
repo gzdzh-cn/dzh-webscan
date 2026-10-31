@@ -126,15 +126,7 @@ func PrepareNodeNameChangeContinuation(ctx context.Context, caFile, identityFile
 		return empty, err
 	}
 	defer lock.Close()
-	ca, err := readTrustFile(caFile, 64<<10)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	pinned, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crt"), 64<<10, true)
-	if err != nil || !bytes.Equal(bytes.TrimSpace(ca), bytes.TrimSpace(pinned)) {
-		return empty, ErrIdentity
-	}
-	floor, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crl"), MaxCRLBytes, true)
+	ca, floor, err := maintenanceIssuerMaterial(caFile, trustDirectory, expected.AuthoritySHA256, now)
 	if err != nil || ValidateCRLAdvance(ca, floor, crl, now) != nil || ValidateNodeNameChangeReceipt(ca, crl, original, certificate, now) != nil {
 		return empty, ErrRevocation
 	}
@@ -145,7 +137,7 @@ func PrepareNodeNameChangeContinuation(ctx context.Context, caFile, identityFile
 		if err != nil || saved.SHA256() != original.SHA256() {
 			return ErrIdentity
 		}
-		active, record, err := ReadIdentity(caFile, identityFile, Node, expected.Node, now)
+		active, record, err := ReadIdentityWithRootState(caFile, identityFile, trustDirectory, Node, expected.Node, now)
 		defer clear(active.Key)
 		leaf, parseErr := parseCertificate(certificate)
 		if err != nil || parseErr != nil || (record.CertificateSHA256 != publicSHA(leaf.Raw) && record.CertificateSHA256 != expected.CertificateSHA256) {

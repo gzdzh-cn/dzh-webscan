@@ -70,6 +70,7 @@ type CapabilitiesResponse struct {
 	IdentityRenewal         bool   `protobuf:"varint,8,opt,name=identity_renewal,json=identityRenewal,proto3" json:"identity_renewal,omitempty"`
 	CertificateSha256       string `protobuf:"bytes,9,opt,name=certificate_sha256,json=certificateSha256,proto3" json:"certificate_sha256,omitempty"`
 	CertificateNotAfterUnix int64  `protobuf:"varint,10,opt,name=certificate_not_after_unix,json=certificateNotAfterUnix,proto3" json:"certificate_not_after_unix,omitempty"`
+	RootTrustRefresh        bool   `protobuf:"varint,11,opt,name=root_trust_refresh,json=rootTrustRefresh,proto3" json:"root_trust_refresh,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -172,6 +173,13 @@ func (x *CapabilitiesResponse) GetCertificateNotAfterUnix() int64 {
 		return x.CertificateNotAfterUnix
 	}
 	return 0
+}
+
+func (x *CapabilitiesResponse) GetRootTrustRefresh() bool {
+	if x != nil {
+		return x.RootTrustRefresh
+	}
+	return false
 }
 
 type FetchEventsRequest struct {
@@ -1034,12 +1042,132 @@ func (x *ActivatedIdentityRenewal) GetCertificateNotAfterUnix() int64 {
 	return 0
 }
 
+type RefreshRootTrustRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	SnapshotJson  []byte                 `protobuf:"bytes,2,opt,name=snapshot_json,json=snapshotJson,proto3" json:"snapshot_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RefreshRootTrustRequest) Reset() {
+	*x = RefreshRootTrustRequest{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RefreshRootTrustRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RefreshRootTrustRequest) ProtoMessage() {}
+
+func (x *RefreshRootTrustRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RefreshRootTrustRequest.ProtoReflect.Descriptor instead.
+func (*RefreshRootTrustRequest) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RefreshRootTrustRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *RefreshRootTrustRequest) GetSnapshotJson() []byte {
+	if x != nil {
+		return x.SnapshotJson
+	}
+	return nil
+}
+
+type RefreshRootTrustResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	NodeId         string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	SnapshotSha256 string                 `protobuf:"bytes,2,opt,name=snapshot_sha256,json=snapshotSha256,proto3" json:"snapshot_sha256,omitempty"`
+	Rotation       string                 `protobuf:"bytes,3,opt,name=rotation,proto3" json:"rotation,omitempty"`
+	Phase          string                 `protobuf:"bytes,4,opt,name=phase,proto3" json:"phase,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RefreshRootTrustResponse) Reset() {
+	*x = RefreshRootTrustResponse{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RefreshRootTrustResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RefreshRootTrustResponse) ProtoMessage() {}
+
+func (x *RefreshRootTrustResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RefreshRootTrustResponse.ProtoReflect.Descriptor instead.
+func (*RefreshRootTrustResponse) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RefreshRootTrustResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *RefreshRootTrustResponse) GetSnapshotSha256() string {
+	if x != nil {
+		return x.SnapshotSha256
+	}
+	return ""
+}
+
+func (x *RefreshRootTrustResponse) GetRotation() string {
+	if x != nil {
+		return x.Rotation
+	}
+	return ""
+}
+
+func (x *RefreshRootTrustResponse) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
+}
+
 var File_api_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_api_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"\x18api/agent/v1/agent.proto\x12\x10webscan.agent.v1\"\x15\n" +
-	"\x13CapabilitiesRequest\"\xa0\x03\n" +
+	"\x13CapabilitiesRequest\"\xce\x03\n" +
 	"\x14CapabilitiesResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
@@ -1052,7 +1180,8 @@ const file_api_agent_v1_agent_proto_rawDesc = "" +
 	"\x10identity_renewal\x18\b \x01(\bR\x0fidentityRenewal\x12-\n" +
 	"\x12certificate_sha256\x18\t \x01(\tR\x11certificateSha256\x12;\n" +
 	"\x1acertificate_not_after_unix\x18\n" +
-	" \x01(\x03R\x17certificateNotAfterUnix\"c\n" +
+	" \x01(\x03R\x17certificateNotAfterUnix\x12,\n" +
+	"\x12root_trust_refresh\x18\v \x01(\bR\x10rootTrustRefresh\"c\n" +
 	"\x12FetchEventsRequest\x12\x14\n" +
 	"\x05epoch\x18\x01 \x01(\x04R\x05epoch\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\rR\x05limit\x12!\n" +
@@ -1111,13 +1240,22 @@ const file_api_agent_v1_agent_proto_rawDesc = "" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12%\n" +
 	"\x0erequest_sha256\x18\x02 \x01(\tR\rrequestSha256\x12-\n" +
 	"\x12certificate_sha256\x18\x03 \x01(\tR\x11certificateSha256\x12;\n" +
-	"\x1acertificate_not_after_unix\x18\x04 \x01(\x03R\x17certificateNotAfterUnix2\xb6\x05\n" +
+	"\x1acertificate_not_after_unix\x18\x04 \x01(\x03R\x17certificateNotAfterUnix\"W\n" +
+	"\x17RefreshRootTrustRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12#\n" +
+	"\rsnapshot_json\x18\x02 \x01(\fR\fsnapshotJson\"\x8e\x01\n" +
+	"\x18RefreshRootTrustResponse\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12'\n" +
+	"\x0fsnapshot_sha256\x18\x02 \x01(\tR\x0esnapshotSha256\x12\x1a\n" +
+	"\brotation\x18\x03 \x01(\tR\brotation\x12\x14\n" +
+	"\x05phase\x18\x04 \x01(\tR\x05phase2\xa1\x06\n" +
 	"\fAgentService\x12]\n" +
 	"\fCapabilities\x12%.webscan.agent.v1.CapabilitiesRequest\x1a&.webscan.agent.v1.CapabilitiesResponse\x12Q\n" +
 	"\vFetchEvents\x12$.webscan.agent.v1.FetchEventsRequest\x1a\x1c.webscan.agent.v1.EventBatch\x12T\n" +
 	"\tAckEvents\x12\".webscan.agent.v1.AckEventsRequest\x1a#.webscan.agent.v1.AckEventsResponse\x12S\n" +
 	"\vReadMetrics\x12$.webscan.agent.v1.ReadMetricsRequest\x1a\x1e.webscan.agent.v1.MetricsBatch\x12Z\n" +
-	"\vUpdateTrust\x12$.webscan.agent.v1.UpdateTrustRequest\x1a%.webscan.agent.v1.UpdateTrustResponse\x12t\n" +
+	"\vUpdateTrust\x12$.webscan.agent.v1.UpdateTrustRequest\x1a%.webscan.agent.v1.UpdateTrustResponse\x12i\n" +
+	"\x10RefreshRootTrust\x12).webscan.agent.v1.RefreshRootTrustRequest\x1a*.webscan.agent.v1.RefreshRootTrustResponse\x12t\n" +
 	"\x16PrepareIdentityRenewal\x12/.webscan.agent.v1.PrepareIdentityRenewalRequest\x1a).webscan.agent.v1.PreparedIdentityRenewal\x12w\n" +
 	"\x17ActivateIdentityRenewal\x120.webscan.agent.v1.ActivateIdentityRenewalRequest\x1a*.webscan.agent.v1.ActivatedIdentityRenewalB\x1eZ\x1cwebscan/sdk/agent/v1;agentv1b\x06proto3"
 
@@ -1133,7 +1271,7 @@ func file_api_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_api_agent_v1_agent_proto_rawDescData
 }
 
-var file_api_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_api_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_api_agent_v1_agent_proto_goTypes = []any{
 	(*CapabilitiesRequest)(nil),            // 0: webscan.agent.v1.CapabilitiesRequest
 	(*CapabilitiesResponse)(nil),           // 1: webscan.agent.v1.CapabilitiesResponse
@@ -1152,6 +1290,8 @@ var file_api_agent_v1_agent_proto_goTypes = []any{
 	(*PreparedIdentityRenewal)(nil),        // 14: webscan.agent.v1.PreparedIdentityRenewal
 	(*ActivateIdentityRenewalRequest)(nil), // 15: webscan.agent.v1.ActivateIdentityRenewalRequest
 	(*ActivatedIdentityRenewal)(nil),       // 16: webscan.agent.v1.ActivatedIdentityRenewal
+	(*RefreshRootTrustRequest)(nil),        // 17: webscan.agent.v1.RefreshRootTrustRequest
+	(*RefreshRootTrustResponse)(nil),       // 18: webscan.agent.v1.RefreshRootTrustResponse
 }
 var file_api_agent_v1_agent_proto_depIdxs = []int32{
 	3,  // 0: webscan.agent.v1.EventBatch.events:type_name -> webscan.agent.v1.Event
@@ -1162,17 +1302,19 @@ var file_api_agent_v1_agent_proto_depIdxs = []int32{
 	6,  // 5: webscan.agent.v1.AgentService.AckEvents:input_type -> webscan.agent.v1.AckEventsRequest
 	8,  // 6: webscan.agent.v1.AgentService.ReadMetrics:input_type -> webscan.agent.v1.ReadMetricsRequest
 	11, // 7: webscan.agent.v1.AgentService.UpdateTrust:input_type -> webscan.agent.v1.UpdateTrustRequest
-	13, // 8: webscan.agent.v1.AgentService.PrepareIdentityRenewal:input_type -> webscan.agent.v1.PrepareIdentityRenewalRequest
-	15, // 9: webscan.agent.v1.AgentService.ActivateIdentityRenewal:input_type -> webscan.agent.v1.ActivateIdentityRenewalRequest
-	1,  // 10: webscan.agent.v1.AgentService.Capabilities:output_type -> webscan.agent.v1.CapabilitiesResponse
-	4,  // 11: webscan.agent.v1.AgentService.FetchEvents:output_type -> webscan.agent.v1.EventBatch
-	7,  // 12: webscan.agent.v1.AgentService.AckEvents:output_type -> webscan.agent.v1.AckEventsResponse
-	10, // 13: webscan.agent.v1.AgentService.ReadMetrics:output_type -> webscan.agent.v1.MetricsBatch
-	12, // 14: webscan.agent.v1.AgentService.UpdateTrust:output_type -> webscan.agent.v1.UpdateTrustResponse
-	14, // 15: webscan.agent.v1.AgentService.PrepareIdentityRenewal:output_type -> webscan.agent.v1.PreparedIdentityRenewal
-	16, // 16: webscan.agent.v1.AgentService.ActivateIdentityRenewal:output_type -> webscan.agent.v1.ActivatedIdentityRenewal
-	10, // [10:17] is the sub-list for method output_type
-	3,  // [3:10] is the sub-list for method input_type
+	17, // 8: webscan.agent.v1.AgentService.RefreshRootTrust:input_type -> webscan.agent.v1.RefreshRootTrustRequest
+	13, // 9: webscan.agent.v1.AgentService.PrepareIdentityRenewal:input_type -> webscan.agent.v1.PrepareIdentityRenewalRequest
+	15, // 10: webscan.agent.v1.AgentService.ActivateIdentityRenewal:input_type -> webscan.agent.v1.ActivateIdentityRenewalRequest
+	1,  // 11: webscan.agent.v1.AgentService.Capabilities:output_type -> webscan.agent.v1.CapabilitiesResponse
+	4,  // 12: webscan.agent.v1.AgentService.FetchEvents:output_type -> webscan.agent.v1.EventBatch
+	7,  // 13: webscan.agent.v1.AgentService.AckEvents:output_type -> webscan.agent.v1.AckEventsResponse
+	10, // 14: webscan.agent.v1.AgentService.ReadMetrics:output_type -> webscan.agent.v1.MetricsBatch
+	12, // 15: webscan.agent.v1.AgentService.UpdateTrust:output_type -> webscan.agent.v1.UpdateTrustResponse
+	18, // 16: webscan.agent.v1.AgentService.RefreshRootTrust:output_type -> webscan.agent.v1.RefreshRootTrustResponse
+	14, // 17: webscan.agent.v1.AgentService.PrepareIdentityRenewal:output_type -> webscan.agent.v1.PreparedIdentityRenewal
+	16, // 18: webscan.agent.v1.AgentService.ActivateIdentityRenewal:output_type -> webscan.agent.v1.ActivatedIdentityRenewal
+	11, // [11:19] is the sub-list for method output_type
+	3,  // [3:11] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name
@@ -1189,7 +1331,7 @@ func file_api_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_agent_v1_agent_proto_rawDesc), len(file_api_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

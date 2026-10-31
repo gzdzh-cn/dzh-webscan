@@ -191,7 +191,7 @@ func (s *Store) prepareNodeIdentityRecovery(ctx context.Context, c Config, v *Va
 		if err != nil || digest(cert.Raw) != in.ParentSHA256 || time.Now().Before(cert.NotAfter) || cert.VerifyHostname(n.ServerName) != nil {
 			return nil, errNodeIdentityRecovery
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 LIMIT 1`, in.Node, in.AuthoritySHA256, cert.SerialNumber.Text(16)).Scan(&parent); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_root_identity_issuances WHERE role='node' AND subject=$1 AND authority=$2 AND serial=$3 LIMIT 1`, in.Node, in.AuthoritySHA256, cert.SerialNumber.Text(16)).Scan(&parent); err != nil {
 			return nil, errNodeIdentityRecovery
 		}
 		now := time.Now().UTC().Truncate(time.Second)
@@ -199,10 +199,11 @@ func (s *Store) prepareNodeIdentityRecovery(ctx context.Context, c Config, v *Va
 		if err != nil || digest(root.Raw) != in.AuthoritySHA256 {
 			return nil, errNodeIdentityRecovery
 		}
-		configured, err := readTrustData(c.Collector.CAFile, false, 64<<10)
-		if err != nil || !bytes.Equal(bytes.TrimSpace(configured), bytes.TrimSpace(ca)) {
+		current, err := provisioningIssuerCRL(c, ca, now)
+		if err != nil || nodepki.ValidateCRLAdvance(ca, crl, current, now) != nil {
 			return nil, errNodeIdentityRecovery
 		}
+		crl = current
 		registered, err := provisioningCertificate(parent)
 		if err != nil || !bytes.Equal(registered.Raw, cert.Raw) {
 			return nil, errNodeIdentityRecovery
@@ -382,7 +383,7 @@ func (s *Store) confirmNodeIdentityRecovery(ctx context.Context, c Config, v *Va
 	if err := tx.QueryRowContext(ctx, `SELECT certificate,crl FROM v3_pki_authorities WHERE sha256=$1 FOR UPDATE`, j.AuthoritySHA256).Scan(&ca, &floor); err != nil {
 		return errNodeIdentityRecovery
 	}
-	current, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	current, err := provisioningIssuerCRL(c, ca, time.Now())
 	if err != nil || nodepki.ValidateCRLAdvance(ca, floor, current, time.Now()) != nil {
 		return errNodeIdentityRecovery
 	}

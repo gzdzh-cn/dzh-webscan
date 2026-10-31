@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"webscan/internal/nodeconfig"
+	"webscan/internal/nodepki"
 )
 
 // Startup is not resource acceptance. This fixed, read-only operation proves
@@ -17,6 +18,18 @@ func (w *LocalRuntime) verifyRecoveredService(ctx context.Context, in IdentityRe
 }
 
 func (w *LocalRuntime) verifyIdentityMaintenanceService(ctx context.Context, node string, crl []byte, host installationHost, fs nativeResources) error {
+	roots, err := w.installedRootState(time.Now())
+	if err != nil {
+		return errIdentityRecovery
+	}
+	var state *nodepki.RootSetSnapshot
+	if roots.Format != 0 {
+		state = &roots
+	}
+	return w.verifyIdentityMaintenanceServiceWithRoots(ctx, node, crl, state, host, fs)
+}
+
+func (w *LocalRuntime) verifyIdentityMaintenanceServiceWithRoots(ctx context.Context, node string, crl []byte, roots *nodepki.RootSetSnapshot, host installationHost, fs nativeResources) error {
 	held, locked := ctx.Value(serviceOperationKey{}).(serviceOperation)
 	if host.root != w.root || !locked || held.root != w.root || held.file == nil {
 		return errIdentityRecovery
@@ -34,7 +47,12 @@ func (w *LocalRuntime) verifyIdentityMaintenanceService(ctx context.Context, nod
 		return errIdentityRecovery
 	}
 	defer clear(raw)
-	m, err := nodeconfig.DecodeManagedRuntime(raw, time.Now(), crl)
+	var m nodeconfig.Material
+	if roots == nil {
+		m, err = nodeconfig.DecodeManagedRuntime(raw, time.Now(), crl)
+	} else {
+		m, err = nodeconfig.DecodeManagedRootRuntime(raw, time.Now(), *roots)
+	}
 	defer clear(m.Key)
 	if err != nil || m.Node != active.Node || m.SourceSHA256 != active.Spec.ConfigSourceSHA256 || m.Version != active.Spec.ConfigVersion {
 		return errIdentityRecovery

@@ -112,6 +112,17 @@ func (s *Store) dashboardSnapshot(ctx context.Context, previous dashboardSnapsho
  SELECT DISTINCT ON(role) role,jsonb_build_object('heartbeat',heartbeat,'healthy',heartbeat>clock_timestamp()-interval '20 seconds' AND error='',
  'has_error',error<>'') value FROM v3_role_status WHERE role IN ('retention','executor','websites','website-notifications','server-health') AND COALESCE(details->>'state','active')<>'standby' ORDER BY role,heartbeat DESC) roles),'{}'::jsonb),
  'last_cleanup',(SELECT jsonb_build_object('status',status,'deleted',deleted,'updated_at',updated_at) FROM v3_retention_jobs ORDER BY created_at DESC,id DESC LIMIT 1))`))
+	read("certificates", query(`SELECT jsonb_build_object('maintenance',(
+ SELECT jsonb_build_object('heartbeat',heartbeat,
+ 'fresh',heartbeat>clock_timestamp()-interval '70 minutes' AND heartbeat<=clock_timestamp()+interval '5 seconds',
+ 'has_error',error<>'','reason',CASE WHEN error<>'' THEN '节点证书维护失败，请检查宿主维护回执和签发队列' ELSE '' END,
+ 'collector_expires_at',details->'collector_expires_at','ca_expires_at',details->'ca_expires_at')
+ FROM v3_role_status WHERE role='pki-maintenance' ORDER BY heartbeat DESC LIMIT 1))`))
+	read("full_backups", query(`SELECT jsonb_build_object('policy',(
+ SELECT jsonb_build_object('enabled',enabled,'keep',policy#>'{policy,keep}') FROM v3_single_backup_policies ORDER BY created_at DESC LIMIT 1),
+ 'latest',(SELECT jsonb_build_object('status',status,'created_at',created_at,'updated_at',updated_at,
+ 'files',files,'bytes',bytes,'restore_validated',restore_validated,'has_error',reason<>'')
+ FROM v3_single_backup_runs ORDER BY created_at DESC,id DESC LIMIT 1))`))
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}

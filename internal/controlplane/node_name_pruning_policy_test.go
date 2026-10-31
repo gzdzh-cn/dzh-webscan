@@ -14,8 +14,12 @@ import (
 // applied-version/extra-SAN evidence as explicit fixtures. No remote service is
 // installed or observed, and a plan does not authorize signing or activation.
 func namePruningPolicyFixture(t *testing.T) (renewalRegistryFixture, []byte) {
+	return namePruningPolicyFixtureWith(t, nil)
+}
+
+func namePruningPolicyFixtureWith(t *testing.T, configure func(*provisioningFixture)) (renewalRegistryFixture, []byte) {
 	t.Helper()
-	f := newRenewalRegistryFixture(t)
+	f := renewalRegistryFixtureWith(t, configure)
 	mustHistoryExec(t, f.s.DB, `UPDATE v3_nodes SET applied_version=version WHERE id=$1`, f.in.Request.Node)
 	mustHistoryExec(t, f.s.DB, `UPDATE v3_node_runtime SET delivered_version=1 WHERE node=$1`, f.in.Request.Node)
 	n := runtimeNodeForTest(t, f.s, f.in.Request.Node)

@@ -26,6 +26,7 @@ type NodeConfigurationInput struct {
 	Rules           []byte
 	Directory       string
 	ManagedIdentity bool
+	Roots           *nodepki.RootSetSnapshot
 }
 type PreparedNodeConfiguration struct {
 	Artifact ReleaseArtifact `json:"artifact"`
@@ -86,7 +87,18 @@ func nodeConfigurationMaterial(n Node, release *TrustedRelease, in NodeConfigura
 		material.Format = 3
 		material.Certificate, material.Key = nil, nil
 	}
-	if material.Validate(time.Now()) != nil {
+	if in.Roots != nil {
+		if !in.ManagedIdentity {
+			return nodeconfig.Material{}, errProvisioning
+		}
+		raw, err := json.Marshal(material)
+		if err != nil {
+			return nodeconfig.Material{}, errProvisioning
+		}
+		if _, err := nodeconfig.DecodeManagedRootRuntime(raw, time.Now(), *in.Roots); err != nil {
+			return nodeconfig.Material{}, errProvisioning
+		}
+	} else if material.Validate(time.Now()) != nil {
 		return nodeconfig.Material{}, errProvisioning
 	}
 	return material, nil

@@ -32,7 +32,7 @@ const settingsValues={'website_monitor.interval_seconds':30,'website_monitor.ena
 const requests=[], servers=[]
 for (const [mode,dir,port] of [['baseline',path.join(baseline,'web'),61946],['restored',path.join(root,'web'),61947]]) {
  const isV3=mode==='restored'
- const server=await createServer({configFile:false,root:dir,plugins:[{name:'isolated-ui-fixtures',transformIndexHtml(html){return html.replace('</head>','<style>*,*::before,*::after{animation-duration:0s!important;transition-duration:0s!important}</style></head>')},transform(code,id){if(id.endsWith('/src/MetricChart.vue'))return code.replaceAll('chart.setOption(props.option)','chart.setOption({...props.option,animation:false})').replaceAll('chart?.setOption(option, true)','chart?.setOption({...option,animation:false}, true)')},configureServer(vite){vite.middlewares.use(async(req,res,next)=>{
+ const server=await createServer({configFile:false,root:dir,cacheDir:path.join(evidence,`vite-cache-${mode}`),plugins:[{name:'isolated-ui-fixtures',transformIndexHtml(html){return html.replace('</head>','<style>*,*::before,*::after{animation-duration:0s!important;transition-duration:0s!important}</style></head>')},transform(code,id){if(id.endsWith('/src/MetricChart.vue'))return code.replaceAll('chart.setOption(props.option)','chart.setOption({...props.option,animation:false})').replaceAll('chart?.setOption(option, true)','chart?.setOption({...option,animation:false}, true)')},configureServer(vite){vite.middlewares.use(async(req,res,next)=>{
   const u=new URL(req.url,'http://127.0.0.1'),p=u.pathname
   if(!p.startsWith('/api/')) {if(!p.includes('.')&&!p.startsWith('/@')&&!p.startsWith('/node_modules')&&!p.startsWith('/src/'))req.url=isV3?'/v3.html':'/index.html';return next()}
   const entry={mode,method:req.method,path:p,query:u.search,at:new Date().toISOString()}; requests.push(entry)
@@ -46,7 +46,16 @@ for (const [mode,dir,port] of [['baseline',path.join(baseline,'web'),61946],['re
   // Protect the fixture boundary: the restored app must never reach legacy API.
   if(isV3&&!p.startsWith('/api/v3/'))return send({code:'legacy_api_forbidden',message:'v3 界面调用了旧接口'},409)
   if(p==='/api/v3/capabilities')return send({api_version:3,topology:'single',features:[],implementation_stage:'local-ui-fixture',settings:{available:true,reason:''},executor:{available:true,reason:''},deployments:{available:true,reason:''},deployment_defaults:{central:'docker',node:'docker',node_modes:['docker','native']}})
-  if(p==='/api/v3/dashboard')return send(dashboard)
+  if(p==='/api/v3/dashboard') {
+   // Select only synthetic certificate evidence, never host/runtime state.
+   const scenario=new URL(req.headers.referer || 'http://127.0.0.1').searchParams.get('fixture_certificate') || 'missing'
+   const value=structuredClone(dashboard), now=Date.now(), stamp=new Date(now).toISOString()
+   if(['healthy','stale','error','expiring','expired','missing-expiry'].includes(scenario)) {
+    const maintenance={heartbeat:scenario==='stale'?new Date(now-7200_000).toISOString():stamp,fresh:scenario!=='stale',has_error:scenario==='error',reason:scenario==='error'?'隔离样例：证书维护失败':'',collector_expires_at:scenario==='missing-expiry'?null:new Date(now+(scenario==='expired'?-1:scenario==='expiring'?3:30)*86400_000).toISOString(),ca_expires_at:new Date(now+365*86400_000).toISOString()}
+    value.summary.sections.certificates={data:{maintenance},updated_at:stamp,error:''}
+   }
+   return send(value)
+  }
   if(p==='/api/dashboard')return send({release:'v2.0.46',updated:sec,started:sec-86400,servers:legacyNodes,components,errors:{},server_total:2,server_normal:2,server_abnormal:0,server_unknown:0,website_total:2,website_normal:2,website_down:0,website_paused:0,website_pending:0,current_issues:0,events_24h:18,security_24h:0,pending_notifications:0,pending_email:0,deployment_running:false})
   if(p==='/api/servers/requirements')return send({minimum_systemd:231,nodes:[],clamav_enabled:false})
   if(p==='/api/servers')return send(page(legacyNodes))

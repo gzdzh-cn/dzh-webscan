@@ -14,7 +14,7 @@ import (
 // The legacy split files are retained when identity_file is absent.
 func collectorIdentityMaterial(c Config, now time.Time) (nodepki.Bundle, error) {
 	if c.Collector.IdentityFile != "" {
-		b, _, err := nodepki.ReadIdentity(c.Collector.CAFile, c.Collector.IdentityFile, nodepki.Collector, "", now)
+		b, _, err := nodepki.ReadIdentityWithRootState(c.Collector.CAFile, c.Collector.IdentityFile, c.Collector.RevocationStateDirectory, nodepki.Collector, "", now)
 		return b, err
 	}
 	cert, key, err := configurationLocalPair(c.Collector.CertFile, c.Collector.KeyFile)
@@ -32,10 +32,16 @@ func collectorTLSIdentity(c Config) (*tls.Config, *nodepki.LiveIdentity, error) 
 	if err != nil || !pool.AppendCertsFromPEM(raw) {
 		return nil, nil, errors.New("采集 CA 不正确")
 	}
+	if c.Collector.RevocationStateDirectory != "" {
+		pool, err = nodepki.RootPoolFromState(c.Collector.CAFile, c.Collector.RevocationStateDirectory, time.Now())
+		if err != nil {
+			return nil, nil, errors.New("采集 CA 换根资料不正确")
+		}
+	}
 	t := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 	if c.Collector.IdentityFile != "" {
 		// Instance is a process lease ID, not necessarily the signed identity.
-		live, err := nodepki.NewLiveIdentity(c.Collector.CAFile, c.Collector.IdentityFile, nodepki.Collector, "", time.Now())
+		live, err := nodepki.NewLiveIdentityWithRootState(c.Collector.CAFile, c.Collector.IdentityFile, c.Collector.RevocationStateDirectory, nodepki.Collector, "", time.Now())
 		if err != nil {
 			return nil, nil, errors.New("无法加载采集器受管理证书")
 		}

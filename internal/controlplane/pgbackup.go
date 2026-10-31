@@ -165,7 +165,7 @@ func backupPostgres(ctx context.Context, tx *sql.Tx, version int, directory stri
 }
 
 func postgresTables(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p') AND NOT relispartition AND relname LIKE 'v3\_%' ESCAPE '\' ORDER BY CASE WHEN relname='v3_accounts' THEN 0 WHEN relname='v3_notifications' THEN 1 WHEN relname='v3_websites' THEN 2 WHEN relname='v3_node_identities' THEN 3 WHEN relname='v3_nodes' THEN 4 WHEN relname='v3_pki_authorities' THEN 5 WHEN relname='v3_credentials' THEN 6 WHEN relname='v3_node_certificates' THEN 7 WHEN relname='v3_deployment_jobs' THEN 8 WHEN relname='v3_node_configurations' THEN 9 WHEN relname='v3_node_runtime' THEN 10 WHEN relname IN ('v3_website_backups','v3_configuration_backups','v3_configuration_revisions') THEN 9 WHEN relname IN ('v3_history_previews','v3_configuration_delete_previews') THEN 10 WHEN relname IN ('v3_history_jobs','v3_configuration_delete_jobs','v3_configuration_applications','v3_deployment_preparations') THEN 11 ELSE 12 END,relname`)
+	rows, err := tx.QueryContext(ctx, `SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p') AND NOT relispartition AND relname LIKE 'v3\_%' ESCAPE '\' ORDER BY CASE WHEN relname='v3_accounts' THEN 0 WHEN relname='v3_notifications' THEN 1 WHEN relname='v3_websites' THEN 2 WHEN relname='v3_node_identities' THEN 3 WHEN relname='v3_nodes' THEN 4 WHEN relname='v3_pki_authorities' THEN 5 WHEN relname='v3_credentials' THEN 6 WHEN relname='v3_node_certificates' THEN 7 WHEN relname='v3_deployment_jobs' THEN 8 WHEN relname='v3_node_configurations' THEN 9 WHEN relname='v3_node_runtime' THEN 10 WHEN relname IN ('v3_website_backups','v3_configuration_backups','v3_configuration_revisions') THEN 9 WHEN relname IN ('v3_history_previews','v3_configuration_delete_previews') THEN 10 WHEN relname IN ('v3_history_jobs','v3_configuration_delete_jobs','v3_configuration_applications','v3_deployment_preparations','v3_root_rotations') THEN 11 ELSE 12 END,relname`)
 	if err != nil {
 		return nil, err
 	}
@@ -409,6 +409,16 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	if header.Version >= 37 {
+		if _, err = tx.ExecContext(ctx, nodeHistoryRetirementSchema+singleBackupScheduleSchema); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 38 {
+		if _, err = tx.ExecContext(ctx, rootRotationSchema); err != nil {
+			return err
+		}
+	}
 	tables, err := postgresTables(ctx, tx)
 	if err != nil {
 		return err
@@ -499,6 +509,11 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	if header.Version >= 38 {
+		if _, err = tx.ExecContext(ctx, `UPDATE v3_root_rotations SET restore_hold=true WHERE status NOT IN ('completed','canceled')`); err != nil {
+			return err
+		}
+	}
 	if header.Version >= 34 {
 		// Restore retains issuance ancestry, not permission to finish a
 		// destructive name change using an archived task or SSH authority.
@@ -512,9 +527,18 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 		}
 	}
 	if header.Version >= 9 {
-		// A restored cleanup cursor is durable work; an archived heartbeat is
-		// not proof that its old worker is still alive in the restored cluster.
-		if _, err = tx.ExecContext(ctx, "DELETE FROM v3_role_status WHERE role='retention'"); err != nil {
+		// Archived cleanup and certificate heartbeats do not prove that host
+		// workers or trust files are healthy in the restored cluster.
+		if _, err = tx.ExecContext(ctx, "DELETE FROM v3_role_status WHERE role IN ('retention','pki-maintenance')"); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 37 {
+		// An archive cannot authorize pruning files on a recovered host. A new
+		// administrator must bind and enable the local policy after recovery.
+		if _, err = tx.ExecContext(ctx, `UPDATE v3_single_backup_policies SET enabled=false;
+UPDATE v3_single_backup_runs SET status='interrupted',reason='灾备恢复后需核对宿主备份资料',updated_at=clock_timestamp() WHERE status IN ('running','purging');
+DELETE FROM v3_role_status WHERE role='single-backup'`); err != nil {
 			return err
 		}
 	}

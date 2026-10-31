@@ -27,8 +27,12 @@ type namePruningRegistryFixture struct {
 }
 
 func newNamePruningRegistryFixture(t *testing.T) namePruningRegistryFixture {
+	return namePruningRegistryFixtureWith(t, nil)
+}
+
+func namePruningRegistryFixtureWith(t *testing.T, configure func(*provisioningFixture)) namePruningRegistryFixture {
 	t.Helper()
-	f, _ := namePruningPolicyFixture(t)
+	f, _ := namePruningPolicyFixtureWith(t, configure)
 	n := runtimeNodeForTest(t, f.s, f.in.Request.Node)
 	b, err := f.ca.Issue(nodepki.Node, n.ID, []string{n.ServerName, "unused.example.test"}, time.Now(), 48*time.Hour)
 	if err != nil {
@@ -376,7 +380,7 @@ func TestNodeNamePruningBackupRevokesExecutionAndMigrationPreservesLedger(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustHistoryExec(t, old.s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version>=35;DROP TABLE v3_node_name_prunings;ALTER TABLE v3_node_certificate_renewals DROP CONSTRAINT v3_node_certificate_renewals_request_kind_check;ALTER TABLE v3_node_certificate_renewals ADD CONSTRAINT v3_node_certificate_renewals_request_kind_check CHECK(request_kind IN ('renewal','name-change'));DELETE FROM v3_schema WHERE version=34`)
+	mustHistoryExec(t, old.s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version>=35;DROP TABLE v3_node_name_prunings;ALTER TABLE v3_node_certificate_renewals DROP CONSTRAINT v3_node_certificate_renewals_request_kind_check;ALTER TABLE v3_node_certificate_renewals ADD CONSTRAINT v3_node_certificate_renewals_request_kind_check CHECK(request_kind IN ('renewal','name-change'));DELETE FROM v3_schema WHERE version=34`)
 	if err := old.s.Migrate(ctx); err == nil {
 		t.Fatal("migration skipped consistent backup")
 	}

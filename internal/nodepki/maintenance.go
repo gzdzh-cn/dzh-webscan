@@ -3,7 +3,6 @@ package nodepki
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -160,14 +159,30 @@ func RefreshCRL(ctx context.Context, dir string, now time.Time, before, lifetime
 // The caller schedules this and distributes CRLs separately. Revoked leaves
 // cannot be renewed, including when their original certificate has expired.
 func MaintainIdentity(ctx context.Context, authority, caFile, file, role, id string, now time.Time, before, lifetime time.Duration) (IdentityRecord, error) {
+	return MaintainIdentityWithRootState(ctx, authority, caFile, file, "", role, id, now, before, lifetime)
+}
+
+// Maintenance renews under the installed leaf's authorized issuer. It cannot
+// roll a leaf to another CA; that requires the explicit administrator rollout.
+func MaintainIdentityWithRootState(ctx context.Context, authority, caFile, file, directory, role, id string, now time.Time, before, lifetime time.Duration) (IdentityRecord, error) {
 	if before < time.Hour || lifetime < 2*time.Hour || lifetime > 90*24*time.Hour || before >= lifetime || lifetime%time.Hour != 0 {
 		return IdentityRecord{}, ErrIdentity
 	}
-	b, record, err := readIdentity(caFile, file, role, id, now, true)
+	b, record, err := readIdentityWithRootState(caFile, file, directory, role, id, now, true)
 	if err != nil {
 		return IdentityRecord{}, err
 	}
 	defer clear(b.Key)
+	if directory != "" {
+		issuer, err := RootFingerprint(b.CA)
+		if err != nil {
+			return IdentityRecord{}, err
+		}
+		authority, err = IdentityAuthority(authority, caFile, directory, issuer, now)
+		if err != nil {
+			return IdentityRecord{}, err
+		}
+	}
 	ca, crl, _, err := RefreshCRL(ctx, authority, now, 12*time.Hour, 24*time.Hour)
 	if err != nil {
 		return IdentityRecord{}, err
@@ -191,13 +206,33 @@ func MaintainIdentity(ctx context.Context, authority, caFile, file, role, id str
 		}
 		return record, nil
 	}
-	var out bytes.Buffer
-	err = identityCommand(ctx, Options{Action: "renew-identity", Authority: authority, CAFile: caFile, IdentityFile: file, Role: role, ID: id, ExpectedSHA256: record.CertificateSHA256, LifetimeHours: int(lifetime / time.Hour)}, &out, now)
+	leaf, err := parseCertificate(b.Certificate)
 	if err != nil {
 		return IdentityRecord{}, err
 	}
-	if json.Unmarshal(out.Bytes(), &record) != nil {
-		return IdentityRecord{}, ErrIdentity
+	names := append([]string{}, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		names = append(names, ip.String())
 	}
-	return record, nil
+	var out IdentityRecord
+	err = IssueRegistered(ctx, authority, role, id, names, now, lifetime, func(next Bundle, currentCRL []byte) error {
+		if !bytes.Equal(next.CA, b.CA) {
+			return ErrIdentity
+		}
+		list, err := parseCRL(currentCRL, root)
+		if err != nil {
+			return err
+		}
+		for _, entry := range list.RevokedCertificateEntries {
+			if entry.SerialNumber.Cmp(leaf.SerialNumber) == 0 {
+				return ErrRevocation
+			}
+		}
+		out, err = PublishIdentityWithRootState(ctx, caFile, file, directory, role, id, record.CertificateSHA256, next, now)
+		return err
+	})
+	if err != nil {
+		return IdentityRecord{}, err
+	}
+	return out, nil
 }

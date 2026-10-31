@@ -17,9 +17,9 @@ import (
 var errNodeNamePruning = errors.New("证书名称收尾检查不满足要求：请核对已生效配置、身份登记、历史恢复依赖及未完成任务")
 
 // This is a READ-ONLY eligibility calculation, not an authorization or a
-// signing endpoint. Until an explicit retirement protocol exists, every
-// retained configuration snapshot remains a possible recovery dependency.
-// A successful deployment alone does not retire its old TLS name.
+// signing endpoint. Every snapshot remains a recovery dependency unless an
+// explicit immutable retirement fences its reuse. A successful deployment
+// alone does not retire its old TLS name.
 type nodeNamePruningPlan struct {
 	Node, Snapshot, ConfigurationSHA256, AuthoritySHA256, ParentSHA256 string
 	ActiveName, DependenciesSHA256                                     string
@@ -90,7 +90,7 @@ func namePruningPolicyTx(ctx context.Context, tx *sql.Tx, c Config, user, node s
 	if err != nil || len(parent.DNSNames)+len(parent.IPAddresses) < 1 || len(parent.DNSNames)+len(parent.IPAddresses) > 16 {
 		return empty, errNodeNamePruning
 	}
-	ca, err := readTrustData(c.Collector.CAFile, false, 64<<10)
+	ca, currentCRL, err := provisioningCertificateIssuer(c, parent, time.Now())
 	if err != nil {
 		return empty, errNodeNamePruning
 	}
@@ -100,7 +100,7 @@ func namePruningPolicyTx(ctx context.Context, tx *sql.Tx, c Config, user, node s
 	}
 	p.AuthoritySHA256, p.ParentSHA256 = digest(root.Raw), digest(parent.Raw)
 	var known, pinnedCA, crl []byte
-	err = tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 LIMIT 1`, node, p.AuthoritySHA256, parent.SerialNumber.Text(16)).Scan(&known)
+	err = tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_root_identity_issuances WHERE role='node' AND subject=$1 AND authority=$2 AND serial=$3 LIMIT 1`, node, p.AuthoritySHA256, parent.SerialNumber.Text(16)).Scan(&known)
 	if err != nil || !bytes.Equal(bytes.TrimSpace(known), bytes.TrimSpace(certificate)) {
 		return empty, errNodeNamePruning
 	}
@@ -108,28 +108,14 @@ func namePruningPolicyTx(ctx context.Context, tx *sql.Tx, c Config, user, node s
 	if err != nil || !bytes.Equal(bytes.TrimSpace(pinnedCA), bytes.TrimSpace(ca)) {
 		return empty, errNodeNamePruning
 	}
-	trust, err := nodepki.NewTrust(ca, crl, time.Now())
-	if err != nil || trust.Verify(parent, nodepki.Node, node, time.Now()) != nil {
+	if nodepki.ValidateCRLAdvance(ca, crl, currentCRL, time.Now()) != nil {
 		return empty, errNodeNamePruning
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_node_certificate_renewals WHERE node=$1 AND parent_sha256=$2)`, node, p.ParentSHA256).Scan(&busy); err != nil {
-		return empty, err
-	}
-	if busy {
-		var owned bool
-		if except != "" {
-			err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_node_certificate_renewals r JOIN v3_node_name_prunings p ON p.node=r.node AND p.parent_sha256=r.parent_sha256 AND p.authority=r.authority WHERE p.id=$3 AND r.node=$1 AND r.parent_sha256=$2 AND r.request_kind='name-pruning' AND r.request_sha256=p.request_sha256 AND p.status IN ('requested','signed','completed'))`, node, p.ParentSHA256, except).Scan(&owned)
-			if err != nil {
-				return empty, err
-			}
-		}
-		if !owned {
-			return empty, errNodeNamePruning
-		}
-	}
-	// Keep all recorded snapshots, including stopped nodes and old rollback
-	// targets. Never clear references or rewrite history to make pruning pass.
-	rows, err := tx.QueryContext(ctx, `SELECT to_jsonb(c),server_name FROM v3_node_configurations c WHERE node=$1 ORDER BY id`, node)
+	crl = currentCRL
+	// Keep all recorded bytes in the proof, including retired snapshots. Only
+	// exact, explicitly retired history stops protecting a name; historical
+	// task/certificate records remain intact and cannot reactivate that ID.
+	rows, err := tx.QueryContext(ctx, `SELECT to_jsonb(c),server_name,COALESCE(h.snapshot_sha256,'') FROM v3_node_configurations c LEFT JOIN v3_node_history_retirements h ON h.node=c.node AND h.snapshot=c.id WHERE c.node=$1 ORDER BY c.id`, node)
 	if err != nil {
 		return empty, err
 	}
@@ -140,18 +126,23 @@ func namePruningPolicyTx(ctx context.Context, tx *sql.Tx, c Config, user, node s
 	for rows.Next() {
 		var raw []byte
 		var name string
-		if err := rows.Scan(&raw, &name); err != nil {
+		var retired string
+		if err := rows.Scan(&raw, &name, &retired); err != nil {
 			rows.Close()
 			return empty, err
 		}
-		if parent.VerifyHostname(name) != nil {
+		if retired != "" && retired != digest(raw) || retired == "" && parent.VerifyHostname(name) != nil {
 			rows.Close()
 			return empty, errNodeNamePruning
 		}
 		binary.BigEndian.PutUint64(size[:], uint64(len(raw)))
 		dependencies.Write(size[:])
 		dependencies.Write(raw)
-		names[name] = true
+		dependencies.Write([]byte{0})
+		dependencies.Write([]byte(retired))
+		if retired == "" {
+			names[name] = true
+		}
 	}
 	err = rows.Err()
 	closed := rows.Close()
@@ -181,6 +172,17 @@ func namePruningPolicyTx(ctx context.Context, tx *sql.Tx, c Config, user, node s
 	slices.Sort(p.RemovableNames)
 	p.Node, p.ActorRevision, p.NodeVersion, p.ConfigurationSHA256 = node, actor, expected, digest(activeConfig)
 	p.DependenciesSHA256 = hex.EncodeToString(dependencies.Sum(nil))
+	// A previously issued leaf permits a fresh administrator authorization,
+	// never a second issuance or a different configuration/epoch/SAN subset.
+	original, issued, _, priorErr := namePruningPriorIssuance(ctx, tx, p)
+	if priorErr == sql.ErrNoRows {
+		trust, err := nodepki.NewTrust(ca, crl, time.Now())
+		if err != nil || trust.Verify(parent, nodepki.Node, node, time.Now()) != nil {
+			return empty, errNodeNamePruning
+		}
+	} else if priorErr != nil || !bytes.Equal(bytes.TrimSpace(original.Certificate), bytes.TrimSpace(certificate)) || nodepki.ValidateNodeNamePruningReceipt(ca, crl, original, issued, time.Now()) != nil {
+		return empty, errNodeNamePruning
+	}
 	// Reuse the exact PKI subset/canonical-name rules, without generating any
 	// authorization, challenge or local private key for a read-only plan.
 	if len(p.RemovableNames) > 0 {

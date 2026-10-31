@@ -18,15 +18,24 @@ const NameChangeVerificationTimeout = 30 * time.Second
 // Missing state, another CA and loss of any previous revocation are errors.
 // It is not an online authentication exception or a way to initialize a node.
 func PublishNodeNameChangeTrust(ctx context.Context, caFile, directory string, raw []byte, r NodeNameChangeRequest, expected NodeNameChangeIntent, now time.Time) (CRLReceipt, error) {
+	return publishNodeNameMaintenanceTrust(ctx, caFile, directory, expected.AuthoritySHA256, raw, expected.ExpiresAt, now, func(ca []byte) error {
+		return ValidateNodeNameChangeRequest(ca, raw, r, expected, now)
+	})
+}
+
+func publishNodeNameMaintenanceTrust(ctx context.Context, caFile, directory, issuer string, raw []byte, expires time.Time, now time.Time, validate func([]byte) error) (CRLReceipt, error) {
 	var empty CRLReceipt
 	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || secureDirectory(directory) != nil {
 		return empty, ErrRevocation
 	}
+	if receipt, rotated, err := publishRootMaintenanceCRL(ctx, caFile, directory, issuer, raw, now, validate); err != nil || rotated {
+		return receipt, err
+	}
 	ca, err := readTrustFile(caFile, 64<<10)
-	if err != nil || ValidateNodeNameChangeRequest(ca, raw, r, expected, now) != nil {
+	if err != nil || validate(ca) != nil {
 		return empty, ErrIdentity
 	}
-	ctx, cancel := context.WithDeadline(ctx, expected.ExpiresAt)
+	ctx, cancel := context.WithDeadline(ctx, expires)
 	defer cancel()
 	ctx, finish := context.WithTimeout(ctx, 5*time.Second)
 	defer finish()
@@ -75,7 +84,7 @@ func WithNameChangedNodeIdentity(ctx context.Context, caFile, identityFile, trus
 	defer cancel()
 	ctx, finish := context.WithTimeout(ctx, NameChangeVerificationTimeout)
 	defer finish()
-	return nameChangeTrust(ctx, caFile, trustDirectory, now, func(ca, crl []byte) error {
+	return nameChangeTrust(ctx, caFile, trustDirectory, expected.AuthoritySHA256, now, func(ca, crl []byte) error {
 		if err := ValidateNodeNameChangeCertificate(ca, crl, r, expected, certificate, now); err != nil {
 			return err
 		}
@@ -89,7 +98,7 @@ func WithNameChangedNodeIdentity(ctx context.Context, caFile, identityFile, trus
 			if err != nil || saved.SHA256() != original.SHA256() {
 				return ErrIdentity
 			}
-			active, record, err := ReadIdentity(caFile, identityFile, Node, expected.Node, now)
+			active, record, err := ReadIdentityWithRootState(caFile, identityFile, trustDirectory, Node, expected.Node, now)
 			defer clear(active.Key)
 			if err != nil {
 				return ErrIdentity

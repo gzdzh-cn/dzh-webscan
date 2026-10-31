@@ -15,6 +15,7 @@ import (
 
 type nodeIdentityRenewer struct {
 	caFile, identityFile, node string
+	rootState                  string
 	trust                      *nodepki.FileTrust
 }
 
@@ -27,7 +28,7 @@ func (r *nodeIdentityRenewer) Status(ctx context.Context) (pull.IdentityStatus, 
 		return empty, nodepki.ErrRevocation
 	}
 	now := time.Now()
-	b, record, err := nodepki.ReadIdentity(r.caFile, r.identityFile, nodepki.Node, r.node, now)
+	b, record, err := nodepki.ReadIdentityWithRootState(r.caFile, r.identityFile, r.rootState, nodepki.Node, r.node, now)
 	defer clear(b.Key)
 	if err != nil {
 		return empty, err
@@ -48,7 +49,7 @@ func (r *nodeIdentityRenewer) Prepare(ctx context.Context, expected string) ([]b
 	if err != nil || current.SHA256 != expected {
 		return nil, nodepki.ErrIdentity
 	}
-	request, err := nodepki.PrepareNodeRenewal(ctx, r.caFile, r.identityFile, r.node, expected, time.Now())
+	request, err := nodepki.PrepareNodeRenewalWithRootState(ctx, r.caFile, r.identityFile, r.rootState, r.node, expected, time.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +61,7 @@ func (r *nodeIdentityRenewer) Activate(ctx context.Context, expected, requestSHA
 	if _, err := r.Status(ctx); err != nil {
 		return empty, err
 	}
-	record, err := nodepki.ActivateNodeRenewal(ctx, r.caFile, r.identityFile, r.node, expected, requestSHA, cert, time.Now(), func(leaf *x509.Certificate) error {
+	record, err := nodepki.ActivateNodeRenewalWithRootState(ctx, r.caFile, r.identityFile, r.rootState, r.node, expected, requestSHA, cert, time.Now(), func(leaf *x509.Certificate) error {
 		return r.trust.Verify(leaf, nodepki.Node, r.node, time.Now())
 	})
 	if err != nil {

@@ -44,7 +44,7 @@ func (w *sshNodeNameChange) observeAndConfirm(ctx context.Context, l Lease, id s
 	if err != nil {
 		return err
 	}
-	ca, err := readTrustData(w.config.Collector.CAFile, false, 64<<10)
+	ca, _, err := provisioningCertificateIssuer(w.config, issued, time.Now())
 	if err != nil {
 		return errNodeNameChange
 	}
@@ -83,7 +83,11 @@ func (w *sshNodeNameChange) observeAndConfirm(ctx context.Context, l Lease, id s
 }
 
 func (w *sshNodeNameChange) observeName(ctx context.Context, n Node, j nodeNameChangeJob, name string, issued *x509.Certificate, trust *nodepki.Trust, metrics bool) (*x509.Certificate, error) {
-	t, err := CollectorTLS(w.config)
+	return observeMaintainedNodeIdentity(ctx, w.config, n, name, issued, trust, metrics, j.Intent.IssuedAt)
+}
+
+func observeMaintainedNodeIdentity(ctx context.Context, config Config, n Node, name string, issued *x509.Certificate, trust *nodepki.Trust, metrics bool, since time.Time) (*x509.Certificate, error) {
+	t, err := CollectorTLS(config)
 	if err != nil {
 		return nil, errNodeNameChange
 	}
@@ -122,7 +126,7 @@ func (w *sshNodeNameChange) observeName(ctx context.Context, n Node, j nodeNameC
 		if !ok || !metricAuth.State.HandshakeComplete || len(metricAuth.State.VerifiedChains) == 0 || len(metricAuth.State.PeerCertificates) != 1 || digest(metricAuth.State.PeerCertificates[0].Raw) != digest(issued.Raw) {
 			return nil, errNodeNameChange
 		}
-		if !validRecoveryMetrics(n, batch, time.Now(), j.Intent.IssuedAt) {
+		if !validRecoveryMetrics(n, batch, time.Now(), since) {
 			return nil, errNodeNameChangeNotReady
 		}
 	}

@@ -28,9 +28,19 @@ export function dashboardCards(value: V3Dashboard | null, readFailed = false): D
   }
   const executor = services?.roles.executor
   add('host', '宿主管理服务', !executor ? '未知' : executor.healthy ? '正常' : '异常', executor ? '部署执行器心跳；配置应用须通过预览及任务验收' : '尚未观察到部署执行器心跳', '/deployments', executor?.heartbeat, Boolean(s?.services?.error))
+  const pki = s?.certificates?.data?.maintenance
+  const expiry = (date?: string | null) => date ? Date.parse(date) : NaN
+  const collectorExpiry = expiry(pki?.collector_expires_at), caExpiry = expiry(pki?.ca_expires_at)
+  const expiryKnown = Number.isFinite(collectorExpiry) && Number.isFinite(caExpiry)
+  const certificateStatus: ComponentStatus = !pki || !pki.fresh || !expiryKnown ? '未知' : pki.has_error || Math.min(collectorExpiry, caExpiry) <= Date.now() ? '异常' : Math.min(collectorExpiry, caExpiry) <= Date.now() + 7 * 86400_000 ? '维护中' : '正常'
+  add('certificates', '证书维护', certificateStatus, !pki ? '尚无宿主证书维护回执' : !pki.fresh ? '维护心跳已过期，请检查宿主定时任务' : pki.reason || (!expiryKnown ? '缺少已验证的证书期限' : certificateStatus === '维护中' ? '证书将在七天内到期，请检查续期任务' : certificateStatus === '异常' ? '证书已过期，请检查维护任务' : '已验证采集器与 CA 期限；节点证书以实际采集验收为准'), '/servers/central?tab=system', pki?.heartbeat, Boolean(s?.certificates?.error))
   add('watchdog', '看门狗', '未接管', 'v3 尚未接入看门狗运行状态', '/servers')
   const cleanup = services?.roles.retention
-  add('cleanup', '备份与历史清理', cleanup && !cleanup.healthy ? '异常' : '未知', services?.last_cleanup ? `最近清理 ${services.last_cleanup.status} · 删除 ${services.last_cleanup.deleted}；自动数据库备份状态待接入` : '尚无清理结果；自动数据库备份状态待接入', '/settings?tab=storage', cleanup?.heartbeat, Boolean(s?.services?.error))
+  const backups = s?.full_backups?.data, lastBackup = backups?.latest
+  const backupFailed = Boolean(lastBackup?.has_error || lastBackup && ['failed', 'interrupted'].includes(lastBackup.status))
+  const backupVerified = Boolean(lastBackup?.status === 'captured' && lastBackup.restore_validated && Date.parse(lastBackup.updated_at) > Date.now() - 48 * 3600_000 && Date.parse(lastBackup.updated_at) <= Date.now() + 5000)
+  const backupReason = !backups?.policy ? '尚未配置完整备份' : !backups.policy.enabled ? '备份策略未启用' : !lastBackup ? '已配置每日备份，尚无执行回执' : lastBackup.status === 'running' ? '完整备份执行中' : backupFailed ? '完整备份未完成，请检查宿主任务' : lastBackup.status === 'captured' ? `已归档 ${lastBackup.files} 个文件；${lastBackup.restore_validated ? '隔离恢复已验证' : '尚无完整恢复验收回执'}` : '备份任务等待核验'
+  add('cleanup', '备份与历史清理', cleanup && !cleanup.healthy || backupFailed ? '异常' : backups?.policy?.enabled && backupVerified && cleanup?.healthy ? '正常' : '未知', `${services?.last_cleanup ? `最近清理 ${services.last_cleanup.status} · 删除 ${services.last_cleanup.deleted}；` : ''}${backupReason}`, '/settings?tab=storage', lastBackup?.updated_at || cleanup?.heartbeat, Boolean(s?.services?.error || s?.full_backups?.error))
   const deployments = s?.deployments?.data
   add('deployments', '部署任务', !deployments ? '未知' : deployments.recovery_required ? '异常' : '正常', deployments ? `运行 ${deployments.running} · 待恢复 ${deployments.recovery_required}${!deployments.running && !deployments.recovery_required ? ' · 空闲' : ''}` : '尚无部署任务汇总', '/deployments', s?.deployments?.updated_at, Boolean(s?.deployments?.error))
   return cards

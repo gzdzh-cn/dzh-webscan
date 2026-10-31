@@ -191,7 +191,7 @@ func TestNodeProvisioningConcurrentGenerationAndKeyRotation(t *testing.T) {
 func TestNodeProvisioningSchema26BackupAndDisasterRestore(t *testing.T) {
 	s, f, trust, in := nodeProvisioningFixture(t)
 	ctx := context.Background()
-	mustHistoryExec(t, s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE IF EXISTS v3_deployment_recoveries;DROP TABLE v3_deployment_installations;DROP TABLE v3_node_provisioning;DELETE FROM v3_schema WHERE version>=27`)
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE IF EXISTS v3_deployment_recoveries;DROP TABLE v3_deployment_installations;DROP TABLE v3_node_provisioning;DELETE FROM v3_schema WHERE version>=27`)
 	if err := s.Migrate(ctx); err == nil {
 		t.Fatal("schema 26 upgraded without backup")
 	}

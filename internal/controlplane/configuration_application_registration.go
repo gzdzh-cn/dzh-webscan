@@ -125,6 +125,9 @@ func verifyApplicationRegistrationStateTx(ctx context.Context, tx *sql.Tx, node 
 		return errConfigurationApplication
 	}
 	if b := want.Runtime; b.Snapshot != "" {
+		if err := requireNodeSnapshotAvailableTx(ctx, tx, node, b.Snapshot); err != nil {
+			return err
+		}
 		var raw []byte
 		if err := tx.QueryRowContext(ctx, `SELECT to_jsonb(c) FROM v3_node_configurations c WHERE node=$1 AND id=$2 FOR SHARE`, node, b.Snapshot).Scan(&raw); err != nil {
 			return err

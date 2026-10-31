@@ -50,15 +50,17 @@ func (a *Agent) startMetrics(ctx context.Context) error {
 		if a.Pull == nil || !common.B(c["tls_enabled"]) || file != filepath.Join(a.Data, "pki-identity", "active.pem") {
 			return fmt.Errorf("seeded node identity requires managed pull TLS in the node data directory")
 		}
-		if _, err := nodepki.SeedNodeIdentity(ctx, common.S(c["ca_file"]), seed, filepath.Dir(file), a.Pull.NodeID, time.Now()); err != nil {
+		if _, err := nodepki.SeedNodeIdentityWithRootState(ctx, common.S(c["ca_file"]), seed, filepath.Dir(file), common.S(pc["revocation_state_directory"]), a.Pull.NodeID, time.Now()); err != nil {
 			return fmt.Errorf("node identity initialization or validation failed; existing state preserved")
 		}
 	}
+	var handshakeRoots func(time.Time) (*x509.CertPool, error)
 	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10}
 	srv.Handler = a.metricsHandler(allowed)
 	if a.Pull != nil {
 		var policies []func(*x509.Certificate) error
 		var updater pull.TrustUpdater
+		var rootRefresher pull.RootTrustRefresher
 		var identityTrust *nodepki.FileTrust
 		stateDirectory := common.S(pc["revocation_state_directory"])
 		if common.B(pc["revocation_updates"]) && (stateDirectory == "" || common.S(pc["revocation_file"]) == "" || !common.B(c["tls_enabled"])) {
@@ -78,6 +80,14 @@ func (a *Agent) startMetrics(ctx context.Context) error {
 				receiver, err = nodepki.NewReceiverTrust(common.S(c["ca_file"]), file, stateDirectory, time.Now())
 				if err == nil {
 					trust = receiver.FileTrust
+					handshakeRoots = receiver.HandshakeRootPool
+					rootRefresher = func(ctx context.Context, cert *x509.Certificate, raw []byte) (*agentv1.RefreshRootTrustResponse, error) {
+						receipt, err := receiver.RefreshRoots(ctx, cert, raw, time.Now())
+						if err != nil {
+							return nil, err
+						}
+						return &agentv1.RefreshRootTrustResponse{NodeId: a.Pull.NodeID, SnapshotSha256: receipt.SHA256, Rotation: receipt.Rotation, Phase: receipt.Phase}, nil
+					}
 					updater = func(ctx context.Context, cert *x509.Certificate, raw []byte) (*agentv1.UpdateTrustResponse, error) {
 						receipt, err := receiver.Publish(ctx, cert, raw, time.Now())
 						if err != nil {
@@ -105,9 +115,9 @@ func (a *Agent) startMetrics(ctx context.Context) error {
 		}
 		var renewer pull.IdentityRenewer
 		if common.B(pc["identity_renewal"]) {
-			renewer = &nodeIdentityRenewer{caFile: common.S(c["ca_file"]), identityFile: common.S(c["identity_file"]), node: a.Pull.NodeID, trust: identityTrust}
+			renewer = &nodeIdentityRenewer{caFile: common.S(c["ca_file"]), identityFile: common.S(c["identity_file"]), rootState: common.S(pc["revocation_state_directory"]), node: a.Pull.NodeID, trust: identityTrust}
 		}
-		grpcServer := pull.NewServerWithManagedIdentity(a.Pull, common.SS(pc["collector_identities"]), updater, renewer, policies...)
+		grpcServer := pull.NewServerWithRootTrust(a.Pull, common.SS(pc["collector_identities"]), updater, rootRefresher, renewer, policies...)
 		legacy := srv.Handler
 		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
@@ -142,9 +152,34 @@ func (a *Agent) startMetrics(ctx context.Context) error {
 			l.Close()
 			return fmt.Errorf("invalid metrics CA")
 		}
+		if directory := common.S(pc["revocation_state_directory"]); directory != "" {
+			pool, e = nodepki.RootPoolFromState(common.S(c["ca_file"]), directory, time.Now())
+			if e != nil {
+				l.Close()
+				return fmt.Errorf("invalid metrics root rotation state")
+			}
+		}
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ClientCAs: pool, ClientAuth: tls.RequireAndVerifyClientCert}
+		if directory := common.S(pc["revocation_state_directory"]); directory != "" {
+			tlsConfig.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				clone := tlsConfig.Clone()
+				clone.GetConfigForClient = nil
+				var roots *x509.CertPool
+				var err error
+				if handshakeRoots != nil {
+					roots, err = handshakeRoots(time.Now())
+				} else {
+					roots, err = nodepki.RootPoolFromState(common.S(c["ca_file"]), directory, time.Now())
+				}
+				if err != nil {
+					return nil, err
+				}
+				clone.ClientCAs = roots
+				return clone, nil
+			}
+		}
 		if file := common.S(c["identity_file"]); file != "" {
-			live, err := nodepki.NewLiveIdentity(common.S(c["ca_file"]), file, nodepki.Node, a.Pull.NodeID, time.Now())
+			live, err := nodepki.NewLiveIdentityWithRootState(common.S(c["ca_file"]), file, common.S(pc["revocation_state_directory"]), nodepki.Node, a.Pull.NodeID, time.Now())
 			if err != nil {
 				l.Close()
 				return fmt.Errorf("invalid managed node identity")

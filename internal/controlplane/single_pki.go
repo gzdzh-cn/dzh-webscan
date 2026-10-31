@@ -208,6 +208,10 @@ func singleReplacePrivate(ctx context.Context, path string, raw []byte, allowNew
 }
 
 func maintainSinglePKI(ctx context.Context, s singleInstallSpec, now time.Time) (receipt singlePKIReceipt, result error) {
+	return maintainSinglePKIIdentityMode(ctx, s, now, true)
+}
+
+func maintainSinglePKIIdentityMode(ctx context.Context, s singleInstallSpec, now time.Time, allowRenewal bool) (receipt singlePKIReceipt, result error) {
 	if singlePKIBound(s) != nil {
 		return receipt, errSinglePKI
 	}
@@ -231,6 +235,31 @@ func maintainSinglePKI(ctx context.Context, s singleInstallSpec, now time.Time) 
 		}
 	}()
 	c := s.configuration()
+	rootState, err := nodepki.ReadRootState(c.Collector.CAFile, c.Collector.RevocationStateDirectory, now)
+	if err != nil {
+		return receipt, errSinglePKI
+	}
+	if rootState.Format != 0 {
+		state, err := nodepki.RefreshAuthorizedRootSet(ctx, filepath.Join(s.Root, "authority"), c.Collector.CAFile, c.Collector.RevocationStateDirectory, now)
+		if err != nil {
+			return receipt, errSinglePKI
+		}
+		identity, err := maintainSingleCollectorIdentity(ctx, s, now, allowRenewal)
+		if err != nil {
+			return receipt, errSinglePKI
+		}
+		b, _, err := nodepki.ReadIdentityWithRootState(c.Collector.CAFile, c.Collector.IdentityFile, c.Collector.RevocationStateDirectory, nodepki.Collector, s.Instance, now)
+		defer clear(b.Key)
+		if err != nil {
+			return receipt, errSinglePKI
+		}
+		crl := state.OldCRL
+		if bytes.Equal(b.CA, state.Dual.NewCA) {
+			crl = state.NewCRL
+		}
+		receipt.State, receipt.Identity, receipt.CRLSHA256 = "healthy", identity, digest(crl)
+		return receipt, nil
+	}
 	ca, crl, _, err := nodepki.RefreshCRL(ctx, filepath.Join(s.Root, "authority"), now, 12*time.Hour, 24*time.Hour)
 	if err != nil {
 		return receipt, errSinglePKI
@@ -252,7 +281,7 @@ func maintainSinglePKI(ctx context.Context, s singleInstallSpec, now time.Time) 
 			return receipt, err
 		}
 	}
-	identity, err := nodepki.MaintainIdentity(ctx, filepath.Join(s.Root, "authority"), c.Collector.CAFile, c.Collector.IdentityFile, nodepki.Collector, s.Instance, now, 7*24*time.Hour, 30*24*time.Hour)
+	identity, err := maintainSingleCollectorIdentity(ctx, s, now, allowRenewal)
 	if err != nil {
 		return receipt, errSinglePKI
 	}
@@ -261,6 +290,47 @@ func maintainSinglePKI(ctx context.Context, s singleInstallSpec, now time.Time) 
 	}
 	receipt.State, receipt.Identity, receipt.CRLSHA256 = "healthy", identity, digest(crl)
 	return receipt, nil
+}
+
+// If the database is starting or a root task freezes this identity, refresh
+// revocation evidence but never replace the task's parent certificate. A live
+// installed identity can still bring up the stack without a PG boot cycle.
+func maintainSingleCollectorIdentity(ctx context.Context, s singleInstallSpec, now time.Time, allowRenewal bool) (nodepki.IdentityRecord, error) {
+	c := s.configuration()
+	if allowRenewal {
+		return nodepki.MaintainIdentityWithRootState(ctx, filepath.Join(s.Root, "authority"), c.Collector.CAFile, c.Collector.IdentityFile, c.Collector.RevocationStateDirectory, nodepki.Collector, s.Instance, now, 7*24*time.Hour, 30*24*time.Hour)
+	}
+	b, record, err := nodepki.ReadIdentityWithRootState(c.Collector.CAFile, c.Collector.IdentityFile, c.Collector.RevocationStateDirectory, nodepki.Collector, s.Instance, now)
+	defer clear(b.Key)
+	if err != nil {
+		return nodepki.IdentityRecord{}, err
+	}
+	leaf, err := provisioningCertificate(b.Certificate)
+	if err != nil {
+		return nodepki.IdentityRecord{}, err
+	}
+	// ReadRootState authenticates both issuers and their current CRLs. The
+	// ordinary file trust applies only before any administrator root rollout.
+	roots, err := nodepki.ReadRootState(c.Collector.CAFile, c.Collector.RevocationStateDirectory, now)
+	if err != nil {
+		return nodepki.IdentityRecord{}, err
+	}
+	if roots.Format != 0 {
+		anchor, err := readTrustData(c.Collector.CAFile, true, 64<<10)
+		if err != nil {
+			return nodepki.IdentityRecord{}, err
+		}
+		policy, err := nodepki.NewRootSet(anchor, roots, now)
+		if err != nil || policy.Verify(leaf, nodepki.Collector, s.Instance, now) != nil {
+			return nodepki.IdentityRecord{}, errSinglePKI
+		}
+	} else {
+		trust, err := nodepki.NewFileTrust(c.Collector.CAFile, c.Collector.RevocationFile, now)
+		if err != nil || trust.Verify(leaf, nodepki.Collector, s.Instance, now) != nil {
+			return nodepki.IdentityRecord{}, errSinglePKI
+		}
+	}
+	return record, nil
 }
 
 func verifySinglePKI(s singleInstallSpec, now time.Time) error {
@@ -272,23 +342,31 @@ func verifySinglePKI(s singleInstallSpec, now time.Time) error {
 	if err != nil {
 		return errSinglePKI
 	}
-	issuerKey, err := readTrustData(filepath.Join(s.Root, "authority", "ca.key"), true, 64<<10)
-	if err != nil {
-		return errSinglePKI
-	}
-	defer clear(issuerKey)
-	if _, err := nodepki.ParseAuthority(issuerCA, issuerKey, now); err != nil {
-		return errSinglePKI
-	}
 	pinned, err := readTrustData(c.Collector.CAFile, true, 64<<10)
 	if err != nil || !bytes.Equal(pinned, issuerCA) {
 		return errSinglePKI
 	}
-	b, record, err := nodepki.ReadIdentity(c.Collector.CAFile, c.Collector.IdentityFile, nodepki.Collector, s.Instance, now)
+	b, record, err := nodepki.ReadIdentityWithRootState(c.Collector.CAFile, c.Collector.IdentityFile, c.Collector.RevocationStateDirectory, nodepki.Collector, s.Instance, now)
 	if err != nil {
 		return errSinglePKI
 	}
 	defer clear(b.Key)
+	issuer, err := nodepki.RootFingerprint(b.CA)
+	if err != nil {
+		return errSinglePKI
+	}
+	directory, err := nodepki.IdentityAuthority(filepath.Join(s.Root, "authority"), c.Collector.CAFile, c.Collector.RevocationStateDirectory, issuer, now)
+	if err != nil {
+		return errSinglePKI
+	}
+	issuerKey, err := readTrustData(filepath.Join(directory, "ca.key"), true, 64<<10)
+	if err != nil {
+		return errSinglePKI
+	}
+	defer clear(issuerKey)
+	if _, err := nodepki.ParseAuthority(b.CA, issuerKey, now); err != nil {
+		return errSinglePKI
+	}
 	// Verification must not initialize a deleted trust directory as though this
 	// were a fresh installation. Only initialization may establish the floor.
 	if _, err := readTrustData(filepath.Join(c.Collector.RevocationStateDirectory, "ca.crl"), true, nodepki.MaxCRLBytes); err != nil {
@@ -326,7 +404,7 @@ func singlePKICommand(ctx context.Context, o Options, out io.Writer) error {
 	if err != nil || j.Step < 2 {
 		return errSinglePKI
 	}
-	receipt, err := maintainSinglePKICycle(ctx, manifest.Spec, time.Now().UTC(), j.Step >= 3, maintainSingleNodeRenewals)
+	receipt, err := maintainSinglePKIHostCycle(ctx, manifest.Spec, time.Now().UTC(), j.Step >= 3)
 	if encode := json.NewEncoder(out).Encode(receipt); encode != nil {
 		return encode
 	}
@@ -338,6 +416,60 @@ func singlePKICommand(ctx context.Context, o Options, out io.Writer) error {
 // Record that independent result without creating a circular boot dependency.
 func maintainSinglePKICycle(ctx context.Context, spec singleInstallSpec, now time.Time, databaseInitialized bool, renew func(context.Context, singleInstallSpec) (nodeRenewalSigningResult, error)) (singlePKIReceipt, error) {
 	receipt, err := maintainSinglePKI(ctx, spec, now)
+	return finishSinglePKICycle(ctx, spec, receipt, err, databaseInitialized, renew)
+}
+
+// The actual installed timer serializes collector replacement against root
+// task admission. A pending task continues to freeze its exact parent between
+// invocations, not merely while its runner owns a short lease.
+func maintainSinglePKIHostCycle(ctx context.Context, spec singleInstallSpec, now time.Time, initialized bool) (singlePKIReceipt, error) {
+	if !initialized {
+		return maintainSinglePKICycle(ctx, spec, now, false, maintainSingleNodeRenewals)
+	}
+	guard, cancel := context.WithTimeout(ctx, 3*time.Second)
+	store, err := Open(guard, spec.configuration())
+	if err == nil {
+		defer store.DB.Close()
+		var version int
+		version, err = currentSchema(guard, store.DB)
+		if err == nil && version != SchemaVersion {
+			err = errSinglePKI
+		}
+	}
+	var release func()
+	if err == nil {
+		tx, begin := store.DB.BeginTx(ctx, nil)
+		err = begin
+		if err == nil {
+			release = func() { _ = tx.Rollback() }
+			err = lockConfigurationOperationTx(guard, tx, false)
+		}
+	}
+	cancel()
+	if release != nil {
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+	}
+	if err == nil {
+		receipt, localErr := maintainSinglePKIIdentityMode(ctx, spec, now, true)
+		release()
+		release = nil
+		return finishSinglePKICycle(ctx, spec, receipt, localErr, true, maintainSingleNodeRenewals)
+	}
+	if release != nil {
+		release()
+		release = nil
+	}
+	receipt, localErr := maintainSinglePKIIdentityMode(ctx, spec, now, false)
+	return finishSinglePKICycle(ctx, spec, receipt, localErr, true, func(context.Context, singleInstallSpec) (nodeRenewalSigningResult, error) {
+		return nodeRenewalSigningResult{}, errSinglePKI
+	})
+}
+
+func finishSinglePKICycle(ctx context.Context, spec singleInstallSpec, receipt singlePKIReceipt, err error, databaseInitialized bool, renew func(context.Context, singleInstallSpec) (nodeRenewalSigningResult, error)) (singlePKIReceipt, error) {
 	// Initial trust bootstrapping precedes PostgreSQL schema initialization.
 	// Only the installed host maintenance command, after that checkpoint, may
 	// open the database and process public node renewal jobs with the CA key.
@@ -362,7 +494,7 @@ func maintainSinglePKICycle(ctx context.Context, spec singleInstallSpec, now tim
 	return receipt, err
 }
 
-func maintainSingleNodeRenewals(ctx context.Context, s singleInstallSpec) (nodeRenewalSigningResult, error) {
+func maintainSingleNodeRenewals(ctx context.Context, s singleInstallSpec) (result nodeRenewalSigningResult, resultErr error) {
 	var empty nodeRenewalSigningResult
 	if s.Format < 2 || singlePKIBound(s) != nil {
 		return empty, errSinglePKI
@@ -380,5 +512,12 @@ func maintainSingleNodeRenewals(ctx context.Context, s singleInstallSpec) (nodeR
 	if version, err := currentSchema(ctx, store.DB); err != nil || version != SchemaVersion {
 		return empty, errSinglePKI // Never silently migrate from a timer.
 	}
+	defer func() {
+		status, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		if recordSinglePKIMaintenance(status, store, s, result, resultErr) != nil {
+			resultErr = errSinglePKI
+		}
+	}()
 	return store.processNodeRenewalQueue(ctx, c, s.Instance, 500)
 }

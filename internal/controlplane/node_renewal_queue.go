@@ -102,7 +102,7 @@ func validateRenewalJobTx(ctx context.Context, tx *sql.Tx, n Node, raw []byte, n
 	}
 	var known []byte
 	err = tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3
- UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 LIMIT 1`, r.Node, r.AuthoritySHA256, old.SerialNumber.Text(16)).Scan(&known)
+ UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_root_identity_issuances WHERE role='node' AND subject=$1 AND authority=$2 AND serial=$3 LIMIT 1`, r.Node, r.AuthoritySHA256, old.SerialNumber.Text(16)).Scan(&known)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nodepki.NodeRenewalRequest{}, errNodeIdentity

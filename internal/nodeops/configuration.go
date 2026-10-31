@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
@@ -37,12 +38,19 @@ func (w *LocalRuntime) configurationMaterial(ctx context.Context, r Request) (no
 		return nodeconfig.Material{}, err
 	}
 	m, err := nodeconfig.Decode(raw, time.Now())
+	rootState, rootErr := w.installedRootState(time.Now())
+	if rootErr != nil {
+		return nodeconfig.Material{}, rootErr
+	}
+	if rootState.Format != 0 {
+		m, err = nodeconfig.DecodeManagedRootRuntime(raw, time.Now(), rootState)
+	}
 	if err != nil {
 		// Only a node with an existing durable trust floor can inspect an
 		// expired immutable managed seed. Its actual live identity is required
 		// below; fresh installation and legacy split-key material stay strict.
 		floor, floorErr := readPrivate(filepath.Join(w.managedDataDirectory(), "pki-trust", "ca.crl"), nodepki.MaxCRLBytes)
-		if floorErr == nil {
+		if floorErr == nil && rootState.Format == 0 {
 			m, err = nodeconfig.DecodeManagedRuntime(raw, time.Now(), floor)
 		}
 	}
@@ -65,6 +73,15 @@ func (w *LocalRuntime) managedDataDirectory() string {
 	return agentDataDirectory
 }
 
+func (w *LocalRuntime) installedRootState(now time.Time) (nodepki.RootSetSnapshot, error) {
+	data := w.managedDataDirectory()
+	floor := filepath.Join(data, "pki-trust")
+	if _, err := os.Lstat(filepath.Join(floor, "root-rotation")); os.IsNotExist(err) {
+		return nodepki.RootSetSnapshot{}, nil
+	}
+	return nodepki.ReadRootState(filepath.Join(data, "pki-identity", "ca.crt"), floor, now)
+}
+
 // Read-only pre-stop validation. Renewal may replace a leaf between phases;
 // pin the authority and node, not an obsolete transient certificate digest.
 // Never initialize missing state or copy a key out of the Agent directory.
@@ -83,6 +100,32 @@ func (w *LocalRuntime) verifyManagedIdentity(m nodeconfig.Material, now time.Tim
 		if err != nil || !bytes.Equal(bytes.TrimSpace(ca), bytes.TrimSpace(m.CA)) {
 			return fail
 		}
+	}
+	rootState, err := w.installedRootState(now)
+	if err != nil {
+		return fail
+	}
+	if rootState.Format != 0 {
+		// Read-only pre-stop proof under the current root authorization. Never
+		// lower this floor to the immutable installation's original CRL.
+		trust, err := nodepki.NewPersistentFileTrust(filepath.Join(identity, "ca.crt"), filepath.Join(floor, "ca.crl"), floor, now)
+		if err != nil {
+			return fail
+		}
+		b, _, err := nodepki.ReadIdentityWithRootState(filepath.Join(identity, "ca.crt"), filepath.Join(identity, "active.pem"), floor, nodepki.Node, m.Node, now)
+		defer clear(b.Key)
+		if err != nil {
+			return fail
+		}
+		block, _ := pem.Decode(b.Certificate)
+		if block == nil {
+			return fail
+		}
+		leaf, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || leaf.VerifyHostname(m.ServerName) != nil || trust.Verify(leaf, nodepki.Node, m.Node, now) != nil {
+			return fail
+		}
+		return nil
 	}
 	previous, err := readPrivate(filepath.Join(floor, "ca.crl"), nodepki.MaxCRLBytes)
 	if err != nil {

@@ -279,7 +279,7 @@ func TestConfigurationApplicationRegistrationRejectsDriftAndRevokedAuthority(t *
 func TestConfigurationApplicationRegistrationSchema25AndPrivateReceipt(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	mustHistoryExec(t, s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE IF EXISTS v3_deployment_recoveries;DROP TABLE IF EXISTS v3_deployment_installations;DROP TABLE IF EXISTS v3_node_provisioning;DROP TABLE v3_configuration_application_registrations;DELETE FROM v3_schema WHERE version>=26`)
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE IF EXISTS v3_deployment_recoveries;DROP TABLE IF EXISTS v3_deployment_installations;DROP TABLE IF EXISTS v3_node_provisioning;DROP TABLE v3_configuration_application_registrations;DELETE FROM v3_schema WHERE version>=26`)
 	if err := s.Migrate(ctx); err == nil {
 		t.Fatal("missing backup allowed")
 	}

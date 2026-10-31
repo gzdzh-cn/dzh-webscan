@@ -282,7 +282,7 @@ func TestNodeIdentityRecoveryBackupRestoreAndMigration(t *testing.T) {
 	}
 	stale, err := target.signNodeIdentityRecovery(ctx, f.c, f.t.vault, f.lease, f.job.ID)
 	requireEmptyRenewalFailure(t, stale, err)
-	mustHistoryExec(t, f.s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE v3_node_name_prunings;DROP TABLE v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DROP TABLE v3_node_identity_recoveries;DELETE FROM v3_schema WHERE version>=32`)
+	mustHistoryExec(t, f.s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE v3_node_name_prunings;DROP TABLE v3_node_name_changes;ALTER TABLE v3_node_certificate_renewals DROP COLUMN request_kind;DROP TABLE v3_node_identity_recoveries;DELETE FROM v3_schema WHERE version>=32`)
 	if err := f.s.Migrate(ctx); err == nil {
 		t.Fatal("schema 31 advanced without consistent backup")
 	}

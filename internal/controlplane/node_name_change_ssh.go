@@ -67,11 +67,7 @@ func (w *sshNodeNameChange) currentCRL(ctx context.Context, j nodeNameChangeJob)
 	if err != nil || digest(root.Raw) != j.AuthoritySHA256 {
 		return nil, errNodeNameChange
 	}
-	configured, err := readTrustData(w.config.Collector.CAFile, false, 64<<10)
-	if err != nil || !bytes.Equal(bytes.TrimSpace(ca), bytes.TrimSpace(configured)) {
-		return nil, errNodeNameChange
-	}
-	crl, err := readTrustData(w.config.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	crl, err := provisioningIssuerCRL(w.config, ca, time.Now())
 	if err != nil || nodepki.ValidateCRLAdvance(ca, floor, crl, time.Now()) != nil {
 		return nil, errNodeNameChange
 	}

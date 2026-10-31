@@ -54,6 +54,7 @@ function componentMetrics(key: string): [string, string][] {
     case 'database': return [['业务数据库', 'PostgreSQL'], ['业务表与索引', s?.services?.data ? `${(s.services.data.database_bytes / 1048576).toFixed(2)} MiB` : '未知']]
     case 'feishu': case 'email': { const d = s?.notifications?.data?.[key]; return [['通道配置', !d ? '未知' : d.enabled ? '开启' : '关闭'], ['待投递 / 重试', `${number(d?.pending)} / ${number(d?.retrying)}`]] }
     case 'deployments': return [['正在执行', number(s?.deployments?.data?.running)], ['需要恢复', number(s?.deployments?.data?.recovery_required)]]
+    case 'certificates': return [['采集器到期', timeText(s?.certificates?.data?.maintenance?.collector_expires_at)], ['CA 到期', timeText(s?.certificates?.data?.maintenance?.ca_expires_at)]]
     default: return []
   }
 }

@@ -33,12 +33,12 @@ async function mount(client: ControlV3) {
 beforeEach(() => { vi.useFakeTimers(); Object.defineProperty(document, 'hidden', { configurable: true, value: false }); host = document.createElement('div'); document.body.append(host) })
 afterEach(async () => { app?.unmount(); app = undefined; await settle(); host.remove(); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks() })
 
-it('shows six summaries, thirteen evidence based components and real zero without fake missing values', async () => {
+it('shows six summaries, fourteen evidence based components and real zero without fake missing values', async () => {
   const client = new ControlV3(); vi.spyOn(client, 'dashboard').mockResolvedValue(fixture())
   const events = vi.spyOn(client, 'events')
   await mount(client)
   expect(host.querySelectorAll('.v3-summary-card')).toHaveLength(6)
-  expect(host.querySelectorAll('.v3-component-heading')).toHaveLength(13)
+  expect(host.querySelectorAll('.v3-component-heading')).toHaveLength(14)
   expect(host.textContent).toContain('v3.0.0-local-test')
   expect(host.textContent).toContain('0.0%')
   expect(host.textContent).toContain('当前没有异常')
@@ -49,6 +49,29 @@ it('shows six summaries, thirteen evidence based components and real zero withou
   expect(cards.find(card => card.key === 'files')?.status).toBe('异常')
   expect(cards.find(card => card.key === 'feishu')?.status).toBe('已停用')
   expect(cards.find(card => card.key === 'email')?.status).toBe('未知')
+})
+
+it('requires fresh verified certificate expiry and shows maintenance failure without guessing health', () => {
+  vi.setSystemTime(new Date('2026-10-31T00:00:00Z'))
+  const value = fixture()
+  const status = () => dashboardCards(value).find(card => card.key === 'certificates')
+  expect(status()?.status).toBe('未知')
+  const pki = { heartbeat: '2026-10-31T00:00:00Z', fresh: true, has_error: false, reason: '', collector_expires_at: '2026-11-30T00:00:00Z', ca_expires_at: '2027-10-31T00:00:00Z' }
+  value.summary.sections!.certificates = section({ maintenance: pki })
+  expect(status()?.status).toBe('正常')
+  pki.collector_expires_at = '2026-11-03T00:00:00Z'
+  expect(status()?.status).toBe('维护中')
+  pki.collector_expires_at = '2026-10-30T00:00:00Z'
+  expect(status()?.status).toBe('异常')
+  pki.fresh = false
+  expect(status()?.status).toBe('未知')
+  pki.fresh = true; pki.has_error = true; pki.reason = '节点证书维护失败'
+  expect(status()?.status).toBe('异常')
+  expect(status()?.reason).toBe('节点证书维护失败')
+  pki.collector_expires_at = 'invalid'
+  expect(status()?.status).toBe('未知')
+  value.summary.sections!.certificates!.error = '读取失败'
+  expect(status()?.status).toBe('未知')
 })
 
 it('keeps unknown state before the first result and on a failed empty observation', async () => {
@@ -64,6 +87,29 @@ it('keeps unknown state before the first result and on a failed empty observatio
   expect(host.textContent).toContain('上次观测没有异常，当前状态待确认')
   expect(host.textContent).not.toContain('当前没有异常')
   expect(host.textContent).toContain('18')
+})
+
+it('separates captured backups from verified recovery and never infers backup health from cleanup', () => {
+  vi.setSystemTime(new Date('2026-10-31T00:00:00Z'))
+  const value = fixture(), sections = value.summary.sections!
+  const card = () => dashboardCards(value).find(item => item.key === 'cleanup')!
+  sections.services!.data!.roles.retention = { heartbeat: '2026-10-31T00:00:00Z', healthy: true, has_error: false }
+  expect(card().status).toBe('未知')
+  expect(card().reason).toContain('尚未配置完整备份')
+  const backup = { status: 'captured', created_at: '2026-10-31T00:00:00Z', updated_at: '2026-10-31T00:00:00Z', files: 53, bytes: 1000, restore_validated: false, has_error: false }
+  sections.full_backups = section({ policy: { enabled: true, keep: 7 }, latest: backup })
+  expect(card().status).toBe('未知')
+  expect(card().reason).toContain('尚无完整恢复验收回执')
+  backup.restore_validated = true
+  expect(card().status).toBe('正常')
+  backup.updated_at = '2026-10-28T00:00:00Z'
+  expect(card().status).toBe('未知')
+  backup.updated_at = '2026-11-01T00:00:00Z'
+  expect(card().status).toBe('未知')
+  backup.status = 'failed'; backup.has_error = true
+  expect(card().status).toBe('异常')
+  sections.full_backups.error = '读取失败'
+  expect(card().status).toBe('未知')
 })
 
 it('waits a whole interval after completion and never overlaps reads', async () => {

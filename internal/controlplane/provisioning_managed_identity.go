@@ -23,19 +23,23 @@ type provisioningReader interface {
 func managedNodeAuthority(ctx context.Context, q provisioningReader, c Config, n Node) ([]byte, bool, error) {
 	var certificate []byte
 	var authority, sha string
-	err := q.QueryRowContext(ctx, `SELECT authority,certificate,certificate_sha256 FROM v3_node_certificate_renewals WHERE node=$1 ORDER BY not_after DESC,created_at DESC,parent_sha256 DESC LIMIT 1`, n.ID).Scan(&authority, &certificate, &sha)
+	err := q.QueryRowContext(ctx, `SELECT authority,certificate,certificate_sha256 FROM (
+	 SELECT authority,certificate,certificate_sha256,not_after,created_at,parent_sha256 FROM v3_node_certificate_renewals WHERE node=$1
+	 UNION ALL SELECT authority,certificate,certificate_sha256,not_after,created_at,parent_sha256 FROM v3_root_identity_issuances WHERE role='node' AND subject=$1
+	) identities ORDER BY not_after DESC,created_at DESC,parent_sha256 DESC LIMIT 1`, n.ID).Scan(&authority, &certificate, &sha)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err
 	}
-	ca, err := readTrustData(c.Collector.CAFile, false, 64<<10)
+	var ca []byte
+	err = q.QueryRowContext(ctx, `SELECT certificate FROM v3_pki_authorities WHERE sha256=$1`, authority).Scan(&ca)
 	root, parseErr := provisioningCertificate(ca)
 	if err != nil || parseErr != nil || digest(root.Raw) != authority {
 		return nil, true, errNodeIdentity
 	}
-	crl, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	crl, err := provisioningIssuerCRL(c, ca, time.Now())
 	if err != nil {
 		return nil, true, errNodeIdentity
 	}
@@ -47,7 +51,17 @@ func managedNodeAuthority(ctx context.Context, q provisioningReader, c Config, n
 	if err != nil || trustErr != nil || digest(cert.Raw) != sha || cert.VerifyHostname(n.ServerName) != nil || trust.Verify(cert, nodepki.Node, n.ID, time.Now()) != nil {
 		return nil, true, errNodeIdentity
 	}
-	return ca, true, nil
+	// The oldest immutable seed pins this node's installation anchor. Existing
+	// rolled nodes keep their original anchor/root history; nodes installed
+	// after finalization can pin the successor directly using ordinary format 2.
+	var anchor []byte
+	if err := q.QueryRowContext(ctx, `SELECT a.certificate FROM v3_node_certificates n JOIN v3_pki_authorities a ON a.sha256=n.authority WHERE n.node=$1 ORDER BY n.created_at,n.id LIMIT 1`, n.ID).Scan(&anchor); err != nil {
+		return nil, true, errNodeIdentity
+	}
+	if _, _, err := provisioningConfigurationTrust(c, anchor, true, time.Now()); err != nil {
+		return nil, true, err
+	}
+	return anchor, true, nil
 }
 
 func provisioningNodeIdentity(ctx context.Context, q provisioningReader, c Config, v *Vault, id string, n Node, allowManaged bool) (nodepki.Bundle, bool, error) {

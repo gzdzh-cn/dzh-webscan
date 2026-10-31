@@ -19,12 +19,36 @@ var errTrustDistribution = errors.New("节点吊销列表下发或确认失败")
 // reconnect keeps its durable remote floor; policy failures force a resend.
 type nodeTrustSync struct {
 	sha         string
+	rootSHA     string
 	unsupported bool
 	failed      bool
 }
 
 func (s *nodeTrustSync) sync(ctx context.Context, trust *nodepki.FileTrust, node string, client agentv1.AgentServiceClient) error {
-	if trust == nil || s.unsupported {
+	if trust == nil {
+		return nil
+	}
+	rootRaw, rootReceipt, err := trust.RootSnapshot(time.Now(), s.rootSHA)
+	if err != nil {
+		return errTrustDistribution
+	}
+	if rootReceipt.SHA256 != "" {
+		if len(rootRaw) == 0 {
+			return nil
+		}
+		if len(rootRaw) > nodepki.MaxRootSetBytes {
+			return errTrustDistribution
+		}
+		r, err := client.RefreshRootTrust(ctx, &agentv1.RefreshRootTrustRequest{NodeId: node, SnapshotJson: rootRaw})
+		// An old Agent cannot safely fall back to a single-CA CRL during a
+		// rotation. Explicit installation/upgrade must precede participation.
+		if err != nil || r == nil || r.NodeId != node || r.SnapshotSha256 != rootReceipt.SHA256 || r.Rotation != rootReceipt.Rotation || r.Phase != rootReceipt.Phase {
+			return errTrustDistribution
+		}
+		s.rootSHA = rootReceipt.SHA256
+		return nil
+	}
+	if s.unsupported {
 		return nil
 	}
 	raw, sha, err := trust.Snapshot(time.Now(), s.sha)
@@ -62,5 +86,6 @@ func (s *nodeTrustSync) sync(ctx context.Context, trust *nodepki.FileTrust, node
 func (s *nodeTrustSync) invalidate(err error) {
 	if status.Code(err) == codes.PermissionDenied || status.Code(err) == codes.Unauthenticated {
 		s.sha = ""
+		s.rootSHA = ""
 	}
 }

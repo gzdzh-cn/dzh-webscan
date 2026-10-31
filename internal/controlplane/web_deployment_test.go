@@ -64,9 +64,9 @@ type webDeploymentFixture struct {
 	fingerprint string
 }
 
-func webDeployFixture(t *testing.T) webDeploymentFixture {
+func webDeployFixture(t *testing.T, authorityStart ...time.Time) webDeploymentFixture {
 	t.Helper()
-	f := localProvisioningFixture(t)
+	f := localProvisioningFixture(t, authorityStart...)
 	enableRegistryIssuer(t, &f)
 	f.c.Executor.RulesFile = f.in.RulesFile
 	mustHistoryExec(t, f.s.DB, "UPDATE v3_nodes SET endpoint='127.0.0.1:19100' WHERE id=$1", f.in.Node)

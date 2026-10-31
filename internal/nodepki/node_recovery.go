@@ -180,11 +180,15 @@ func ValidateNodeRecoveryRequest(ca, crl []byte, r NodeRecoveryRequest, expected
 // signed CRL must additionally be advanced against the node's durable floor by
 // that helper. No private key leaves this function or the node's state files.
 func PrepareNodeRecovery(ctx context.Context, caFile, identityFile string, crl []byte, intent NodeRecoveryIntent, now time.Time) (NodeRecoveryRequest, error) {
+	return PrepareNodeRecoveryWithRootState(ctx, caFile, identityFile, "", crl, intent, now)
+}
+
+func PrepareNodeRecoveryWithRootState(ctx context.Context, caFile, identityFile, directory string, crl []byte, intent NodeRecoveryIntent, now time.Time) (NodeRecoveryRequest, error) {
 	var empty NodeRecoveryRequest
 	if !validRecoveryIntent(intent, now) {
 		return empty, ErrIdentity
 	}
-	b, record, err := readIdentity(caFile, identityFile, Node, intent.Node, now, true)
+	b, record, err := readIdentityWithRootState(caFile, identityFile, directory, Node, intent.Node, now, true)
 	defer clear(b.Key)
 	if err != nil || record.CertificateSHA256 != intent.CertificateSHA256 {
 		return empty, ErrIdentity
@@ -200,7 +204,7 @@ func PrepareNodeRecovery(ctx context.Context, caFile, identityFile string, crl [
 	if err = recoveryParentTrust(b.CA, crl, old, now); err != nil {
 		return empty, err
 	}
-	renewal, err := prepareNodeRenewal(ctx, caFile, identityFile, intent.Node, intent.CertificateSHA256, now, true)
+	renewal, err := prepareNodeRenewalWithRootState(ctx, caFile, identityFile, directory, intent.Node, intent.CertificateSHA256, now, true)
 	if err != nil || !bytes.Equal(renewal.Certificate, b.Certificate) {
 		return empty, ErrIdentity
 	}
@@ -248,50 +252,9 @@ func SignNodeRecoveryRegistered(ctx context.Context, directory string, r NodeRec
 // Replaying the same valid recovery is safe, but cannot lower a newer floor or
 // remove revocations even when the previously accepted CRL has expired.
 func PublishNodeRecoveryTrust(ctx context.Context, caFile, directory string, raw []byte, r NodeRecoveryRequest, expected NodeRecoveryIntent, now time.Time) (CRLReceipt, error) {
-	var empty CRLReceipt
-	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || secureDirectory(directory) != nil {
-		return empty, ErrRevocation
-	}
-	ca, err := readTrustFile(caFile, 64<<10)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	if err := ValidateNodeRecoveryRequest(ca, raw, r, expected, now); err != nil {
-		return empty, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	lock, err := authorityLock(ctx, directory)
-	if err != nil {
-		return empty, err
-	}
-	defer lock.Close()
-	pinned, err := readIdentityFile(filepath.Join(directory, "ca.crt"), 64<<10, true)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	root, err := parseCertificate(ca)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	previous, err := parseCertificate(pinned)
-	if err != nil || !bytes.Equal(previous.Raw, root.Raw) {
-		return empty, ErrIdentity
-	}
-	floor, err := readIdentityFile(filepath.Join(directory, "ca.crl"), MaxCRLBytes, true)
-	if err != nil || ValidateCRLAdvance(ca, floor, raw, now) != nil {
-		return empty, ErrRevocation
-	}
-	if err := ctx.Err(); err != nil {
-		return empty, err
-	}
-	if !bytes.Equal(floor, raw) {
-		if err := replaceCRL(directory, raw); err != nil {
-			return empty, err
-		}
-	}
-	list, _ := parseCRL(raw, root) // signed, current and monotonic above
-	return CRLReceipt{publicSHA(raw), list.Number.Text(10), list.NextUpdate}, nil
+	return publishNodeNameMaintenanceTrust(ctx, caFile, directory, expected.AuthoritySHA256, raw, expected.ExpiresAt, now, func(ca []byte) error {
+		return ValidateNodeRecoveryRequest(ca, raw, r, expected, now)
+	})
 }
 
 // ActivateNodeRecovery rechecks the intent and CURRENT durable trust policy,
@@ -314,25 +277,9 @@ func ActivateNodeRecovery(ctx context.Context, caFile, identityFile, trustDirect
 		return empty, err
 	}
 	defer lock.Close()
-	ca, err := readTrustFile(caFile, 64<<10)
+	ca, crl, err := maintenanceIssuerMaterial(caFile, trustDirectory, expected.AuthoritySHA256, now)
 	if err != nil {
-		return empty, ErrIdentity
-	}
-	pinned, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crt"), 64<<10, true)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	root, err := parseCertificate(ca)
-	if err != nil {
-		return empty, ErrIdentity
-	}
-	prior, err := parseCertificate(pinned)
-	if err != nil || !bytes.Equal(root.Raw, prior.Raw) {
-		return empty, ErrIdentity
-	}
-	crl, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crl"), MaxCRLBytes, true)
-	if err != nil {
-		return empty, ErrRevocation
+		return empty, err
 	}
 	if err := ValidateNodeRecoveryRequest(ca, crl, r, expected, now); err != nil {
 		return empty, err
@@ -341,8 +288,10 @@ func ActivateNodeRecovery(ctx context.Context, caFile, identityFile, trustDirect
 	if err != nil {
 		return empty, err
 	}
-	return ActivateNodeRenewal(ctx, caFile, identityFile, expected.Node, expected.CertificateSHA256, r.Renewal.SHA256(), certificate, now, func(cert *x509.Certificate) error {
+	return activateNodeRenewalMaterial(ctx, identityFile, expected.Node, expected.CertificateSHA256, r.Renewal.SHA256(), ca, certificate, now, func(cert *x509.Certificate) error {
 		return trust.Verify(cert, Node, expected.Node, now)
+	}, func(b Bundle) (IdentityRecord, error) {
+		return publishIdentityMaterial(ctx, identityFile, "", Node, expected.Node, expected.CertificateSHA256, ca, nil, b, now)
 	})
 }
 
@@ -363,20 +312,12 @@ func WithRecoveredNodeIdentity(ctx context.Context, caFile, identityFile, trustD
 		return err
 	}
 	defer lock.Close()
-	ca, err := readTrustFile(caFile, 64<<10)
-	if err != nil {
-		return ErrIdentity
-	}
-	pinned, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crt"), 64<<10, true)
-	if err != nil || !bytes.Equal(bytes.TrimSpace(ca), bytes.TrimSpace(pinned)) {
-		return ErrIdentity
-	}
-	crl, err := readIdentityFile(filepath.Join(trustDirectory, "ca.crl"), MaxCRLBytes, true)
+	ca, crl, err := maintenanceIssuerMaterial(caFile, trustDirectory, expected.AuthoritySHA256, now)
 	if err != nil || ValidateNodeRecoveryRequest(ca, crl, r, expected, now) != nil {
 		return ErrRevocation
 	}
 	return WithIdentitySnapshot(ctx, filepath.Dir(identityFile), func() error {
-		b, record, err := ReadIdentity(caFile, identityFile, Node, expected.Node, now)
+		b, record, err := ReadIdentityWithRootState(caFile, identityFile, trustDirectory, Node, expected.Node, now)
 		defer clear(b.Key)
 		if err != nil {
 			return ErrIdentity

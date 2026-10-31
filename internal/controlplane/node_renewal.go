@@ -76,6 +76,16 @@ func (s *Store) signNodeCertificateAuthorized(ctx context.Context, c Config, l L
 	if !c.NodePKI.Enabled || c.NodePKI.validate() != nil || !identifier.MatchString(r.Node) || !identifier.MatchString(in.Snapshot) || in.RuntimeEpoch < 1 || in.LifetimeHours < 1 || in.LifetimeHours > 90*24 || requestSHA == "" || l.Resource != nodeRenewalResource(r.Node) {
 		return empty, errNodeIdentity
 	}
+	// AuthorityDirectory remains the original immutable installation anchor.
+	// An existing successor leaf must use its already authorized signing key;
+	// an ordinary request cannot choose a new CA or reactivate a retired one.
+	if c.Collector.RevocationStateDirectory != "" {
+		directory, err := nodepki.IdentityAuthority(c.NodePKI.AuthorityDirectory, c.Collector.CAFile, c.Collector.RevocationStateDirectory, r.AuthoritySHA256, time.Now())
+		if err != nil {
+			return empty, errNodeIdentity
+		}
+		c.NodePKI.AuthorityDirectory = directory
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -159,7 +169,7 @@ func (s *Store) signNodeCertificateAuthorized(ctx context.Context, c Config, l L
 	// initial issuance or an earlier committed local-key renewal for this node.
 	var known []byte
 	err = tx.QueryRowContext(ctx, `SELECT certificate FROM v3_node_certificates WHERE node=$1 AND authority=$2 AND serial=$3
- UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 LIMIT 1`, r.Node, r.AuthoritySHA256, old.SerialNumber.Text(16)).Scan(&known)
+ UNION ALL SELECT certificate FROM v3_node_certificate_renewals WHERE node=$1 AND authority=$2 AND serial=$3 UNION ALL SELECT certificate FROM v3_root_identity_issuances WHERE role='node' AND subject=$1 AND authority=$2 AND serial=$3 LIMIT 1`, r.Node, r.AuthoritySHA256, old.SerialNumber.Text(16)).Scan(&known)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return empty, errNodeIdentity

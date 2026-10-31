@@ -29,6 +29,8 @@ type FileTrust struct {
 	ca             []byte
 	snapshot       []byte
 	snapshotSHA    string
+	rootSet        *RootSet
+	rootReceipt    RootSetReceipt
 }
 
 func NewFileTrust(caFile, crlFile string, now time.Time) (*FileTrust, error) {
@@ -57,6 +59,26 @@ func (p *FileTrust) setSnapshot(raw []byte) {
 // every node worker of a collector; it does not read once per target node.
 func (p *FileTrust) refreshLocked(now time.Time) {
 	if now.Before(p.lastCheck) || now.Sub(p.lastCheck) >= time.Second {
+		if p.stateDirectory != "" {
+			roots, receipt, err := ReadRootSet(p.stateDirectory, p.ca, now)
+			if err != nil || roots != nil || p.rootSet != nil {
+				if err == nil && roots == nil {
+					err = ErrRootRotation
+				}
+				if err == nil && p.rootSet != nil && receipt.SHA256 != p.rootReceipt.SHA256 {
+					previous, e1 := ParseRootSetSnapshot(p.rootSet.raw)
+					next, e2 := ParseRootSetSnapshot(roots.raw)
+					if e1 != nil || e2 != nil || ValidateRootSetAdvance(p.ca, previous, next, now) != nil {
+						err = ErrRootRotation
+					}
+				}
+				p.lastCheck, p.lastErr = now, err
+				if err == nil {
+					p.rootSet, p.rootReceipt = roots, receipt
+				}
+				return
+			}
+		}
 		raw, err := readTrustFile(p.crlFile, MaxCRLBytes)
 		if err == nil {
 			err = p.trust.UpdateCRL(raw, now)
@@ -80,9 +102,13 @@ func (p *FileTrust) Verify(cert *x509.Certificate, role, id string, now time.Tim
 	p.refreshLocked(now)
 	err := p.lastErr
 	trust := p.trust
+	roots := p.rootSet
 	p.mu.Unlock()
 	if err != nil {
 		return ErrRevocation
+	}
+	if roots != nil {
+		return roots.Verify(cert, role, id, now)
 	}
 	return trust.Verify(cert, role, id, now)
 }
@@ -96,6 +122,9 @@ func (p *FileTrust) Snapshot(now time.Time, known string) ([]byte, string, error
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.refreshLocked(now)
+	if p.rootSet != nil {
+		return nil, "", ErrRootRotation
+	}
 	if p.lastErr != nil || !p.trust.validAt(now) || p.snapshotSHA == "" {
 		return nil, "", ErrRevocation
 	}
@@ -103,6 +132,40 @@ func (p *FileTrust) Snapshot(now time.Time, known string) ([]byte, string, error
 		return nil, p.snapshotSHA, nil
 	}
 	return append([]byte{}, p.snapshot...), p.snapshotSHA, nil
+}
+
+// RootPool returns an independent verified pool for each TLS handshake. No
+// caller mutates a pool/config already in use by another connection.
+func (p *FileTrust) RootPool(now time.Time) (*x509.CertPool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshLocked(now)
+	if p.lastErr != nil {
+		return nil, ErrRevocation
+	}
+	if p.rootSet != nil {
+		return p.rootSet.Pool(), nil
+	}
+	if p.trust == nil || !p.trust.validAt(now) {
+		return nil, ErrRevocation
+	}
+	return p.trust.roots.Clone(), nil
+}
+
+func (p *FileTrust) RootSnapshot(now time.Time, known string) ([]byte, RootSetReceipt, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshLocked(now)
+	if p.lastErr != nil {
+		return nil, RootSetReceipt{}, ErrRevocation
+	}
+	if p.rootSet == nil {
+		return nil, RootSetReceipt{}, nil
+	}
+	if known == p.rootReceipt.SHA256 {
+		return nil, p.rootReceipt, nil
+	}
+	return append([]byte(nil), p.rootSet.raw...), p.rootReceipt, nil
 }
 func readTrustFile(path string, limit int64) ([]byte, error) {
 	return readIdentityFile(path, limit, false)

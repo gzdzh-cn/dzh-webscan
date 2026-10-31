@@ -219,7 +219,11 @@ func (c *Collector) node(ctx context.Context, n Node, l Lease, wake <-chan struc
 		policy.wrapTLS(tlsConfig)
 		options = append(options, grpc.WithUnaryInterceptor(policy.invoke), grpc.WithPerRPCCredentials(policy))
 	}
-	options = append(options, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+	var transport credentials.TransportCredentials = credentials.NewTLS(tlsConfig)
+	if c.trust != nil {
+		transport = &collectorRootCredentials{config: tlsConfig, roots: c.trust.RootPool}
+	}
+	options = append(options, grpc.WithTransportCredentials(transport))
 	conn, e := grpc.NewClient(n.Endpoint, options...)
 	if e != nil {
 		return

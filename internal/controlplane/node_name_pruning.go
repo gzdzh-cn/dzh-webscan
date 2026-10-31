@@ -114,6 +114,9 @@ func (s *Store) prepareNodeNamePruning(ctx context.Context, c Config, v *Vault, 
 		if len(p.RemovableNames) == 0 {
 			return nil, errNodeNamePruning
 		}
+		if _, _, hours, err := namePruningPriorIssuance(ctx, tx, p); err != sql.ErrNoRows && (err != nil || hours != in.LifetimeHours) {
+			return nil, errNodeNamePruning
+		}
 		proof, err := provisioningCredentialTx(ctx, tx, v, in.Credential, in.Node)
 		if err != nil {
 			return nil, err
@@ -171,6 +174,9 @@ func (s *Store) admitNodeNamePruning(ctx context.Context, c Config, v *Vault, l 
 	if err := tx.QueryRowContext(ctx, `SELECT certificate,crl FROM v3_pki_authorities WHERE sha256=$1`, j.AuthoritySHA256).Scan(&ca, &crl); err != nil || nodepki.ValidateNodeNamePruningRequest(ca, crl, r, j.Intent, time.Now()) != nil {
 		return empty, errNodeNamePruning
 	}
+	if err := checkNamePruningContinuationIssuance(ctx, tx, j, r); err != nil {
+		return empty, err
+	}
 	if j.Status != "prepared" {
 		if j.RequestSHA256 != r.SHA256() || !bytes.Equal(j.Request, raw) {
 			return empty, ErrConflict
@@ -203,7 +209,7 @@ type nodeNamePruningSigningGuard struct {
 
 func (g *nodeNamePruningSigningGuard) binding() nodeNameSigningBinding {
 	j := g.job
-	return nodeNameSigningBinding{ID: j.ID, Node: j.Node, User: j.User, AuthoritySHA256: j.AuthoritySHA256, ParentSHA256: j.ParentSHA256, Snapshot: j.Snapshot, RequestSHA256: g.request.SHA256(), Kind: "name-pruning", AuditKind: "prune-node-certificate-names", RuntimeEpoch: j.Plan.RuntimeEpoch, LifetimeHours: j.LifetimeHours, Certificate: g.request.Certificate}
+	return nodeNameSigningBinding{ID: j.ID, Node: j.Node, User: j.User, AuthoritySHA256: j.AuthoritySHA256, ParentSHA256: j.ParentSHA256, Snapshot: j.Snapshot, RequestSHA256: g.request.IssuanceSHA256(), Kind: "name-pruning", AuditKind: "prune-node-certificate-names", RuntimeEpoch: j.Plan.RuntimeEpoch, LifetimeHours: j.LifetimeHours, Certificate: g.request.Certificate, Continuation: g.request.ContinuationCertificate}
 }
 func (g *nodeNamePruningSigningGuard) failure() error { return errNodeNamePruning }
 func (g *nodeNamePruningSigningGuard) actor(ctx context.Context, tx *sql.Tx) error {
@@ -217,7 +223,7 @@ func (g *nodeNamePruningSigningGuard) check(ctx context.Context, tx *sql.Tx) err
 	if (j.Status != "requested" && j.Status != "signed") || j.RequestSHA256 != g.request.SHA256() || !bytes.Equal(j.Request, g.job.Request) {
 		return errNodeNamePruning
 	}
-	return nil
+	return checkNamePruningContinuationIssuance(ctx, tx, j, g.request)
 }
 func (g *nodeNamePruningSigningGuard) validateRequest(ca, crl []byte, now time.Time) error {
 	return nodepki.ValidateNodeNamePruningRequest(ca, crl, g.request, g.job.Intent, now)
@@ -281,14 +287,17 @@ func (s *Store) confirmNodeNamePruning(ctx context.Context, c Config, v *Vault, 
 		return errNodeNamePruning
 	}
 	cert, err := provisioningCertificate(known)
-	if err != nil || !bytes.Equal(peer.Raw, cert.Raw) || request != r.SHA256() || snapshot != j.Snapshot || epoch != j.Plan.RuntimeEpoch || hours != j.LifetimeHours {
+	if err != nil || !bytes.Equal(peer.Raw, cert.Raw) || request != r.IssuanceSHA256() || snapshot != j.Snapshot || epoch != j.Plan.RuntimeEpoch || hours != j.LifetimeHours {
 		return errNodeNamePruning
+	}
+	if err := checkNamePruningContinuationIssuance(ctx, tx, j, r); err != nil {
+		return err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT certificate,crl FROM v3_pki_authorities WHERE sha256=$1 FOR UPDATE`, j.AuthoritySHA256).Scan(&ca, &floor); err != nil {
 		return errNodeNamePruning
 	}
 	now := time.Now()
-	crl, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	crl, err := provisioningIssuerCRL(c, ca, now)
 	if err != nil || nodepki.ValidateCRLAdvance(ca, floor, crl, now) != nil || nodepki.ValidateNodeNamePruningCertificate(ca, crl, r, j.Intent, known, now) != nil {
 		return errNodeNamePruning
 	}

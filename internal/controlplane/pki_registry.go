@@ -121,11 +121,32 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, c Config, v *Vault, us
 			return nil, errNodeIdentity
 		}
 		now := time.Now().UTC().Truncate(time.Second)
+		directory := c.NodePKI.AuthorityDirectory
+		roots, err := provisioningRootState(c, now)
+		if err != nil {
+			return nil, err
+		}
+		if roots.Format == 1 {
+			issuer, err := nodepki.RootFingerprint(identity.CA)
+			if err != nil {
+				return nil, errNodeIdentity
+			}
+			directory, err = nodepki.IdentityAuthority(directory, c.Collector.CAFile, c.Collector.RevocationStateDirectory, issuer, now)
+			if err != nil {
+				return nil, errNodeIdentity
+			}
+		}
 		var record NodeCertificateRecord
-		err = nodepki.IssueRegistered(ctx, c.NodePKI.AuthorityDirectory, nodepki.Node, n.ID, []string{n.ServerName}, now, time.Duration(in.LifetimeHours)*time.Hour, func(b nodepki.Bundle, crl []byte) error {
+		err = nodepki.IssueRegistered(ctx, directory, nodepki.Node, n.ID, []string{n.ServerName}, now, time.Duration(in.LifetimeHours)*time.Hour, func(b nodepki.Bundle, crl []byte) error {
 			m := nodeconfig.Material{Node: n.ID, ServerName: n.ServerName, CA: b.CA, Certificate: b.Certificate, CRL: crl, Collectors: []string{collectorID}}
 			if validateProvisioningTrust(c, m, now) != nil {
 				return errNodeIdentity
+			}
+			// Removing the historical singleton constraint must not permit a
+			// different self-consistent host configuration to repin this cluster.
+			// Only the explicit root task can register an additional authority.
+			if err := checkIssuerFloor(ctx, tx, m); err != nil {
+				return err
 			}
 			root, err := provisioningCertificate(b.CA)
 			if err != nil {
@@ -171,6 +192,10 @@ func (s *Store) IssueNodeCertificate(ctx context.Context, c Config, v *Vault, us
 func checkIssuerFloor(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, m nodeconfig.Material) error {
+	return checkIssuerFloorAt(ctx, q, m, time.Now())
+}
+
+func checkIssuerFloorAt(ctx context.Context, q provisioningReader, m nodeconfig.Material, now time.Time) error {
 	root, err := provisioningCertificate(m.CA)
 	if err != nil {
 		return errNodeIdentity
@@ -191,7 +216,7 @@ func checkIssuerFloor(ctx context.Context, q interface {
 		return err
 	}
 	pinned, err := provisioningCertificate(ca)
-	if err != nil || !bytes.Equal(pinned.Raw, root.Raw) || nodepki.ValidateCRLAdvance(ca, floor, m.CRL, time.Now()) != nil {
+	if err != nil || !bytes.Equal(pinned.Raw, root.Raw) || nodepki.ValidateCRLAdvance(ca, floor, m.CRL, now) != nil {
 		return errNodeIdentity
 	}
 	return nil
@@ -232,7 +257,7 @@ func readNodeIdentityFrom(ctx context.Context, q interface {
 		clear(b.Key)
 		return nodepki.Bundle{}, errNodeIdentity
 	}
-	crl, err := readTrustData(c.Collector.RevocationFile, false, nodepki.MaxCRLBytes)
+	crl, err := provisioningIssuerCRL(c, b.CA, time.Now())
 	if err != nil {
 		clear(b.Key)
 		return nodepki.Bundle{}, errNodeIdentity

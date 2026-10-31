@@ -115,16 +115,16 @@ func (r configurationNodePreparer) materialTx(ctx context.Context, tx *sql.Tx, n
 	if digest(identity.Certificate) != m.IdentityProof {
 		return applicationPreparationSnapshot{}, errNodeProvisioning
 	}
-	crl, err := readTrustData(r.config.Collector.RevocationFile, false, 1<<20)
+	crl, roots, err := provisioningConfigurationTrust(r.config, identity.CA, managed, time.Now())
 	if err != nil {
 		return applicationPreparationSnapshot{}, errNodeProvisioning
 	}
-	material, err := nodeConfigurationMaterial(n, r.trust.release, NodeConfigurationInput{Node: n.ID, Expected: n.Version, Identity: identity, CRL: crl, Collectors: m.Collectors, Rules: rules, ManagedIdentity: managed})
+	material, err := nodeConfigurationMaterial(n, r.trust.release, NodeConfigurationInput{Node: n.ID, Expected: n.Version, Identity: identity, CRL: crl, Collectors: m.Collectors, Rules: rules, ManagedIdentity: managed, Roots: roots})
 	if err != nil || validateProvisioningTrust(r.config, material, time.Now()) != nil {
 		clear(material.YARA)
 		return applicationPreparationSnapshot{}, errNodeProvisioning
 	}
-	if err = checkIssuerFloor(ctx, tx, material); err != nil {
+	if err = checkConfigurationIssuerFloor(ctx, tx, r.config, material); err != nil {
 		clear(material.YARA)
 		return applicationPreparationSnapshot{}, err
 	}

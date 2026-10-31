@@ -3,13 +3,10 @@ package nodeops
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"time"
 
@@ -101,106 +98,55 @@ func (w *LocalRuntime) nameChangeWithResources(ctx context.Context, in NameChang
 	}
 	ctx, cancel := context.WithDeadline(ctx, in.Intent.ExpiresAt)
 	defer cancel()
-	// Lifecycle ordering: journal -> service operation -> trust -> identity.
-	j := &Journal{root: filepath.Join(w.root, "node")}
-	if privateDirectoryTree(j.root) != nil || privateFile(filepath.Join(j.root, "journal.sqlite3"), false) != nil {
-		return empty, errNameChange
-	}
-	lock, err := j.lock()
-	if err != nil {
-		return empty, errNameChange
-	}
-	defer lock.Close()
-	db, err := j.database()
-	if err != nil {
-		return empty, errNameChange
-	}
-	defer db.Close()
-	var ready bool
-	if err := db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM meta m JOIN jobs j ON j.id=m.current_job WHERE m.id=1 AND m.node=? AND j.retired=0 AND (EXISTS(SELECT 1 FROM phases p WHERE p.job=j.id AND p.phase='finalize' AND p.status='complete') AND NOT EXISTS(SELECT 1 FROM phases p WHERE p.job=j.id AND p.phase IN ('restore','verify-rollback')) OR EXISTS(SELECT 1 FROM phases p WHERE p.job=j.id AND p.phase='verify-rollback' AND p.status='complete')) AND NOT EXISTS(SELECT 1 FROM phases p WHERE p.job=j.id AND p.status='running'))`, in.Intent.Node).Scan(&ready); err != nil || !ready {
-		return empty, errNameChange
-	}
-	ctx, release, err := acquireServiceOperation(ctx, w.root)
-	if err != nil {
-		return empty, errNameChange
-	}
-	defer release()
-	ca, sourceName, err := w.identityMaintenanceInstallation(in.Intent.Node, in.CRL)
-	if err != nil || sourceName == in.Intent.ServerName {
-		return empty, errNameChange
-	}
-	data := w.managedDataDirectory()
-	identity, floor := filepath.Join(data, "pki-identity"), filepath.Join(data, "pki-trust")
-	for _, dir := range []string{data, identity, floor} {
-		if privateDirectoryTree(dir) != nil {
-			return empty, errNameChange
+	var response NameChangeOutput
+	err = w.withIdentityMaintenance(ctx, in.Intent.Node, in.Intent.AuthoritySHA256, in.CRL, func(ctx context.Context, ca []byte, sourceName, caFile, activeFile, floor string) error {
+		if sourceName == in.Intent.ServerName {
+			return errNameChange
 		}
-	}
-	caFile, activeFile := filepath.Join(identity, "ca.crt"), filepath.Join(identity, "active.pem")
-	for _, dir := range []string{identity, floor} {
-		pinned, err := readPrivate(filepath.Join(dir, "ca.crt"), 64<<10)
-		if err != nil || !bytes.Equal(bytes.TrimSpace(pinned), bytes.TrimSpace(ca)) {
-			return empty, errNameChange
-		}
-	}
-	previous, err := readPrivate(filepath.Join(floor, "ca.crl"), nodepki.MaxCRLBytes)
-	if err != nil || nodepki.ValidateCRLAdvance(ca, previous, in.CRL, time.Now()) != nil {
-		return empty, errNameChange
-	}
-	// Check incoming revocations before any new local CSR/key is prepared.
-	active, _, err := nodepki.ReadIdentity(caFile, activeFile, nodepki.Node, in.Intent.Node, time.Now())
-	defer clear(active.Key)
-	if err != nil {
-		return empty, errNameChange
-	}
-	block, _ := pem.Decode(active.Certificate)
-	if block == nil {
-		return empty, errNameChange
-	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	trust, trustErr := nodepki.NewTrust(ca, in.CRL, time.Now())
-	if err != nil || trustErr != nil || trust.Verify(leaf, nodepki.Node, in.Intent.Node, time.Now()) != nil || leaf.VerifyHostname(sourceName) != nil {
-		return empty, errNameChange
-	}
-	var request nodepki.NodeNameChangeRequest
-	if in.Operation == "prepare" {
-		request, err = nodepki.PrepareNodeNameChange(ctx, caFile, activeFile, floor, in.Intent, time.Now())
-	} else if in.Operation == "reconcile" {
-		original, parseErr := nodepki.ParseNodeNameChangeRequest(in.Request)
-		if parseErr != nil {
-			return empty, errNameChange
-		}
-		request, err = nodepki.PrepareNodeNameChangeContinuation(ctx, caFile, activeFile, floor, in.CRL, in.Intent, original, in.Certificate, time.Now())
-	} else {
-		request, err = nodepki.ParseNodeNameChangeRequest(in.Request)
-	}
-	if err != nil {
-		return empty, errNameChange
-	}
-	if _, err := nodepki.PublishNodeNameChangeTrust(ctx, caFile, floor, in.CRL, request, in.Intent, time.Now()); err != nil {
-		return empty, errNameChange
-	}
-	response := NameChangeOutput{Format: 1, Operation: in.Operation, Node: in.Intent.Node, Challenge: in.Intent.Challenge}
-	if in.Operation == "prepare" || in.Operation == "reconcile" {
-		response.Request, err = json.Marshal(request)
-	} else if in.Operation == "activate" {
-		var record nodepki.IdentityRecord
-		record, err = nodepki.ActivateNodeNameChange(ctx, caFile, activeFile, floor, request, in.Intent, in.Certificate, time.Now())
-		response.CertificateSHA256 = record.CertificateSHA256
-	} else {
-		err = nodepki.WithNameChangedNodeIdentity(ctx, caFile, activeFile, floor, request, in.Intent, in.Certificate, time.Now(), func(ctx context.Context, record nodepki.IdentityRecord) error {
-			if err := w.verifyIdentityMaintenanceService(ctx, in.Intent.Node, in.CRL, host, fs); err != nil {
-				return err
+		var request nodepki.NodeNameChangeRequest
+		if in.Operation == "prepare" {
+			request, err = nodepki.PrepareNodeNameChange(ctx, caFile, activeFile, floor, in.Intent, time.Now())
+		} else if in.Operation == "reconcile" {
+			original, parseErr := nodepki.ParseNodeNameChangeRequest(in.Request)
+			if parseErr != nil {
+				return errNameChange
 			}
-			response.CertificateSHA256, response.ResourcesVerified = record.CertificateSHA256, true
-			return nil
-		})
-	}
-	if err != nil || ctx.Err() != nil {
-		// Preserve internal cancellation/error identity for the local executor
-		// and diagnostics. CommandNameChange still emits only the fixed public
-		// error, never a filesystem error or private operation input.
-		return empty, errors.Join(errNameChange, err, ctx.Err())
+			request, err = nodepki.PrepareNodeNameChangeContinuation(ctx, caFile, activeFile, floor, in.CRL, in.Intent, original, in.Certificate, time.Now())
+		} else {
+			request, err = nodepki.ParseNodeNameChangeRequest(in.Request)
+		}
+		if err != nil {
+			return errNameChange
+		}
+		if _, err := nodepki.PublishNodeNameChangeTrust(ctx, caFile, floor, in.CRL, request, in.Intent, time.Now()); err != nil {
+			return errNameChange
+		}
+		response = NameChangeOutput{Format: 1, Operation: in.Operation, Node: in.Intent.Node, Challenge: in.Intent.Challenge}
+		if in.Operation == "prepare" || in.Operation == "reconcile" {
+			response.Request, err = json.Marshal(request)
+		} else if in.Operation == "activate" {
+			var record nodepki.IdentityRecord
+			record, err = nodepki.ActivateNodeNameChange(ctx, caFile, activeFile, floor, request, in.Intent, in.Certificate, time.Now())
+			response.CertificateSHA256 = record.CertificateSHA256
+		} else {
+			err = nodepki.WithNameChangedNodeIdentity(ctx, caFile, activeFile, floor, request, in.Intent, in.Certificate, time.Now(), func(ctx context.Context, record nodepki.IdentityRecord) error {
+				if err := w.verifyIdentityMaintenanceService(ctx, in.Intent.Node, in.CRL, host, fs); err != nil {
+					return err
+				}
+				response.CertificateSHA256, response.ResourcesVerified = record.CertificateSHA256, true
+				return nil
+			})
+		}
+		if err != nil || ctx.Err() != nil {
+			// Preserve internal cancellation/error identity for the local executor
+			// and diagnostics. CommandNameChange still emits only the fixed public
+			// error, never a filesystem error or private operation input.
+			return errors.Join(errNameChange, err, ctx.Err())
+		}
+		return nil
+	})
+	if err != nil {
+		return empty, err
 	}
 	return response, nil
 }

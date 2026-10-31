@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"math"
@@ -289,6 +290,32 @@ func DecodeManagedRuntime(raw []byte, now time.Time, liveCRL []byte) (Material, 
 		return Material{}, ErrInvalid
 	}
 	return m, nil
+}
+
+// DecodeManagedRootRuntime authenticates an immutable pre-rotation package
+// against its original issuer history. The replacement authorization and live
+// successor CRL must be valid NOW. The old CRL is used only as historical
+// evidence; it never admits a peer or replaces the node-local active identity.
+// Callers must independently validate that identity and the installed runtime.
+func DecodeManagedRootRuntime(raw []byte, now time.Time, roots nodepki.RootSetSnapshot) (Material, error) {
+	m, err := decodeCanonical(raw)
+	if err != nil || (m.Format != 2 && m.Format != 3) {
+		return Material{}, ErrInvalid
+	}
+	if _, err := nodepki.NewRootSet(m.CA, roots, now); err != nil {
+		return Material{}, ErrInvalid
+	}
+	block, rest := pem.Decode(roots.OldCRL)
+	if block == nil || block.Type != "X509 CRL" || len(bytes.TrimSpace(rest)) != 0 {
+		return Material{}, ErrInvalid
+	}
+	list, err := x509.ParseRevocationList(block.Bytes)
+	if err != nil || list.ThisUpdate.After(now) {
+		return Material{}, ErrInvalid
+	}
+	// DecodeManagedRuntime checks the signature, monotonic CRL advance,
+	// original leaf identity/SANs and all non-PKI settings at this signed time.
+	return DecodeManagedRuntime(raw, list.ThisUpdate, roots.OldCRL)
 }
 
 // Runtime contains only generated paths and validated task parameters; no

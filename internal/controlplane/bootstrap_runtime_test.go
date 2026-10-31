@@ -22,8 +22,8 @@ import (
 
 func dropBootstrapRuntimeForTest(t *testing.T, s *Store) {
 	t.Helper()
-	mustHistoryExec(t, s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE IF EXISTS v3_deployment_recoveries;DROP TABLE IF EXISTS v3_deployment_installations;DROP TABLE IF EXISTS v3_node_provisioning;DROP TABLE v3_configuration_application_registrations;DROP TABLE v3_configuration_application_nodes;DROP TABLE v3_configuration_application_targets;DROP TABLE v3_configuration_operation_gate;DELETE FROM v3_schema WHERE version>=25`)
-	mustHistoryExec(t, s.DB, `DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE v3_bootstrap_processes;DROP TABLE v3_bootstrap_handoffs;DELETE FROM v3_schema WHERE version>=24`)
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE IF EXISTS v3_deployment_recoveries;DROP TABLE IF EXISTS v3_deployment_installations;DROP TABLE IF EXISTS v3_node_provisioning;DROP TABLE v3_configuration_application_registrations;DROP TABLE v3_configuration_application_nodes;DROP TABLE v3_configuration_application_targets;DROP TABLE v3_configuration_operation_gate;DELETE FROM v3_schema WHERE version>=25`)
+	mustHistoryExec(t, s.DB, nodeHistoryRetirementTestDrop+`DROP TABLE IF EXISTS v3_deployment_private_inputs;DROP TABLE IF EXISTS v3_deployment_preparations;DROP TABLE IF EXISTS v3_web_node_credentials;DELETE FROM v3_schema WHERE version=35;DROP TABLE IF EXISTS v3_node_name_prunings;DROP TABLE IF EXISTS v3_node_name_changes;DROP TABLE IF EXISTS v3_node_identity_recoveries;DROP TABLE IF EXISTS v3_node_renewal_jobs;DROP TABLE IF EXISTS v3_node_certificate_renewals;DROP TABLE v3_bootstrap_processes;DROP TABLE v3_bootstrap_handoffs;DELETE FROM v3_schema WHERE version>=24`)
 }
 
 type bootstrapServeTest struct {
@@ -773,6 +773,69 @@ func TestBootstrapRuntimeObserverExitDoesNotClaimWorkersDrained(t *testing.T) {
 	}
 }
 
+func TestBootstrapRuntimeBoundedTimeoutDoesNotRestartHealthyProcess(t *testing.T) {
+	for _, scenario := range []string{"transient", "persistent", "invalid-proof"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, f := newSavedConfigurationStore(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			instance := runtimeInstance(f.c.Central.Instance)
+			if scenario == "invalid-proof" {
+				_, err := s.touchBootstrapProcess(ctx, f.v, bootstrapProcess{Instance: instance, Member: f.c.Central.Instance, Role: "api", LaunchDigest: "launch", RuntimeDigest: "runtime"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				mustHistoryExec(t, s.DB, `UPDATE v3_bootstrap_processes SET proof='forged'`)
+			} else {
+				condition := "true"
+				if scenario == "transient" {
+					condition = "nextval('heartbeat_attempts')=1"
+				}
+				mustHistoryExec(t, s.DB, `CREATE SEQUENCE heartbeat_attempts;CREATE FUNCTION delay_heartbeat() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF `+condition+` THEN PERFORM pg_sleep(1);END IF;RETURN NEW;END$$;CREATE TRIGGER delay_heartbeat BEFORE INSERT ON v3_bootstrap_processes FOR EACH ROW EXECUTE FUNCTION delay_heartbeat()`)
+			}
+			ready := make(chan struct{})
+			close(ready)
+			done := make(chan error, 1)
+			go func() {
+				done <- s.runBootstrapProcessWithTiming(ctx, f.v, f.c, f.c, 0, instance, "api", ready, 100*time.Millisecond, 600*time.Millisecond, 3*time.Second)
+			}()
+			if scenario == "transient" {
+				for end := time.Now().Add(5 * time.Second); tableCount(t, s, "v3_bootstrap_processes") == 0; {
+					select {
+					case err := <-done:
+						t.Fatal("single canceled transaction killed observer", err)
+					default:
+					}
+					if time.Now().After(end) {
+						t.Fatal("observer did not retry actual PostgreSQL timeout")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				cancel()
+			}
+			select {
+			case err := <-done:
+				switch scenario {
+				case "transient":
+					if !errors.Is(err, context.Canceled) {
+						t.Fatal(err)
+					}
+				case "persistent":
+					if err == nil || ctx.Err() != nil || tableCount(t, s, "v3_bootstrap_processes") != 0 {
+						t.Fatal("unknown heartbeat was extended beyond bounded window", err)
+					}
+				case "invalid-proof":
+					if !errors.Is(err, errBootstrapRuntime) {
+						t.Fatal("invalid ownership was retried as transient", err)
+					}
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("observer failed to stop within its evidence window")
+			}
+		})
+	}
+}
+
 func TestBootstrapRuntimeActuallyUsesApprovedDatabaseCredentials(t *testing.T) {
 	role := "v3_bootstrap_" + token()[:16]
 	s, f, j := bootstrapApplicationFixtureDocument(t, true, func(s *Store, f configurationLocalFixture, doc *configurationDocument) {
@@ -780,9 +843,9 @@ func TestBootstrapRuntimeActuallyUsesApprovedDatabaseCredentials(t *testing.T) {
 		if err := s.DB.QueryRow(`SELECT current_schema()`).Scan(&schema); err != nil {
 			t.Fatal(err)
 		}
-		// Disposable trust-authenticated local role. No production credentials
+		// Disposable password-authenticated local role. No production credentials
 		// or database are used. A trigger observes the actual connection user.
-		mustHistoryExec(t, s.DB, `CREATE ROLE "`+role+`" LOGIN`)
+		mustHistoryExec(t, s.DB, `CREATE ROLE "`+role+`" LOGIN PASSWORD 'isolated-bootstrap-credential-test-only'`)
 		t.Cleanup(func() {
 			mustHistoryExec(t, s.DB, `DROP OWNED BY "`+role+`";DROP ROLE "`+role+`"`)
 		})
@@ -794,7 +857,7 @@ CREATE TRIGGER remember_bootstrap_connection AFTER INSERT ON v3_bootstrap_proces
 		if err != nil {
 			t.Fatal(err)
 		}
-		dsn.User = url.User(role)
+		dsn.User = url.UserPassword(role, "isolated-bootstrap-credential-test-only")
 		target := filepath.Join(f.f.root, "effective-postgres.dsn")
 		localWrite(t, target, []byte(dsn.String()))
 		common.M(doc.Bootstrap["database"])["dsn_file"] = target

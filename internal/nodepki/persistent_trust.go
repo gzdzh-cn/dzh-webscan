@@ -21,6 +21,15 @@ func NewPersistentFileTrust(caFile, crlFile, stateDirectory string, now time.Tim
 	if err != nil {
 		return nil, ErrRevocation
 	}
+	if _, err := os.Lstat(stateDirectory); err == nil {
+		roots, receipt, err := ReadRootSet(stateDirectory, ca, now)
+		if err != nil {
+			return nil, err
+		}
+		if roots != nil {
+			return &FileTrust{rootSet: roots, rootReceipt: receipt, crlFile: crlFile, lastCheck: now, stateDirectory: stateDirectory, ca: ca}, nil
+		}
+	}
 	if err := initializeTrustState(stateDirectory, ca, crl, now); err != nil {
 		return nil, err
 	}
