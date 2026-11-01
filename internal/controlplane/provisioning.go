@@ -311,6 +311,9 @@ func (s *Store) localDeploymentMaterial(ctx context.Context, c Config, t *deploy
 	if !c.Executor.Enabled {
 		return nodeconfig.Material{}, errors.New("请先显式启用部署执行器，再提交本地部署任务")
 	}
+	if err := in.validate(); err == nil && in.Kind == "uninstall" && in.RuntimeArtifact == nil {
+		return nodeconfig.Material{}, nil
+	}
 	if err := in.validate(); err != nil || in.RuntimeArtifact == nil {
 		return nodeconfig.Material{}, errProvisioning
 	}
@@ -342,6 +345,13 @@ func validateLocalDeploymentTx(ctx context.Context, tx *sql.Tx, c Config, t *dep
 	}
 	if !t.release.matches(DeploymentJob{Plan: DeploymentPlan{Request: in, Node: n}}) {
 		return errProvisioning
+	}
+	if in.Kind == "uninstall" {
+		if in.RuntimeArtifact != nil {
+			return errNodeUninstall
+		}
+		_, _, _, err := deploymentStateWithTrust(ctx, tx, t, n, in)
+		return err
 	}
 	if err := checkConfigurationIssuerFloor(ctx, tx, c, m); err != nil {
 		return err

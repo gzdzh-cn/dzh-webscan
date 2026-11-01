@@ -40,7 +40,7 @@ func (w *SSHNodeRuntime) ProvisionConfiguration(ctx context.Context, j Deploymen
 }
 
 func (w *SSHNodeRuntime) provisionArtifact(ctx context.Context, j DeploymentJob, localFile, kind string) error {
-	if (j.Kind == "recover" || j.Plan.Recovery != nil) && kind != "helper" {
+	if (j.Kind == "recover" || j.Plan.Recovery != nil || j.Kind == "uninstall") && kind != "helper" {
 		return DeploymentFailure{"artifact-invalid"}
 	}
 	if _, err := w.request(ctx, j, "inspect"); err != nil {

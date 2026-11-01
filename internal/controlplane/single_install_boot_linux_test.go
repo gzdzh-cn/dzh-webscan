@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"webscan/internal/common"
 )
 
 type singleKernelBootReceipt struct {
@@ -86,7 +88,7 @@ func TestSingleInstallActualKernelBootRecovery(t *testing.T) {
 		}
 		rules := parent + "/rules.yar"
 		localWrite(t, rules, []byte("rule isolated_boot { condition: false }"))
-		s := singleInstallSpec{Format: 3, Root: parent + "/installation", Instance: "kernel-single", PublicURL: "https://kernel-single.example.test", Username: "admin", APIPort: 19445, PostgresPort: 15432, MetricsPort: 18428, RuntimeImage: images["central"], PostgresImage: images["postgres"], MetricsImage: images["metrics"], RulesFile: rules,
+		s := singleInstallSpec{Format: 3, Root: parent + "/installation", Instance: "kernel-single", PublicURL: "https://kernel-single.example.test", Username: "admin", APIPort: 19445, PostgresPort: 15432, MetricsPort: 18428, RawMetricsPort: 18429, HostWatchdog: true, MetricsLayers: true, MetricsRetention: true, RuntimeImage: images["central"], PostgresImage: images["postgres"], MetricsImage: images["metrics"], RulesFile: rules,
 			ReleaseTrust: &DeploymentTrustConfig{VaultKeyFile: parent + "/installation/vault.key", PublicKeyFile: signing + "/signing.pub", ManifestFile: signed + "/release.json", SignatureFile: signed + "/release.sig", HelperFile: binary, NativeBundleFile: "/v3-tests/agent-native.tar.gz"}}
 		if err := s.validate(); err != nil {
 			t.Fatal(err)
@@ -142,7 +144,7 @@ func TestSingleInstallActualKernelBootRecovery(t *testing.T) {
 		t.Fatal("actual boot identity unavailable", err)
 	}
 	ids := map[string]string{}
-	for _, service := range []string{"central", "postgres", "metrics"} {
+	for _, service := range []string{"central", "postgres", "metrics", "metrics-raw"} {
 		id := strings.TrimSpace(string(command("docker", "compose", "--project-name", singleProject(parent+"/installation"), "--file", parent+"/installation/compose.yaml", "ps", "--quiet", service)))
 		if len(id) != 64 {
 			t.Fatal("installed stack service unavailable", service)
@@ -150,7 +152,7 @@ func TestSingleInstallActualKernelBootRecovery(t *testing.T) {
 		ids[service] = id
 	}
 	project := singleProject(parent + "/installation")
-	for _, unit := range []string{project + ".service", project + "-executor.service", project + "-pki.timer", project + "-backup.timer"} {
+	for _, unit := range []string{project + ".service", project + "-executor.service", project + "-pki.timer", project + "-backup.timer", project + "-watchdog.service", project + "-metrics-retention.timer"} {
 		command("systemctl", "is-enabled", "--quiet", unit)
 		command("systemctl", "is-active", "--quiet", unit)
 	}
@@ -172,14 +174,31 @@ func TestSingleInstallActualKernelBootRecovery(t *testing.T) {
 			t.Fatal("actual installed login failed", err)
 		}
 		receipt = singleKernelBootReceipt{BootID: strings.TrimSpace(string(boot)), Cookie: response.Cookies()[0].Value, CSRF: body.CSRF, Containers: ids}
-		mustHistoryExec(t, store.DB, `INSERT INTO v3_audit(username,kind,resource,result) VALUES('admin','kernel-boot','durable-marker','{}')`)
-		response, err = client.Post(c.Metrics.WriteURL+"/api/v1/import/prometheus", "text/plain", strings.NewReader("webscan_boot_acceptance 17\n"))
-		if err != nil {
-			t.Fatal(err)
+		singleKernelApplyRetention(t, ctx, client, c, receipt)
+		centralBefore := command("docker", "inspect", "--format", "{{.Id}}/{{.State.Pid}}/{{.State.StartedAt}}", ids["central"])
+		command("systemctl", "start", project+"-metrics-retention.service")
+		if !bytes.Equal(centralBefore, command("docker", "inspect", "--format", "{{.Id}}/{{.State.Pid}}/{{.State.StartedAt}}", ids["central"])) {
+			t.Fatal("metrics retention restarted the main process")
 		}
-		response.Body.Close()
-		if response.StatusCode != 204 && response.StatusCode != 200 {
-			t.Fatal("actual VM write failed")
+		var actual MetricsRetentionStatus
+		var details []byte
+		if err := store.DB.QueryRowContext(ctx, `SELECT details FROM v3_role_status WHERE role='metrics-retention' AND instance=$1 AND error=''`, c.Central.Instance).Scan(&details); err != nil || json.Unmarshal(details, &actual) != nil || actual.State != "confirmed" || actual.Effective == nil || actual.Effective.RawHours != 36 || actual.Effective.HistoryDays != 14 {
+			t.Fatal("actual engines not confirmed after explicit retention application", err)
+		}
+		for _, service := range []string{"metrics", "metrics-raw"} {
+			ids[service] = strings.TrimSpace(string(command("docker", "compose", "--project-name", project, "--file", parent+"/installation/compose.yaml", "ps", "--quiet", service)))
+		}
+		receipt.Containers = ids
+		mustHistoryExec(t, store.DB, `INSERT INTO v3_audit(username,kind,resource,result) VALUES('admin','kernel-boot','durable-marker','{}')`)
+		for _, target := range []string{c.Metrics.WriteURL, c.Metrics.RawURL} {
+			response, err = client.Post(target+"/api/v1/import/prometheus", "text/plain", strings.NewReader("webscan_boot_acceptance 17\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != 204 && response.StatusCode != 200 {
+				t.Fatal("actual VM write failed")
+			}
 		}
 		centralState := []string{"inspect", "--format", "{{.State.Running}}/{{.State.StartedAt}}/{{.RestartCount}}", ids["central"]}
 		beforeBackup := command("docker", centralState...)
@@ -190,7 +209,7 @@ func TestSingleInstallActualKernelBootRecovery(t *testing.T) {
 		if err := store.DB.QueryRowContext(ctx, `SELECT directory,manifest_sha256 FROM v3_single_backup_runs WHERE status='captured' ORDER BY created_at DESC LIMIT 1`).Scan(&receipt.Backup, &receipt.BackupSHA256); err != nil {
 			t.Fatal("fresh installation did not run its signed backup service", err)
 		}
-		if _, err := verifySingleBackup(ctx, receipt.Backup, receipt.BackupSHA256); err != nil {
+		if manifest, err := verifySingleBackup(ctx, receipt.Backup, receipt.BackupSHA256); err != nil || manifest.RawMetrics == "" {
 			t.Fatal(err)
 		}
 		writeProvisioningInput(t, receiptFile, receipt)
@@ -224,20 +243,85 @@ func TestSingleInstallActualKernelBootRecovery(t *testing.T) {
 	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM v3_audit WHERE kind='kernel-boot' AND resource='durable-marker'`).Scan(&count); err != nil || count != 1 {
 		t.Fatal("PG boot continuity", err)
 	}
-	wait("VM durable sample", func() bool {
-		response, err := client.Get(c.Metrics.QueryURL + "/api/v1/query?query=webscan_boot_acceptance&nocache=1")
-		if err != nil {
-			return false
+	for _, target := range []string{c.Metrics.QueryURL, c.Metrics.RawURL} {
+		wait("VM durable sample", func() bool {
+			response, err := client.Get(target + "/api/v1/query?query=webscan_boot_acceptance&nocache=1")
+			if err != nil {
+				return false
+			}
+			raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+			response.Body.Close()
+			return err == nil && response.StatusCode == 200 && bytes.Contains(raw, []byte(`"17"`))
+		})
+	}
+	for service, period := range map[string]string{"metrics": "-retentionPeriod=14d", "metrics-raw": "-retentionPeriod=36h"} {
+		if !bytes.Contains(command("docker", "inspect", "--format", "{{json .Config.Cmd}}", ids[service]), []byte(period)) {
+			t.Fatal("reboot lost the authenticated retention overlay", service)
 		}
-		raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		response.Body.Close()
-		return err == nil && response.StatusCode == 200 && bytes.Contains(raw, []byte(`"17"`))
-	})
+	}
 	if _, err := verifySingleBackup(ctx, receipt.Backup, receipt.BackupSHA256); err != nil {
 		t.Fatal("boot backup integrity", err)
 	}
 	command(binary, "control-v3", "--action", "resume-single-install", "--source", specification, "--password-file", password)
-	t.Log("actual new kernel boot ID, unchanged container IDs, API/executor/PKI/backup autostart, PG/VM durability, retained session/CSRF and signed backup integrity passed")
+	t.Log("actual new kernel boot ID, unchanged container IDs, API/executor/PKI/watchdog/backup/retention autostart, PG and both VM durability, authenticated applied retention overlay, retained session/CSRF and signed dual-layer backup integrity passed")
+}
+
+func singleKernelApplyRetention(t *testing.T, ctx context.Context, client *http.Client, c Config, receipt singleKernelBootReceipt) {
+	t.Helper()
+	call := func(method, path string, input any, output any) {
+		t.Helper()
+		var body io.Reader
+		if input != nil {
+			body = bytes.NewReader(common.JSON(input))
+		}
+		r, err := http.NewRequestWithContext(ctx, method, "http://"+c.Central.Listen+"/api/v3/settings"+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Forwarded-Proto", "https")
+		r.Header.Set("X-CSRF-Token", receipt.CSRF)
+		key := "kernel-retention-" + strings.TrimPrefix(path, "/")
+		if in, ok := input.(settingsEditorRequest); ok {
+			key += "-" + in.Action
+		}
+		r.Header.Set("Idempotency-Key", key)
+		r.AddCookie(&http.Cookie{Name: "webscan_v3_session", Value: receipt.Cookie})
+		response, err := client.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != 200 {
+			var failure struct {
+				Code string `json:"code"`
+			}
+			_ = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&failure)
+			t.Fatal("actual settings operation rejected", method, path, response.StatusCode, failure.Code)
+		}
+		if output != nil && json.NewDecoder(response.Body).Decode(output) != nil {
+			t.Fatal("invalid settings response")
+		}
+	}
+	for _, action := range []string{"save", "apply"} {
+		var view settingsEditorView
+		call("GET", "", nil, &view)
+		if !view.MetricsRetention.Available {
+			t.Fatal("fresh coordinator unavailable to actual API")
+		}
+		in := settingsEditorRequest{Action: action, ExpectedGeneration: view.State.Generation, ExpectedRuntime: view.State.RuntimeVersion, Edit: settingsEdit{}}
+		if action == "save" {
+			// Exercise the real settings workflow while making today's backup
+			// due in every guest timezone/hour. The shipped default remains 03:00
+			// UTC; starting its service before that time must correctly do nothing.
+			in.Edit.Values = map[string]json.RawMessage{"monitoring.raw_hours": json.RawMessage(`36`), "monitoring.history_days": json.RawMessage(`14`), "backup.enabled": json.RawMessage(`true`), "backup.time": json.RawMessage(`"00:00"`), "backup.timezone": json.RawMessage(`"UTC"`)}
+		}
+		var preview settingsEditorPreview
+		call("POST", "/preview", in, &preview)
+		in.Preview = preview.Token
+		// Save and apply have different durable request identities.
+		call("POST", "/confirm", in, nil)
+	}
 }
 
 func singleKernelReadinessDiagnostic(t *testing.T, ctx context.Context, spec singleInstallSpec) error {

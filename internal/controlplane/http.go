@@ -112,16 +112,29 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			failure(w, 403, "csrf_mismatch", "请求校验失败")
 			return
 		}
-		if id.Role == "viewer" && r.URL.Path != "/api/v3/logout" {
+		if id.Role == "viewer" && r.URL.Path != "/api/v3/logout" && r.URL.Path != "/api/v3/account/password" {
 			failure(w, 403, "permission_denied", "当前账号只允许查看")
 			return
 		}
 	}
+	if r.URL.Path == "/api/v3/account/password" {
+		a.changeOwnPassword(w, r, id)
+		return
+	}
 	if a.configurationApplicationRoutes(w, r, id) {
+		return
+	}
+	if a.monitoringRoutes(w, r, id) {
+		return
+	}
+	if a.monitoringApplicationRoutes(w, r, id) {
 		return
 	}
 	if r.URL.Path == "/api/v3/servers/remove" && r.Method == http.MethodPost {
 		a.removeServerRecords(w, r, id)
+		return
+	}
+	if a.deploymentHistoryDeleteRoutes(w, r, id) {
 		return
 	}
 	if a.webDeploymentRoutes(w, r, id) {
@@ -131,6 +144,14 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/v3/servers/") {
+		if strings.HasSuffix(r.URL.Path, "/metric-devices") {
+			a.serverMetricDevices(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/servers/"), "/metric-devices"))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/device-metrics") {
+			a.serverDeviceMetrics(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/servers/"), "/device-metrics"))
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/metrics") {
 			a.serverTrends(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/servers/"), "/metrics"))
 			return
@@ -151,6 +172,12 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.healthRoutes(w, r) {
+		return
+	}
+	if a.notificationTestRoutes(w, r, id) {
+		return
+	}
+	if a.notificationDetailRoutes(w, r) {
 		return
 	}
 	if a.notificationHistoryRoutes(w, r) {
@@ -224,6 +251,18 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/v3/metrics":
 		a.metrics(w, r)
+		return
+	case "/api/v3/legacy-history":
+		a.legacyMigrationHistory(w, r, id, false)
+		return
+	case "/api/v3/migration-history/sessions":
+		a.legacyMigrationHistory(w, r, id, true)
+		return
+	case "/api/v3/migration-history/catalog":
+		a.migrationMetricCatalog(w, r, id)
+		return
+	case "/api/v3/migration-history":
+		a.migrationMetricHistory(w, r, id)
 		return
 	default:
 		failure(w, 404, "not_found", "接口不存在")
@@ -370,7 +409,7 @@ func (a *API) nodes(w http.ResponseWriter, r *http.Request, id identity) {
 			failure(w, 409, "configuration_application_busy", errConfigurationApplicationBusy.Error())
 			return
 		}
-		if errors.Is(e, ErrConflict) {
+		if errors.Is(e, ErrConflict) || errors.Is(e, errMonitoringRules) {
 			failure(w, 409, "config_conflict", e.Error())
 			return
 		}
@@ -407,6 +446,9 @@ func (a *API) nodes(w http.ResponseWriter, r *http.Request, id identity) {
 		return
 	}
 	items, e := a.Store.consoleNodes(r.Context(), after, r.URL.Query().Get("q"), state, limit, a.Config.Collector.IntervalSeconds)
+	if e == nil {
+		e = a.decorateUninstallNodes(r.Context(), items)
+	}
 	if e != nil {
 		failure(w, 503, "query_failed", "服务器查询失败")
 		return
@@ -527,7 +569,16 @@ func (a *API) metrics(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "metrics_unavailable", "指标查询暂不可用")
 		return
 	}
-	raw, e := a.Metrics.Range(r.Context(), r.URL.Query().Get("node"), r.URL.Query().Get("metric"), start, end)
+	layers := r.URL.Query()["layer"]
+	layer := "history"
+	if len(layers) > 1 || len(layers) == 1 && layers[0] != "history" && layers[0] != "raw" {
+		failure(w, 400, "invalid_layer", "指标存储层只能选择 history 或 raw")
+		return
+	}
+	if len(layers) == 1 {
+		layer = layers[0]
+	}
+	raw, e := a.Metrics.RangeLayer(r.Context(), r.URL.Query().Get("node"), r.URL.Query().Get("metric"), layer, start, end)
 	if e != nil {
 		failure(w, 503, "metrics_unavailable", "指标查询失败，请检查节点、指标名和时序库状态")
 		return

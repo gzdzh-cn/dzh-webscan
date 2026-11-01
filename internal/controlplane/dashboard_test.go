@@ -33,7 +33,7 @@ func TestDashboardSnapshotCountsPrivacyAndUnknownEvidence(t *testing.T) {
 	if err != nil || v.Servers == nil || *v.Servers != 3 || *v.Fresh != 1 || *v.Unknown != 1 {
 		t.Fatal("wrong node summary", err)
 	}
-	if len(v.Sections) != 11 {
+	if len(v.Sections) != 12 {
 		t.Fatal("missing sections")
 	}
 	for name, section := range v.Sections {

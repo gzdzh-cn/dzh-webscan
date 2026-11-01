@@ -351,6 +351,12 @@ func (s *Store) RunRetentionRound(ctx context.Context, instance string) (resultE
 	if err != nil && !(errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil) {
 		return err
 	}
+	deploymentContext, deploymentCancel := context.WithTimeout(op, 250*time.Millisecond)
+	deploymentErr := s.runDeploymentHistoryDeleteRound(deploymentContext, l)
+	deploymentCancel()
+	if deploymentErr != nil && !errors.Is(deploymentErr, context.DeadlineExceeded) {
+		return deploymentErr
+	}
 	automaticWork = true
 	j, err := s.ScheduleRetention(op, l)
 	if err != nil {

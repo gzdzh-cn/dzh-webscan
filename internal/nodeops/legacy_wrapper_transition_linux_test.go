@@ -79,7 +79,11 @@ func TestLegacyWrapperObjectsOnDisposableNestedEngine(t *testing.T) {
 			id := run(t, ctx, args...)
 			t.Cleanup(func() {
 				// Fixture teardown only: never a production lifecycle operation.
-				_, err := inventoryCommand(context.Background(), "docker", "--host", "unix:///var/run/docker.sock", "rm", "-f", id)
+				cleanupContext, release, err := acquireServiceOperation(context.Background(), m.w.host.root)
+				if err == nil {
+					_, err = inventoryCommand(cleanupContext, "docker", "--host", "unix:///var/run/docker.sock", "rm", "-f", id)
+					release()
+				}
 				if err != nil {
 					t.Error("remove exact disposable object", err)
 				}

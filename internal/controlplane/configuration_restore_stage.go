@@ -182,6 +182,9 @@ func revalidateConfigurationStageTx(ctx context.Context, tx *sql.Tx, v *Vault, c
 	if err := lockConfigurationRestoreStateTx(ctx, tx); err != nil {
 		return empty, err
 	}
+	if err := monitoringApplicationsAvailableTx(ctx, tx); err != nil {
+		return empty, err
+	}
 	revision, err := configurationRestoreAccount(ctx, tx, user)
 	if err != nil {
 		return empty, err

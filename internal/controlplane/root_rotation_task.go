@@ -235,6 +235,9 @@ func (s *Store) prepareRootRotation(ctx context.Context, c Config, v *Vault, use
 		}
 		return provisioningAdmin(ctx, tx, user)
 	}, func(tx *sql.Tx) (any, error) {
+		if err := monitoringApplicationsAvailableTx(ctx, tx); err != nil {
+			return nil, err
+		}
 		state, err := nodepki.ReadRootState(c.Collector.CAFile, c.Collector.RevocationStateDirectory, time.Now())
 		if err != nil || state.Format != 0 {
 			return nil, errRootRotationTask

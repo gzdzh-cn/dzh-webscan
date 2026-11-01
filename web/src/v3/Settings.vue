@@ -10,9 +10,9 @@ import Audit from './Audit.vue'
 import RuntimeSettings from './RuntimeSettings.vue'
 
 const { client, session } = useConsole(), route = useRoute(), router = useRouter(), read = useReadScope()
-const groupLabels: Record<string,string> = {monitoring:'公共监控', website_monitor:'网站检测', feishu:'飞书通知', email:'邮箱通知', retention:'历史与备份', storage:'存储与清理', audit:'操作审计'}
+const groupLabels: Record<string,string> = {monitoring:'公共监控', collector:'主控指标采集', metrics:'指标历史保留', website_monitor:'网站检测', backup:'自动完整备份', feishu:'飞书通知', email:'邮箱通知', retention:'历史与备份', storage:'存储与清理', audit:'操作审计'}
 const tab = computed(() => route.query.storage === '1' ? 'storage' : route.query.group === '历史与备份' ? 'retention' : ['runtime','retention','storage','audit'].includes(String(route.query.tab)) ? String(route.query.tab) : 'runtime')
-const runtimeGroup = computed(() => ['monitoring','website_monitor','feishu','email'].includes(String(route.query.group)) ? String(route.query.group) : 'monitoring')
+const runtimeGroup = computed(() => ['monitoring','collector','metrics','website_monitor','backup','feishu','email'].includes(String(route.query.group)) ? String(route.query.group) : 'monitoring')
 const category = computed(() => tab.value === 'runtime' ? runtimeGroup.value : tab.value)
 function chooseCategory(value: string) { void router.push({path:'/settings', query: {tab:['retention','storage','audit'].includes(value) ? value : 'runtime', group:['retention','storage','audit'].includes(value) ? undefined : value}}) }
 const fields: { key: keyof V3RetentionPolicy; label: string }[] = [

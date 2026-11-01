@@ -129,6 +129,7 @@ func (s *Server) UpdateTrust(ctx context.Context, r *agentv1.UpdateTrustRequest)
 }
 func (s *Server) Capabilities(ctx context.Context, _ *agentv1.CapabilitiesRequest) (*agentv1.CapabilitiesResponse, error) {
 	result := s.Source.Capabilities()
+	result.RecoveryRead = true
 	result.RootTrustRefresh = s.RootTrustRefresher != nil
 	if s.IdentityRenewer != nil {
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

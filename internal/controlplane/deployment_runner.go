@@ -20,6 +20,8 @@ type RemoteDeploymentCheckpoint struct {
 	State        string                        // absent, complete, unknown
 	Spec         *nodeops.Spec                 `json:"-"`
 	Installation *nodeops.InstallationEvidence `json:"-"`
+	Removal      *nodeops.RemovalEvidence      `json:"-"`
+	Restoration  *nodeops.RestorationEvidence  `json:"-"`
 }
 
 func (p RemoteDeploymentCheckpoint) matches(j DeploymentJob) bool {
@@ -151,7 +153,7 @@ func (s *Store) checkDeploymentPlan(ctx context.Context, j DeploymentJob) error 
 	if err != nil {
 		return err
 	}
-	if !n.Enabled || n.Version != j.NodeVersion || digest(n.Config) != current.Plan.ConfigDigest || n.Endpoint != current.Plan.Node.Endpoint || n.ServerName != current.Plan.Node.ServerName || n.Mode != current.Plan.Node.Mode || n.Name != current.Plan.Node.Name || n.Shard != current.Plan.Node.Shard {
+	if j.Kind != "uninstall" && !n.Enabled || n.Version != j.NodeVersion || digest(n.Config) != current.Plan.ConfigDigest || n.Endpoint != current.Plan.Node.Endpoint || n.ServerName != current.Plan.Node.ServerName || n.Mode != current.Plan.Node.Mode || n.Name != current.Plan.Node.Name || n.Shard != current.Plan.Node.Shard {
 		return ErrConflict
 	}
 	if err = checkDeploymentRuntimeTx(ctx, tx, current); err != nil {
@@ -202,6 +204,14 @@ func (w *DeploymentRunner) Execute(parent context.Context, j DeploymentJob) erro
 			op, stop = context.WithTimeout(ctx, 5*time.Second)
 			_, err = w.Store.recoveryRequest(op, w.Vault, current, "inspect")
 			stop()
+		}
+		if err == nil && current.Kind == "uninstall" {
+			op, stop = context.WithTimeout(ctx, 5*time.Second)
+			_, err = w.Store.uninstallRequest(op, w.Vault, current, "inspect")
+			stop()
+		}
+		if err == nil {
+			err = w.Store.checkLifecycleAuthorization(ctx, w.Vault, current)
 		}
 		if supported, ok := w.Runtime.(DeploymentPhaseSupport); err == nil && ok && !supported.SupportsDeploymentPhase(current.Phase()) {
 			err = DeploymentFailure{"executor-unavailable"}

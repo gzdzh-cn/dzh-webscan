@@ -34,6 +34,14 @@ import (
 // The disposable guest owns its kernel, systemd, filesystem and nested Docker
 // daemon. Only loopback exists; all SSH commands execute the actual helper.
 func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
+	webDeploymentKernel(t, false)
+}
+
+func TestWebUninstallKernelPublicAPIAndActualServices(t *testing.T) {
+	webDeploymentKernel(t, true)
+}
+
+func webDeploymentKernel(t *testing.T, uninstallOnly bool) {
 	mode := os.Getenv("WEBSCAN_V3_WEB_KERNEL_MODE")
 	if mode != "native" && mode != "docker" {
 		t.Skip("requires dedicated networkless web-deployment kernel guest")
@@ -49,7 +57,10 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 			t.Fatal("refusing existing Agent state", path)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 28*time.Minute)
+	// The combined regression includes several real image imports plus signed
+	// monitoring, identity recovery, name pruning and root rotation. Software
+	// emulation on ARM needs a suite budget distinct from each operation's cap.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()
 	f := webDeployFixture(t, time.Now().Add(-72*time.Hour))
 	// Replace the ordinary unit fixture's synthetic release files with the
@@ -112,6 +123,7 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 
 	var loseBackup atomic.Bool
 	var lostResponses atomic.Int32
+	var uninstallPendingPath string
 	remote := startNodeRPC(t, func(command string, channel ssh.Channel) {
 		var input io.Reader = channel
 		drop := false
@@ -128,6 +140,19 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 			input = bytes.NewReader(raw)
 			label = request.Operation + "/" + request.Phase
 			drop = request.Operation == "apply" && request.Phase == "backup" && loseBackup.CompareAndSwap(true, false)
+			if drop && request.Uninstall != nil {
+				if err := os.WriteFile(uninstallPendingPath, []byte("<?php echo 'retained event';"), 0600); err != nil {
+					t.Error("create actual pre-removal event", err)
+					return
+				}
+				for deadline := time.Now().Add(30 * time.Second); !webKernelPendingEvent(uninstallPendingPath); {
+					if time.Now().After(deadline) || ctx.Err() != nil {
+						t.Error("Agent did not persist pre-removal event")
+						return
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
 		}
 		commandContext, stop := context.WithTimeout(ctx, 12*time.Minute)
 		defer stop()
@@ -164,6 +189,7 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 	})
 	f.port, f.fingerprint = remote.credential.Port, remote.credential.Fingerprint
 	site := "/v3-tests/web-monitor"
+	uninstallPendingPath = site + "/pending-uninstall.php"
 	if err := os.Mkdir(site, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +197,12 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 	settings.Monitor.Roots, settings.ProbeDirectory = []string{site}, site+"/.probe"
 	settings.MetricsSourceIP = "127.0.0.1"
 	config, _ := json.Marshal(settings)
+	var initialConfig map[string]json.RawMessage
+	if json.Unmarshal(config, &initialConfig) != nil {
+		t.Fatal("initial monitor fixture")
+	}
+	initialConfig["monitoring_policy"] = json.RawMessage(`{"source":"inherited","rules_version":"0"}`)
+	config, _ = json.Marshal(initialConfig)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -187,9 +219,11 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workers := make(chan error, 3)
+	workers := make(chan error, 4)
 	go func() { workers <- f.worker.Run(ctx) }()
 	go func() { workers <- runner.Run(ctx) }()
+	monitoring := NewMonitoringApplicationWorker(f.s, f.c, f.t, runner.Runtime, "kernel-monitoring-worker")
+	go func() { workers <- monitoring.Run(ctx) }()
 	// The metric sink is explicitly simulated; collection, TLS and PostgreSQL
 	// readiness/acknowledgements are real. VM storage has a separate stack gate.
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body); w.WriteHeader(204) }))
@@ -198,7 +232,7 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 	go func() { workers <- collector.Run(ctx) }()
 	defer func() {
 		cancel()
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 4; i++ {
 			select {
 			case <-workers:
 			case <-time.After(15 * time.Second):
@@ -239,6 +273,21 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal(label, ctx.Err())
 			case <-time.After(time.Second):
+			}
+		}
+		if uninstallOnly {
+			var active, events, receipts, rejected, ready int
+			var metricsFailed, eventsFailed, protocolFailed bool
+			if err := f.s.DB.QueryRowContext(ctx, `SELECT
+ (SELECT count(*) FROM v3_active_nodes WHERE id='node-a' AND enabled),
+ (SELECT count(*) FROM v3_events WHERE node='node-a'),
+ (SELECT count(*) FROM v3_event_keys WHERE node='node-a'),
+ (SELECT count(*) FROM v3_event_rejections WHERE node='node-a'),
+ (SELECT count(*) FROM v3_node_readiness WHERE node='node-a'),
+ COALESCE((SELECT metrics_error<>'' FROM v3_node_status WHERE node='node-a'),false),
+ COALESCE((SELECT events_error<>'' FROM v3_node_status WHERE node='node-a'),false),
+ COALESCE((SELECT protocol_error<>'' FROM v3_node_status WHERE node='node-a'),false)`).Scan(&active, &events, &receipts, &rejected, &ready, &metricsFailed, &eventsFailed, &protocolFailed); err == nil {
+				t.Logf("collection diagnostic active=%d events=%d receipts=%d rejections=%d readiness=%d metrics_failed=%t events_failed=%t protocol_failed=%t", active, events, receipts, rejected, ready, metricsFailed, eventsFailed, protocolFailed)
 			}
 		}
 		t.Fatal("timed out", label)
@@ -293,6 +342,7 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 				t.Fatal(err)
 			}
 			if j.Status == "failed" && want != "failed" {
+				webKernelUninstallDiagnostic(t, j)
 				t.Fatal("actual deployment failed", j.Status, j.Phase(), j.ErrorCode)
 			}
 			return j.Status == want
@@ -324,6 +374,11 @@ func TestWebDeploymentKernelPublicAPIAndActualServices(t *testing.T) {
 		err := f.s.DB.QueryRow("SELECT count(*) FROM v3_events WHERE node='node-a' AND payload->>'path'=$1", site+"/acceptance.php").Scan(&n)
 		return err == nil && n >= 1
 	}, "actual filesystem event persistence")
+	if uninstallOnly {
+		webKernelUninstall(t, ctx, f, mode, site, &loseBackup, &lostResponses, call, queue, jobStatus, recover, wait, assertCentralUnchanged)
+		return
+	}
+	webKernelMonitoringApplication(t, ctx, f, site, &version, &loseBackup, &lostResponses, call, wait, assertCentralUnchanged)
 	for i, action := range []string{"resume", "rollback"} {
 		n, err := scanNode(f.s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id='node-a'"))
 		if err != nil {

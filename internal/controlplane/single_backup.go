@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 	"webscan/internal/nodepki"
+	"webscan/internal/persist"
 )
 
 // The host-local request pins the existing runtime and optional signed PKI
@@ -28,6 +29,7 @@ type singleBackupSpec struct {
 	APIConfig           string   `json:"api_config"`
 	ComposeFile         string   `json:"compose_file"`
 	PKIMaintenance      string   `json:"pki_maintenance,omitempty"`
+	MetricsUpgrade      string   `json:"metrics_upgrade,omitempty"`
 	RecoveryDirectories []string `json:"recovery_directories,omitempty"`
 }
 
@@ -35,6 +37,7 @@ type singleBackupPlan struct {
 	spec         singleInstallSpec
 	config       Config
 	metrics      metricsSnapshotStore
+	rawMetrics   *metricsSnapshotStore
 	sources      []singleBackupSource
 	installation string
 	request      singleBackupSpec
@@ -55,10 +58,18 @@ type singleBackupManifest struct {
 	Files        []metricsSnapshotFile `json:"files"`
 	Postgres     string                `json:"postgres_archive"`
 	Metrics      string                `json:"metrics_manifest_sha256"`
+	RawMetrics   string                `json:"raw_metrics_manifest_sha256,omitempty"`
+	HostWatchdog *singleBackupWatchdog `json:"host_watchdog,omitempty"`
 	// Engine snapshots are taken within a recorded interval, not a fictional
 	// cross-engine ACID timestamp. DR activation requires separate epoch and
 	// latest-retirement reconciliation; this archive never authorizes cutover.
 	Consistency string `json:"consistency"`
+}
+
+type singleBackupWatchdog struct {
+	File   string `json:"file"`
+	SHA256 string `json:"sha256"`
+	Bytes  int64  `json:"bytes"`
 }
 
 type singleBackupReceipt struct {
@@ -81,6 +92,15 @@ func planSingleBackup(ctx context.Context, request singleBackupSpec, output stri
 	if err != nil || j.Step != 6 || m.Spec.Format < 2 {
 		return empty, errSingleBackup
 	}
+	spec := m.Spec
+	var upgrade *singleMetricsUpgradeManifest
+	if request.MetricsUpgrade != "" {
+		u, e := readSingleMetricsUpgrade(ctx, request.MetricsUpgrade)
+		if e != nil || u.InstallationSHA256 != digest(raw) || request.Installation != u.Request.Backup.Installation || request.HostConfig != filepath.Join(u.Directory, "executor.yaml") || request.APIConfig != filepath.Join(u.Directory, "config.yaml") || request.ComposeFile != filepath.Join(u.Directory, "compose.yaml") || request.PKIMaintenance != u.Request.Backup.PKIMaintenance {
+			return empty, errSingleBackup
+		}
+		spec, upgrade = u.Effective, &u
+	}
 	metrics, err := metricsSnapshotInstallation(Options{Source: request.Installation, Config: request.HostConfig})
 	if err != nil {
 		return empty, errSingleBackup
@@ -99,7 +119,7 @@ func planSingleBackup(ctx context.Context, request singleBackupSpec, output stri
 		return empty, errSingleBackup
 	}
 	api, err := readConfig(request.APIConfig)
-	if err != nil || api.Central.Topology != "single" || api.Central.Instance != c.Central.Instance || api.Database.DSNFile != c.Database.DSNFile || api.Metrics.QueryURL != c.Metrics.QueryURL || api.DeploymentTrust.VaultKeyFile != c.DeploymentTrust.VaultKeyFile || !reflect.DeepEqual(api.DeploymentTrust.PreviousKeyFiles, c.DeploymentTrust.PreviousKeyFiles) {
+	if err != nil || api.Central.Topology != "single" || api.Central.Instance != c.Central.Instance || api.Database.DSNFile != c.Database.DSNFile || api.Metrics.QueryURL != c.Metrics.QueryURL || api.Metrics.RawURL != c.Metrics.RawURL || api.Metrics.PolicyFile != c.Metrics.PolicyFile || api.DeploymentTrust.VaultKeyFile != c.DeploymentTrust.VaultKeyFile || !reflect.DeepEqual(api.DeploymentTrust.PreviousKeyFiles, c.DeploymentTrust.PreviousKeyFiles) {
 		return empty, errSingleBackup
 	}
 	if _, err := readTrustData(request.ComposeFile, true, 2<<20); err != nil || verifySinglePKI(m.Spec, time.Now().UTC()) != nil {
@@ -118,6 +138,21 @@ func planSingleBackup(ctx context.Context, request singleBackupSpec, output stri
 		}
 	}
 	directories := append([]string{}, request.RecoveryDirectories...)
+	if spec.MetricsRetention {
+		if c.Metrics.PolicyFile != spec.configuration().Metrics.PolicyFile {
+			return empty, errSingleBackup
+		}
+		directories = append(directories, singleMetricsStateDirectory(spec))
+	} else if c.Metrics.PolicyFile != "" {
+		return empty, errSingleBackup
+	}
+	if upgrade != nil {
+		directories = append(directories, upgrade.Directory, upgrade.Request.StateDirectory)
+		files = append(files, request.MetricsUpgrade)
+		for path := range upgrade.Dependencies {
+			files = append(files, path)
+		}
+	}
 	for _, directory := range []string{c.Central.ExportDirectory, c.Metrics.SpoolDir} {
 		if directory != "" {
 			directories = append(directories, directory)
@@ -141,13 +176,41 @@ func planSingleBackup(ctx context.Context, request singleBackupSpec, output stri
 		directories = append(directories, filepath.Dir(request.PKIMaintenance))
 		files = append(files, maintenance.PublicKeyFile)
 	}
+	if c.HostWatchdog.Enabled {
+		if !api.HostWatchdog.Enabled || c.HostWatchdog.Socket != api.HostWatchdog.Socket || c.HostWatchdog.SpecFile != api.HostWatchdog.SpecFile {
+			return empty, errSingleBackup
+		}
+		files = append(files, c.HostWatchdog.SpecFile)
+	}
 	sources, err := normalizeSingleBackupSources(m.Spec.Root, files, directories, output)
 	if err != nil {
 		return empty, err
 	}
+	if c.HostWatchdog.Enabled {
+		// Mutable SQLite and socket directories must be separate components,
+		// never traversed by the static host capture or its recheck.
+		for _, source := range sources {
+			for _, live := range []string{c.HostWatchdog.StateDirectory, filepath.Dir(c.HostWatchdog.Socket)} {
+				if singleBackupContains(source.Path, live) || singleBackupContains(live, source.Path) {
+					return empty, errSingleBackup
+				}
+			}
+		}
+	}
 	bindings := map[string]string{}
 	for file, hash := range parsedHashes {
 		bindings[file] = hash
+	}
+	if upgrade != nil {
+		for path, hash := range upgrade.Dependencies {
+			if existing, ok := bindings[path]; ok && existing != hash {
+				return empty, errSingleBackup
+			}
+			bindings[path] = hash
+		}
+		for name, hash := range upgrade.Files {
+			bindings[filepath.Join(upgrade.Directory, name)] = hash
+		}
 	}
 	for name, hash := range m.Files {
 		file := filepath.Join(m.Spec.Root, name)
@@ -186,7 +249,16 @@ func planSingleBackup(ctx context.Context, request singleBackupSpec, output stri
 			return empty, errSingleBackup
 		}
 	}
-	return singleBackupPlan{spec: m.Spec, config: c, metrics: metrics, sources: sources, installation: digest(raw), request: request, output: output, bindings: bindings}, nil
+	var rawMetrics *metricsSnapshotStore
+	if c.Metrics.RawURL != "" {
+		if !spec.MetricsLayers || c.Metrics.RawURL != spec.configuration().Metrics.RawURL {
+			return empty, errSingleBackup
+		}
+		rawMetrics = &metricsSnapshotStore{URL: c.Metrics.RawURL, Directory: filepath.Join(m.Spec.Root, "raw-metrics-data")}
+	} else if spec.MetricsLayers {
+		return empty, errSingleBackup
+	}
+	return singleBackupPlan{spec: spec, config: c, metrics: metrics, rawMetrics: rawMetrics, sources: sources, installation: digest(raw), request: request, output: output, bindings: bindings}, nil
 }
 
 func decodeSingleBackupConfig(raw []byte) (Config, error) {
@@ -302,6 +374,17 @@ func (s *Store) backupSingle(ctx context.Context, p singleBackupPlan) (singleBac
 			return errSingleBackup
 		}
 		manifest.Postgres = "postgres/" + filepath.Base(postgres)
+		if p.config.HostWatchdog.Enabled {
+			phase = "watchdog-snapshot"
+			if unix.Mkdirat(int(stage.directory.Fd()), "watchdog", 0700) != nil {
+				return errSingleBackup
+			}
+			snapshot, err := BackupHostWatchdog(ctx, p.config, filepath.Join(stage.path, "watchdog", "watchdog.sqlite3"))
+			if err != nil {
+				return err
+			}
+			manifest.HostWatchdog = &singleBackupWatchdog{File: "watchdog/watchdog.sqlite3", SHA256: snapshot.SHA256, Bytes: snapshot.Size}
+		}
 		phase = "metrics-snapshot"
 		metrics, err := p.metrics.backup(ctx, filepath.Join(stage.path, "metrics"))
 		if err != nil {
@@ -316,6 +399,20 @@ func (s *Store) backupSingle(ctx context.Context, p singleBackupPlan) (singleBac
 			return errMetricsSnapshotCleanup
 		}
 		manifest.Metrics = metrics.ManifestSHA256
+		if p.rawMetrics != nil {
+			phase = "raw-metrics-snapshot"
+			raw, err := p.rawMetrics.backup(ctx, filepath.Join(stage.path, "metrics-raw"))
+			if err != nil {
+				if !raw.SnapshotClean && raw.Snapshot != "" {
+					receipt.State, receipt.PendingSnapshot = "failed", "raw:"+raw.Snapshot
+				}
+				return err
+			}
+			if !raw.SnapshotClean {
+				return errMetricsSnapshotCleanup
+			}
+			manifest.RawMetrics = raw.ManifestSHA256
+		}
 		phase = "host-recheck"
 		current, currentModes, err := captureSingleBackupHost(ctx, p.spec.Root, p.sources, nil)
 		if err != nil || !sameSingleBackupHost(captured, current, modes, currentModes) {
@@ -407,7 +504,7 @@ func inspectSingleBackupTree(ctx context.Context, root *os.File) (metricsSnapsho
 	actual := metricsSnapshotManifest{Files: []metricsSnapshotFile{}, Directories: []string{}}
 	var total int64
 	entries, err := snapshotEntries(root)
-	if err != nil || len(entries) < 3 || len(entries) > 4 {
+	if err != nil || len(entries) < 3 || len(entries) > 6 {
 		return actual, errSingleBackup
 	}
 	seen := map[string]bool{}
@@ -415,7 +512,7 @@ func inspectSingleBackupTree(ctx context.Context, root *os.File) (metricsSnapsho
 		if entry.Name() == "backup.json" {
 			continue
 		}
-		if entry.Name() != "host" && entry.Name() != "postgres" && entry.Name() != "metrics" {
+		if entry.Name() != "host" && entry.Name() != "postgres" && entry.Name() != "metrics" && entry.Name() != "watchdog" && entry.Name() != "metrics-raw" {
 			return actual, errSingleBackup
 		}
 		seen[entry.Name()] = true
@@ -429,7 +526,7 @@ func inspectSingleBackupTree(ctx context.Context, root *os.File) (metricsSnapsho
 			return actual, errSingleBackup
 		}
 	}
-	if len(seen) != 3 {
+	if !seen["host"] || !seen["postgres"] || !seen["metrics"] || len(seen) > 5 {
 		return actual, errSingleBackup
 	}
 	sort.Strings(actual.Directories)
@@ -454,6 +551,54 @@ func verifySingleBackup(ctx context.Context, directory, expected string) (single
 	}
 	if _, err := verifyMetricsSnapshot(ctx, filepath.Join(directory, "metrics"), manifest.Metrics); err != nil {
 		return manifest, errSingleBackup
+	}
+	if manifest.RawMetrics != "" {
+		if !releaseDigest(manifest.RawMetrics) {
+			return manifest, errSingleBackup
+		}
+		if _, err := verifyMetricsSnapshot(ctx, filepath.Join(directory, "metrics-raw"), manifest.RawMetrics); err != nil {
+			return manifest, errSingleBackup
+		}
+	} else {
+		for _, d := range actual.Directories {
+			if d == "metrics-raw" {
+				return manifest, errSingleBackup
+			}
+		}
+	}
+	if manifest.HostWatchdog != nil {
+		w := manifest.HostWatchdog
+		if w.File != "watchdog/watchdog.sqlite3" || !releaseDigest(w.SHA256) || w.Bytes <= 0 {
+			return manifest, errSingleBackup
+		}
+		found := false
+		for _, f := range actual.Files {
+			if f.Path == w.File {
+				found = f.SHA256 == w.SHA256 && f.Bytes == w.Bytes
+			}
+		}
+		if !found {
+			return manifest, errSingleBackup
+		}
+		db, err := persist.OpenReadOnly(filepath.Join(directory, w.File))
+		if err != nil {
+			return manifest, errSingleBackup
+		}
+		var integrity, instance, installation string
+		err = db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity)
+		if err == nil {
+			err = db.QueryRowContext(ctx, `SELECT instance,installation FROM host_state WHERE id=1`).Scan(&instance, &installation)
+		}
+		db.Close()
+		if err != nil || integrity != "ok" || instance != manifest.Instance || installation != manifest.Installation {
+			return manifest, errSingleBackup
+		}
+	} else {
+		for _, d := range actual.Directories {
+			if d == "watchdog" {
+				return manifest, errSingleBackup
+			}
+		}
 	}
 	header, err := inspectPGBackup(filepath.Join(directory, manifest.Postgres))
 	if err != nil || header.Version != manifest.Schema {

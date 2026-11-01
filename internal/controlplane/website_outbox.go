@@ -122,7 +122,7 @@ func (s *Store) FlushWebsiteNotices(ctx context.Context, l Lease) error {
 		}
 		for i, message := range g.NotificationMessages(console) {
 			payload := common.Map{"message": message, "source": "website", "node_id": g.Node, "notice_kind": g.Kind, "site_ids": g.Sites}
-			if err = enqueueNotice(ctx, tx, "central", fmt.Sprintf("%s:%d:%d", prefix, g.IDs[0], i), payload, category); err != nil {
+			if err = enqueueNotice(ctx, tx, "central", fmt.Sprintf("%s:%d:%d", prefix, g.IDs[0], i), payload, category, "website"); err != nil {
 				return err
 			}
 		}

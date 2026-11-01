@@ -89,11 +89,23 @@ func newSingleBackupFixtureFormat(t *testing.T, actualHelper string, format int)
 	return newSingleBackupFixtureOptions(t, actualHelper, format, false)
 }
 
-func newSingleBackupFixtureOptions(t *testing.T, actualHelper string, format int, defaultBackup bool) (singleBackupPlan, *metricsSnapshotFixture) {
+func newSingleBackupFixtureOptions(t *testing.T, actualHelper string, format int, defaultBackup bool, watchdog ...bool) (singleBackupPlan, *metricsSnapshotFixture) {
 	t.Helper()
 	ctx := context.Background()
 	metrics := newMetricsSnapshotFixture(t)
 	s := singleSpecFixture(t)
+	if len(watchdog) > 0 && watchdog[0] {
+		parent, err := os.MkdirTemp("/tmp", "ws-wd-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		parent, err = filepath.EvalSymlinks(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(parent) })
+		s.Root, s.HostWatchdog = filepath.Join(parent, "single"), true
+	}
 	trust := newTrustToolFixture(t)
 	if actualHelper != "" {
 		raw, err := os.ReadFile(actualHelper)
@@ -108,6 +120,13 @@ func newSingleBackupFixtureOptions(t *testing.T, actualHelper string, format int
 		trust.signed = trust.sign.Output
 	}
 	c := trust.config()
+	var rawMetrics *metricsSnapshotFixture
+	if len(watchdog) > 1 && watchdog[1] {
+		rawMetrics = newMetricsSnapshotFixture(t)
+		u, _ := url.Parse(rawMetrics.store.URL)
+		s.RawMetricsPort, _ = strconv.Atoi(u.Port())
+		s.MetricsLayers = true
+	}
 	s.Format, s.ReleaseTrust = format, &c
 	if defaultBackup {
 		s.Backup = &singleInstallBackupPolicy{Directory: s.Root + "-backups", Keep: 7}
@@ -144,6 +163,13 @@ func newSingleBackupFixtureOptions(t *testing.T, actualHelper string, format int
 		t.Fatal(err)
 	}
 	metrics.store.Directory = filepath.Join(s.Root, "metrics-data")
+	if rawMetrics != nil {
+		if err := os.Rename(rawMetrics.store.Directory, filepath.Join(s.Root, "raw-metrics-data")); err != nil {
+			t.Fatal(err)
+		}
+		rawMetrics.store.Directory = filepath.Join(s.Root, "raw-metrics-data")
+		localWrite(t, filepath.Join(rawMetrics.store.Directory, "raw-live-do-not-copy"), []byte("not a snapshot"))
+	}
 	j, err := readSingleInstallation(s, digest(helper))
 	if err != nil {
 		t.Fatal(err)

@@ -162,6 +162,29 @@ func (s *Journal) Handle(r Request) (res Result) {
 	// Run while the Journal operation lock still fences successors. A failed
 	// evidence read cannot turn into a successful, unbound final receipt.
 	defer func() {
+		if res.Code == "ok" && res.State == "complete" && r.Uninstall != nil {
+			provider, ok := s.handler.(uninstallEvidenceProvider)
+			if !ok {
+				res = result(r, "unknown", "verification-failed", Outcome{})
+				return
+			}
+			if r.Phase == "finalize" {
+				evidence, err := provider.removalEvidence(r)
+				if err != nil || evidence == nil || !evidence.Valid() {
+					res = result(r, "unknown", "verification-failed", Outcome{})
+					return
+				}
+				res.Removal = evidence
+			} else if r.Phase == "verify-rollback" {
+				evidence, err := provider.restorationEvidence(r)
+				if err != nil || evidence == nil || !evidence.Valid() {
+					res = result(r, "unknown", "verification-failed", Outcome{})
+					return
+				}
+				res.Restoration = evidence
+			}
+			return
+		}
 		if res.Code != "ok" || res.State != "complete" || r.Phase != "finalize" || r.Recovery != nil {
 			return
 		}

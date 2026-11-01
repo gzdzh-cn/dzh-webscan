@@ -28,6 +28,7 @@ import { installElements } from '../elements'
 import App from './App.vue'
 import Servers from './Servers.vue'
 import Deployments from './Deployments.vue'
+import LegacyMigrationHistory from './LegacyMigrationHistory.vue'
 import ConfigurationApplications from './ConfigurationApplications.vue'
 import Events from './Events.vue'
 import Alerts from './Alerts.vue'
@@ -43,6 +44,7 @@ const router = createRouter({ history: createWebHistory(), routes: [
   { path: '/login', component: { render: () => null } },
   { path: '/servers/:id?', component: Servers },
   { path: '/deployments/:id?', component: Deployments },
+  { path: '/migration-history', component: LegacyMigrationHistory },
   { path: '/configuration-applications/:id?', component: ConfigurationApplications },
   { path: '/events', component: Events },
   { path: '/alerts', component: Alerts },

@@ -28,6 +28,7 @@ type Installation struct {
 	// single-Agent lifecycle drivers cannot adopt or operate such a group.
 	Wrappers []legacyWrapperMember `json:"wrappers,omitempty"`
 	Sidecars []legacyComposeMember `json:"sidecars,omitempty"`
+	Removal  *ReinstallReference   `json:"removal,omitempty"`
 }
 
 type legacyWrapperMember struct {
@@ -53,7 +54,10 @@ func (i Installation) valid(node string) bool {
 		return false
 	}
 	if i.Generation == "absent" {
-		return i.Mode == "" && i.Runtime == "" && len(i.Services) == 0 && !hasLegacyMembers(i)
+		return i.Mode == "" && i.Runtime == "" && len(i.Services) == 0 && !hasLegacyMembers(i) && validReinstall(i.Removal)
+	}
+	if i.Removal != nil {
+		return false
 	}
 	if i.Generation != "v2" && i.Generation != "v3" || (i.Mode != "native" && i.Mode != "docker") || !safeServicePath(i.Runtime) {
 		return false

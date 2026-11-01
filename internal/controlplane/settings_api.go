@@ -94,6 +94,8 @@ func decodeSettingsEditor(w http.ResponseWriter, r *http.Request) (settingsEdito
 
 func settingsEditorFailure(w http.ResponseWriter, e error) {
 	switch {
+	case errors.Is(e, errMetricsRetentionRuntime):
+		failure(w, 503, "metrics_retention_unavailable", errMetricsRetentionRuntime.Error())
 	case errors.Is(e, errSettingsEdit):
 		failure(w, 400, "invalid_settings", errSettingsEdit.Error())
 	case errors.Is(e, ErrConfigurationBackupPermission):

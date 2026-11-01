@@ -22,6 +22,11 @@ const consoleStatusSQL = `CASE WHEN s.node IS NULL THEN NULL ELSE jsonb_build_ob
  'info',jsonb_build_object('hostname',s.info->>'nodename','kernel',s.info->>'release','architecture',s.info->>'machine','agent_version',s.info->>'agent_version','agent_mode',s.info->>'agent_mode')) END`
 
 func (s *Store) consoleNodes(ctx context.Context, after, keyword, state string, limit, interval int) ([]json.RawMessage, error) {
+	var err error
+	interval, err = s.effectiveCollectorInterval(ctx, interval)
+	if err != nil {
+		return nil, err
+	}
 	if limit < 1 || limit > 200 {
 		return nil, errors.New("每页数量须为 1～200")
 	}

@@ -169,7 +169,11 @@ func runDockerEngineLifecycle(t *testing.T, kernel, recovery bool, nameChange ..
 	t.Cleanup(func() {
 		for _, id := range ids {
 			cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
-			_, err := inventoryCommand(cleanup, "docker", "--host", "unix:///var/run/docker.sock", "rm", "-f", id)
+			cleanupContext, release, err := acquireServiceOperation(cleanup, w.root)
+			if err == nil {
+				_, err = inventoryCommand(cleanupContext, "docker", "--host", "unix:///var/run/docker.sock", "rm", "-f", id)
+				release()
+			}
 			stop()
 			if err != nil {
 				t.Error("cleanup exact test container", err)

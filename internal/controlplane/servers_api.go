@@ -60,5 +60,13 @@ func (a *API) serverDetail(w http.ResponseWriter, r *http.Request) {
 		failure(w, 503, "query_failed", "服务器详情暂时不可用")
 		return
 	}
+	summaries, err := a.uninstallSummaries(ctx, []string{n.ID})
+	if err != nil {
+		failure(w, 503, "query_failed", "节点生命周期暂不可用")
+		return
+	}
+	if summary, ok := summaries[n.ID]; ok {
+		n.CanUninstall, n.UninstallReason, n.Lifecycle = summary.CanUninstall, summary.Reason, summary.State
+	}
 	reply(w, 200, map[string]any{"node": n, "status": status, "latest_deployment": latest})
 }

@@ -8,25 +8,52 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // Delivery payloads and provider responses may contain credentials or tokens.
-// This read model deliberately exposes only the historical delivery metadata.
+// This read model exposes delivery metadata and verified, bounded business text.
 type NotificationRecord struct {
-	State        string     `json:"state"`
-	NextTry      *time.Time `json:"next_try"`
-	ID           string     `json:"id"`
-	Node         string     `json:"node"`
-	Event        string     `json:"event_id"`
-	Channel      string     `json:"channel"`
-	Recipient    string     `json:"recipient"`
-	Created      time.Time  `json:"created_at"`
-	Completed    *time.Time `json:"done_at"`
-	Attempts     int        `json:"attempts"`
-	RecordKey    string     `json:"record_key"`
-	CanDelete    bool       `json:"can_delete"`
-	DeleteReason string     `json:"delete_reason"`
+	Source        string     `json:"source"`
+	Subject       string     `json:"subject"`
+	Summary       string     `json:"summary"`
+	ContentState  string     `json:"content_state"`
+	ContentReason string     `json:"content_reason"`
+	Truncated     bool       `json:"truncated"`
+	State         string     `json:"state"`
+	NextTry       *time.Time `json:"next_try"`
+	ID            string     `json:"id"`
+	Node          string     `json:"node"`
+	Event         string     `json:"event_id"`
+	Channel       string     `json:"channel"`
+	Recipient     string     `json:"recipient"`
+	Created       time.Time  `json:"created_at"`
+	Completed     *time.Time `json:"done_at"`
+	Attempts      int        `json:"attempts"`
+	RecordKey     string     `json:"record_key"`
+	CanDelete     bool       `json:"can_delete"`
+	DeleteReason  string     `json:"delete_reason"`
 }
+
+type NotificationFilter struct {
+	Channel, Node, State, DeliveryState, Source, Q, Recipient string
+	Start, End                                                time.Time
+	Before                                                    notificationCursor
+	Limit                                                     int
+}
+
+func validNotificationDeliveryState(s string) bool {
+	switch s {
+	case "", "completed", "migration_pending", "paused", "sending", "waiting", "retrying", "pending":
+		return true
+	}
+	return false
+}
+
+func (f NotificationFilter) valid() bool {
+	return (f.Channel == "feishu" || f.Channel == "email") && (f.State == "" || f.State == "pending" || f.State == "completed") && validNotificationDeliveryState(f.DeliveryState) && (f.Source == "" || validNotificationSource(f.Source)) && f.Limit >= 1 && f.Limit <= 200 && !f.Start.IsZero() && f.End.After(f.Start) && f.End.Sub(f.Start) <= 31*24*time.Hour && (f.Node == "" || eventText(f.Node, 512)) && utf8.ValidString(f.Q) && len(f.Q) <= 200 && (f.Q == "" || eventText(f.Q, 200)) && (f.Recipient == "" || eventText(f.Recipient, 254))
+}
+
 type notificationCursor struct {
 	Time time.Time `json:"time"`
 	ID   string    `json:"id"`
@@ -56,33 +83,57 @@ func decodeNotificationCursor(raw string) (notificationCursor, error) {
 }
 
 func (s *Store) NotificationHistory(ctx context.Context, channel, node, state string, start, end time.Time, before notificationCursor, limit int) ([]NotificationRecord, error) {
-	if (channel != "feishu" && channel != "email") || (state != "" && state != "pending" && state != "completed") || limit < 1 || limit > 200 || start.IsZero() || !end.After(start) || end.Sub(start) > 31*24*time.Hour || (node != "" && !eventText(node, 512)) {
+	return s.NotificationHistoryFiltered(ctx, NotificationFilter{Channel: channel, Node: node, State: state, Start: start, End: end, Before: before, Limit: limit})
+}
+
+const notificationDeliveryStateSQL = `CASE WHEN t.done_at IS NOT NULL THEN 'completed'
+ WHEN t.migration_pending THEN 'migration_pending'
+ WHEN NOT COALESCE((SELECT payload->t.channel->'enabled'='true'::jsonb FROM v3_settings WHERE id=1),false) THEN 'paused'
+ WHEN t.lease_owner IS NOT NULL AND t.lease_until>clock_timestamp() THEN 'sending'
+ WHEN EXISTS(SELECT 1 FROM v3_notifications older WHERE older.node=t.node AND older.channel=t.channel AND older.recipient=t.recipient AND older.id<t.id AND older.done_at IS NULL) THEN 'waiting'
+ WHEN t.attempts>0 THEN 'retrying' ELSE 'pending' END`
+
+const notificationRecordColumns = `t.id::text,t.node,t.event_id,t.channel,t.recipient,t.created_at,t.done_at,t.attempts,t.delivery_state,
+ CASE WHEN t.done_at IS NULL THEN t.next_try ELSE NULL END,t.public_delete_reason,t.public_source,t.public_subject,t.public_summary,t.public_content_state,t.public_content_reason,t.public_truncated`
+
+func scanNotificationRecord(row interface{ Scan(...any) error }) (NotificationRecord, error) {
+	var v NotificationRecord
+	err := row.Scan(&v.ID, &v.Node, &v.Event, &v.Channel, &v.Recipient, &v.Created, &v.Completed, &v.Attempts, &v.State, &v.NextTry, &v.DeleteReason, &v.Source, &v.Subject, &v.Summary, &v.ContentState, &v.ContentReason, &v.Truncated)
+	v.RecordKey = "notification:" + v.ID
+	v.CanDelete = v.DeleteReason == ""
+	return v, err
+}
+
+func notificationHistoryReadSQL() string {
+	return `(SELECT t.*,` + notificationDeliveryStateSQL + ` delivery_state FROM ` + notificationPublicReadSQL() + ` t)`
+}
+
+func (s *Store) NotificationHistoryFiltered(ctx context.Context, f NotificationFilter) ([]NotificationRecord, error) {
+	if !f.valid() {
 		return nil, ErrHistoryInput
 	}
+	before := f.Before
 	if before.Time.IsZero() {
 		before.Time = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 		before.ID = "1"
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT t.id::text,t.node,t.event_id,t.channel,t.recipient,t.created_at,t.done_at,t.attempts,
- CASE WHEN t.done_at IS NOT NULL THEN 'completed'
- WHEN t.migration_pending THEN 'migration_pending'
- WHEN NOT COALESCE((SELECT payload->$1->'enabled'='true'::jsonb FROM v3_settings WHERE id=1),false) THEN 'paused'
- WHEN t.lease_owner IS NOT NULL AND t.lease_until>clock_timestamp() THEN 'sending'
- WHEN EXISTS(SELECT 1 FROM v3_notifications older WHERE older.node=t.node AND older.channel=t.channel AND older.recipient=t.recipient AND older.id<t.id AND older.done_at IS NULL) THEN 'waiting'
- WHEN t.attempts>0 THEN 'retrying' ELSE 'pending' END,
- CASE WHEN t.done_at IS NULL THEN t.next_try ELSE NULL END,`+historyDeleteReasonSQL(6, "t")+` FROM v3_notifications t WHERE t.channel=$1 AND ($2='' OR t.node=$2) AND ($3='' OR ($3='pending' AND t.done_at IS NULL) OR ($3='completed' AND t.done_at IS NOT NULL)) AND t.created_at >= $4 AND t.created_at <= $5 AND (t.created_at,t.id)<($6,$7::bigint) ORDER BY t.created_at DESC,t.id DESC LIMIT $8`, channel, node, state, start, end, before.Time, before.ID, limit)
+	if _, err := decodeNotificationCursor(before.encode()); err != nil {
+		return nil, ErrHistoryInput
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+notificationRecordColumns+` FROM `+notificationHistoryReadSQL()+` t WHERE t.channel=$1 AND ($2='' OR t.node=$2) AND ($3='' OR ($3='pending' AND t.done_at IS NULL) OR ($3='completed' AND t.done_at IS NOT NULL)) AND t.created_at >= $4 AND t.created_at <= $5 AND (t.created_at,t.id)<($6,$7::bigint)
+ AND ($8='' OR t.public_source=$8) AND ($9='' OR t.recipient=$9) AND ($10='' OR t.delivery_state=$10)
+ AND ($11='' OR (t.public_content_state='available' AND strpos(lower(t.public_subject||E'\n'||t.public_summary||E'\n'||t.public_body),lower($11))>0))
+ ORDER BY t.created_at DESC,t.id DESC LIMIT $12`, f.Channel, f.Node, f.State, f.Start, f.End, before.Time, before.ID, f.Source, f.Recipient, f.DeliveryState, f.Q, f.Limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []NotificationRecord{}
 	for rows.Next() {
-		var v NotificationRecord
-		if err = rows.Scan(&v.ID, &v.Node, &v.Event, &v.Channel, &v.Recipient, &v.Created, &v.Completed, &v.Attempts, &v.State, &v.NextTry, &v.DeleteReason); err != nil {
-			return nil, err
+		v, e := scanNotificationRecord(rows)
+		if e != nil {
+			return nil, e
 		}
-		v.RecordKey = "notification:" + v.ID
-		v.CanDelete = v.DeleteReason == ""
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -117,7 +168,8 @@ func (a *API) notificationHistoryRoutes(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	items, err := a.Store.NotificationHistory(ctx, r.URL.Query().Get("channel"), r.URL.Query().Get("node"), r.URL.Query().Get("state"), start, end, before, limit)
+	q := r.URL.Query()
+	items, err := a.Store.NotificationHistoryFiltered(ctx, NotificationFilter{Channel: q.Get("channel"), Node: q.Get("node"), State: q.Get("state"), Source: q.Get("source"), Q: q.Get("q"), Recipient: q.Get("recipient"), DeliveryState: q.Get("delivery_state"), Start: start, End: end, Before: before, Limit: limit})
 	if err != nil {
 		historyFailure(w, err)
 		return true

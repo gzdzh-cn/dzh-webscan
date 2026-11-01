@@ -19,12 +19,13 @@ import (
 var errSettingsPreview = errors.New("设置预览已过期，或账号、配置、部署状态已变化，请重新预览")
 
 type settingsEditorView struct {
-	State          settingsDraftState `json:"state"`
-	Fields         []settingsField    `json:"fields"`
-	Values         map[string]any     `json:"values"`
-	RuntimeValues  map[string]any     `json:"runtime_values"`
-	Secrets        map[string]bool    `json:"secret_configured"`
-	RuntimeSecrets map[string]bool    `json:"runtime_secret_configured"`
+	State            settingsDraftState   `json:"state"`
+	Fields           []settingsField      `json:"fields"`
+	Values           map[string]any       `json:"values"`
+	RuntimeValues    map[string]any       `json:"runtime_values"`
+	Secrets          map[string]bool      `json:"secret_configured"`
+	RuntimeSecrets   map[string]bool      `json:"runtime_secret_configured"`
+	MetricsRetention metricsRetentionView `json:"metrics_retention"`
 }
 
 func projectSettingsValues(raw []byte) (map[string]any, map[string]bool, error) {
@@ -75,6 +76,30 @@ func (s *Store) settingsEditor(ctx context.Context, user string, b *configuratio
 		return out, e
 	}
 	out.RuntimeValues, out.RuntimeSecrets, e = projectSettingsValues(d.Runtime)
+	if e != nil {
+		return out, e
+	}
+	out.MetricsRetention, e = readMetricsRetentionView(ctx, tx, b.bootstrap, b.vault)
+	if e != nil {
+		return out, e
+	}
+	if out.MetricsRetention.Available {
+		out.Fields = append(out.Fields, metricsRetentionFields()...)
+		for _, item := range []struct {
+			raw    []byte
+			values map[string]any
+		}{{d.Desired, out.Values}, {d.Runtime, out.RuntimeValues}} {
+			var values configurationValues
+			if decodeConfigurationObject(item.raw, &values) != nil {
+				return out, errSettingsDraft
+			}
+			for _, f := range metricsRetentionFields() {
+				if value, ok := settingsPath(values, f.Path); ok {
+					item.values[f.Path] = value
+				}
+			}
+		}
+	}
 	return out, e
 }
 
@@ -177,6 +202,9 @@ func prepareSettingsEditorTx(ctx context.Context, tx *sql.Tx, b *configurationEd
 		for _, f := range settingsFields() {
 			allowed[f.Path] = true
 		}
+		for _, f := range metricsRetentionFields() {
+			allowed[f.Path] = true
+		}
 		for p := range settingsSecretLabels {
 			allowed[p] = true
 		}
@@ -229,6 +257,20 @@ func prepareSettingsEditorTx(ctx context.Context, tx *sql.Tx, b *configurationEd
 	}
 	if e != nil {
 		return bad(e)
+	}
+	if hasMetricsRetentionChange(changed) {
+		availability, err := readMetricsRetentionView(ctx, tx, b.bootstrap, b.vault)
+		if err != nil {
+			return bad(err)
+		}
+		if !availability.Available {
+			return bad(errMetricsRetentionRuntime)
+		}
+		for _, f := range metricsRetentionFields() {
+			if value, ok := settingsPath(target, f.Path); ok && !f.valid(value) {
+				return bad(errSettingsEdit)
+			}
+		}
 	}
 	if validateSettingsDraft(b.bootstrap, common.JSON(target)) != nil {
 		return bad(errSettingsEdit)
@@ -290,6 +332,13 @@ func (s *Store) previewSettingsEditor(ctx context.Context, user string, in setti
 		return out, e
 	}
 	out.RetentionShortened = newPolicy.Events < oldPolicy.Events || newPolicy.Security < oldPolicy.Security || newPolicy.Servers < oldPolicy.Servers || newPolicy.Websites < oldPolicy.Websites || newPolicy.Notifications < oldPolicy.Notifications
+	for _, f := range metricsRetentionFields() {
+		before, oldOK := settingsPath(original, f.Path)
+		after, newOK := settingsPath(target, f.Path)
+		if oldOK && newOK && common.I(after) < common.I(before) {
+			out.RetentionShortened = true
+		}
+	}
 	for _, channel := range []string{"email", "feishu"} {
 		if common.B(common.M(target[channel])["enabled"]) && !common.B(common.M(original[channel])["enabled"]) {
 			out.NotificationsEnabled = true

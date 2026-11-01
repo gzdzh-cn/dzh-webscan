@@ -29,6 +29,7 @@ type Collector struct {
 }
 type nodeRun struct {
 	version, epoch, runtimeEpoch int64
+	intervalSeconds              int
 	cancel                       context.CancelFunc
 	done                         chan struct{}
 	wake                         chan struct{}
@@ -57,7 +58,7 @@ func (c *Collector) Run(ctx context.Context) error {
 		}
 	}
 	if c.Metrics == nil {
-		c.Metrics = &Metrics{WriteURL: c.Config.Metrics.WriteURL, QueryURL: c.Config.Metrics.QueryURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
+		c.Metrics = &Metrics{WriteURL: c.Config.Metrics.WriteURL, QueryURL: c.Config.Metrics.QueryURL, RawURL: c.Config.Metrics.RawURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
 	}
 	c.slots = make(chan struct{}, c.Config.Collector.Concurrency)
 	running := map[string]nodeRun{}
@@ -81,6 +82,10 @@ func (c *Collector) Run(ctx context.Context) error {
 	for {
 		cycle, cancel := context.WithTimeout(ctx, 8*time.Second)
 		wanted, newLeases, e := c.reconcile(cycle, leases)
+		intervalSeconds := c.Config.Collector.IntervalSeconds
+		if e == nil {
+			intervalSeconds, e = c.Store.effectiveCollectorInterval(cycle, intervalSeconds)
+		}
 		var targets []collectionTarget
 		if e == nil {
 			// This optional acceleration must not cancel healthy collection when
@@ -117,7 +122,7 @@ func (c *Collector) Run(ctx context.Context) error {
 					finished = true
 				default:
 				}
-				if finished || r.identitySHA != identitySHA || !ok || r.version != n.Version || r.epoch != l.Epoch || r.runtimeEpoch != n.RuntimeEpoch {
+				if finished || r.identitySHA != identitySHA || !ok || r.version != n.Version || r.epoch != l.Epoch || r.runtimeEpoch != n.RuntimeEpoch || r.intervalSeconds != intervalSeconds {
 					r.cancel()
 					<-r.done
 					delete(running, id)
@@ -131,8 +136,9 @@ func (c *Collector) Run(ctx context.Context) error {
 				nodeCtx, stop := context.WithCancel(ctx)
 				done := make(chan struct{})
 				wake := make(chan struct{}, 1)
-				running[id] = nodeRun{version: n.Version, epoch: l.Epoch, runtimeEpoch: n.RuntimeEpoch, cancel: stop, done: done, wake: wake, identitySHA: identitySHA}
-				go func(n Node, l Lease) { defer close(done); c.node(nodeCtx, n, l, wake) }(n, l)
+				running[id] = nodeRun{version: n.Version, epoch: l.Epoch, runtimeEpoch: n.RuntimeEpoch, intervalSeconds: intervalSeconds, cancel: stop, done: done, wake: wake, identitySHA: identitySHA}
+				worker := collectorRunWithInterval(c, intervalSeconds)
+				go func(n Node, l Lease) { defer close(done); worker.node(nodeCtx, n, l, wake) }(n, l)
 			}
 			wakeCollectionTargets(running, wanted, leases, targets)
 		}

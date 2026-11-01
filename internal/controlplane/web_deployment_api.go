@@ -30,7 +30,7 @@ func (s *Store) vaultAvailable(ctx context.Context, v *Vault) error {
 	if v == nil {
 		return ErrCredentialUnavailable
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT key_id FROM (SELECT key_id FROM v3_credentials UNION SELECT key_id FROM v3_configuration_backups UNION SELECT key_id FROM v3_node_certificates UNION SELECT key_id FROM v3_node_provisioning) k`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT DISTINCT key_id FROM (SELECT key_id FROM v3_credentials UNION SELECT key_id FROM v3_configuration_backups UNION SELECT key_id FROM v3_node_certificates UNION SELECT key_id FROM v3_node_provisioning UNION SELECT key_id FROM v3_monitoring_applications) k`)
 	if err != nil {
 		return err
 	}
@@ -47,6 +47,10 @@ func (s *Store) vaultAvailable(ctx context.Context, v *Vault) error {
 	return rows.Err()
 }
 func (a *API) deploymentAvailability(ctx context.Context) deploymentAvailability {
+	return a.deploymentOperationAvailability(ctx, false)
+}
+
+func (a *API) deploymentOperationAvailability(ctx context.Context, uninstall bool) deploymentAvailability {
 	unavailable := func(reason string) deploymentAvailability {
 		return deploymentAvailability{featureAvailability: featureAvailability{Reason: reason}}
 	}
@@ -61,7 +65,7 @@ func (a *API) deploymentAvailability(ctx context.Context) deploymentAvailability
 		return unavailable("共享 Vault 密钥与已有加密资料不匹配")
 	}
 	var ready bool
-	err = a.Store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_role_status e JOIN v3_role_status p ON e.instance=p.instance AND p.role='deployment-preparations' WHERE e.role='executor' AND e.heartbeat>clock_timestamp()-interval '15 seconds' AND p.heartbeat>clock_timestamp()-interval '15 seconds' AND e.error='' AND p.error='' AND e.details->>'manifest'=$1 AND e.details->>'vault'=$2 AND p.details->>'manifest'=$1 AND p.details->>'vault'=$2 AND p.details->>'issuer'='true' AND p.details->>'rules'='true')`, t.release.SHA256(), t.vault.active).Scan(&ready)
+	err = a.Store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_role_status e JOIN v3_role_status p ON e.instance=p.instance AND p.role='deployment-preparations' WHERE e.role='executor' AND e.heartbeat>clock_timestamp()-interval '15 seconds' AND p.heartbeat>clock_timestamp()-interval '15 seconds' AND e.error='' AND p.error='' AND e.details->>'manifest'=$1 AND e.details->>'vault'=$2 AND p.details->>'manifest'=$1 AND p.details->>'vault'=$2 AND ($3::boolean OR p.details->>'issuer'='true' AND p.details->>'rules'='true'))`, t.release.SHA256(), t.vault.active, uninstall).Scan(&ready)
 	if err != nil || !ready {
 		return unavailable("宿主执行器、签发器或部署准备工作器未就绪，请检查宿主服务")
 	}
@@ -75,7 +79,21 @@ func (a *API) capabilities(ctx context.Context) map[string]any {
 		settings.Reason = "共享 Vault 密钥或配置备份不可用"
 	}
 	deployment := a.deploymentAvailability(ctx)
-	return map[string]any{"api_version": 3, "version": deploy.Release, "topology": a.Config.Central.Topology, "features": []string{"server-pagination", "event-pull", "metrics-query", "persistent-sessions", "websites", "website-incidents", "website-config-backups", "configuration-backup-archives", "configuration-saved-restore", "configuration-application-history", "deployment-history", "server-alerts", "automatic-history-retention", "manual-history-cleanup", "history-export", "notification-history", "operation-audit", "settings-editor", "web-deployment"}, "configuration_application_writes": a.applicationWritesEnabled(), "settings": settings, "deployments": deployment, "executor": deployment.featureAvailability, "deployment_defaults": map[string]any{"central": "docker", "node": "docker", "node_modes": []string{"docker", "native"}}, "implementation_stage": "v3"}
+	monitoring := a.monitoringApplicationAvailability(ctx, deployment)
+	return map[string]any{"api_version": 3, "version": deploy.Release, "topology": a.Config.Central.Topology, "features": []string{"server-pagination", "event-pull", "metrics-query", "persistent-sessions", "websites", "website-incidents", "website-config-backups", "configuration-backup-archives", "configuration-saved-restore", "configuration-application-history", "deployment-history", "server-alerts", "automatic-history-retention", "manual-history-cleanup", "history-export", "notification-history", "notification-details", "notification-tests", "operation-audit", "settings-editor", "web-deployment", "account-password", "monitoring-rules", "monitoring-applications"}, "configuration_application_writes": a.applicationWritesEnabled(), "settings": settings, "metrics_retention": a.metricsRetentionAvailability(ctx), "notification_tests": a.notificationTestAvailability(ctx), "monitoring_rules": settings, "monitoring_applications": monitoring, "deployments": deployment, "executor": deployment.featureAvailability, "operations": map[string]any{"uninstall": a.deploymentOperationAvailability(ctx, true)}, "deployment_defaults": map[string]any{"central": "docker", "node": "docker", "node_modes": []string{"docker", "native"}}, "implementation_stage": "v3"}
+}
+
+func (a *API) monitoringApplicationAvailability(ctx context.Context, deployment deploymentAvailability) featureAvailability {
+	if !deployment.Available || deployment.Trust == nil {
+		return deployment.featureAvailability
+	}
+	t := deployment.Trust
+	var ready bool
+	err := a.Store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_role_status m JOIN v3_role_status e ON e.instance=m.instance AND e.role='executor' JOIN v3_role_status p ON p.instance=m.instance AND p.role='deployment-preparations' WHERE m.role='monitoring-applications' AND m.heartbeat>clock_timestamp()-interval '15 seconds' AND e.heartbeat>clock_timestamp()-interval '15 seconds' AND p.heartbeat>clock_timestamp()-interval '15 seconds' AND m.error='' AND e.error='' AND p.error='' AND m.details->>'manifest'=$1 AND e.details->>'manifest'=$1 AND p.details->>'manifest'=$1 AND m.details->>'vault'=$2 AND e.details->>'vault'=$2 AND p.details->>'vault'=$2 AND m.details->>'issuer'='true' AND m.details->>'rules'='true' AND p.details->>'issuer'='true' AND p.details->>'rules'='true')`, t.release.SHA256(), t.vault.active).Scan(&ready)
+	if err != nil || !ready {
+		return featureAvailability{Reason: "公共规则应用工作器未就绪，请检查宿主服务"}
+	}
+	return featureAvailability{Available: true}
 }
 
 // Decode exact, route-specific JSON fields, rejecting duplicate keys (including
@@ -119,6 +137,8 @@ func webDeploymentFailure(w http.ResponseWriter, err error) {
 		failure(w, 404, "not_found", "记录不存在")
 	case errors.Is(err, ErrDeploymentBusy):
 		failure(w, 409, "deployment_busy", ErrDeploymentBusy.Error())
+	case errors.Is(err, errNodeUninstall):
+		failure(w, 409, "uninstall_protected", errNodeUninstall.Error())
 	case errors.Is(err, ErrConflict), errors.Is(err, errWebDeployment), errors.Is(err, ErrDeploymentPreview), errors.Is(err, ErrDeploymentState):
 		failure(w, 409, "preparation_conflict", errWebDeployment.Error())
 	case errors.Is(err, ErrRequestConflict):
@@ -184,6 +204,7 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 			} else {
 				if p.Result != nil {
 					p.Result.CredentialState = ""
+					p.Result.SourceState = ""
 				}
 				reply(w, 200, p)
 			}
@@ -192,6 +213,19 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 		n, err := scanNode(a.Store.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE removed_at IS NULL AND id=$1", node))
 		if err != nil {
 			webDeploymentFailure(w, err)
+			return true
+		}
+		if operation := r.URL.Query().Get("kind"); operation != "" {
+			if operation != "uninstall" {
+				failure(w, 400, "invalid_kind", "操作类型不正确")
+				return true
+			}
+			result, err := a.uninstallCredentialStatus(ctx, v, n)
+			if err != nil {
+				webDeploymentFailure(w, err)
+			} else {
+				reply(w, 200, result)
+			}
 			return true
 		}
 		_, c, err := a.Store.latestWebCredential(ctx, v, node)
@@ -214,7 +248,7 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 		failure(w, 400, "invalid_idempotency_key", "请提供有效幂等键")
 		return true
 	}
-	availability := a.deploymentAvailability(ctx)
+	availability := a.deploymentOperationAvailability(ctx, true)
 	if !availability.Available {
 		failure(w, 503, "executor_unavailable", availability.Reason)
 		return true
@@ -222,9 +256,9 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 	allowed := []string{"expected_version"}
 	switch kind {
 	case "fingerprint":
-		allowed = append(allowed, "ssh_port")
+		allowed = append(allowed, "ssh_port", "kind")
 	case "credential":
-		allowed = append(allowed, "ssh_port", "password", "private_key_content", "private_key_path", "fingerprint_preparation", "fingerprint_token")
+		allowed = append(allowed, "kind", "ssh_port", "password", "private_key_content", "private_key_path", "fingerprint_preparation", "fingerprint_token")
 	case "prepare":
 		allowed = append(allowed, "kind")
 	case "confirm":
@@ -233,6 +267,10 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 	in, err := decodeWebDeployment(w, r, allowed...)
 	if err != nil || in.Expected < 1 {
 		failure(w, 400, "invalid_request", "请求字段或配置版本不正确")
+		return true
+	}
+	if (kind == "fingerprint" || kind == "credential") && in.Kind != "" && in.Kind != "uninstall" {
+		failure(w, 400, "invalid_kind", "凭据操作类型不正确")
 		return true
 	}
 	if kind == "fingerprint" && in.SSHPort == 0 {
@@ -262,8 +300,8 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 			}
 		}
 	}
-	if kind == "prepare" && in.Kind != "install" && in.Kind != "upgrade" {
-		failure(w, 400, "invalid_kind", "部署类型只允许 install 或 upgrade")
+	if kind == "prepare" && in.Kind != "install" && in.Kind != "upgrade" && in.Kind != "uninstall" {
+		failure(w, 400, "invalid_kind", "部署类型只允许 install、upgrade 或 uninstall")
 		return true
 	}
 	if kind == "confirm" {
@@ -273,6 +311,14 @@ func (a *API) webDeploymentRoutes(w http.ResponseWriter, r *http.Request, id ide
 			return true
 		}
 		node = p.Node
+		in.Kind = p.Result.Preview.Kind
+	}
+	if in.Kind != "uninstall" {
+		availability = a.deploymentAvailability(ctx)
+		if !availability.Available {
+			failure(w, 503, "executor_unavailable", availability.Reason)
+			return true
+		}
 	}
 	response, err := a.Store.submitPreparation(ctx, availability.Trust, id.Username, r.Header.Get("Idempotency-Key"), node, kind, in)
 	if err != nil {

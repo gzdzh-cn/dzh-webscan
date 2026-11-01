@@ -203,6 +203,9 @@ func (r configurationSettingsRuntime) settingsPhase(ctx context.Context, expecte
 		if validateSettingsDraft(r.bootstrap, base.Runtime) != nil {
 			return empty, errConfigurationApplication
 		}
+		if _, err = prepareSettingsFromConfigTx(op, tx, r.bootstrap, d.RuntimeVersion, d.RuntimeVersion+1); err != nil {
+			return empty, err
+		}
 		if _, err = tx.ExecContext(op, `UPDATE v3_settings SET version=version+1,payload=$1,updated_at=clock_timestamp() WHERE id=1`, []byte(base.Runtime)); err != nil {
 			return empty, err
 		}

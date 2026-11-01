@@ -149,6 +149,9 @@ func (r configurationVerificationRuntime) verifyDependencies(ctx context.Context
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	checks := make([]configurationLocalCheck, 3)
+	if r.bootstrap.Metrics.RawURL != "" {
+		checks = append(checks, configurationLocalCheck{}, configurationLocalCheck{})
+	}
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); checks[0] = r.store.checkConfigurationDatabase(probe, raw) }()
@@ -160,6 +163,19 @@ func (r configurationVerificationRuntime) verifyDependencies(ctx context.Context
 		defer wg.Done()
 		checks[2] = checkConfigurationMetricsImport(probe, client, r.bootstrap.Metrics.WriteURL)
 	}()
+	if r.bootstrap.Metrics.RawURL != "" {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			checks[3] = checkConfigurationMetricsQuery(probe, client, r.bootstrap.Metrics.RawURL)
+			checks[3].Component = "raw_metrics_query_api"
+		}()
+		go func() {
+			defer wg.Done()
+			checks[4] = checkConfigurationMetricsImport(probe, client, r.bootstrap.Metrics.RawURL)
+			checks[4].Component = "raw_metrics_write_api"
+		}()
+	}
 	wg.Wait()
 	for _, check := range checks {
 		if check.Status != "passed" {

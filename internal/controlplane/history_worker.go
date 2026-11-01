@@ -55,7 +55,7 @@ func historyPublicSQL(stage int) string {
 	case 5:
 		return `jsonb_build_object('id',t.id,'node',t.node,'kind',t.kind,'phase',t.phase,'time',t.time,'message',t.message,'state',t.payload)`
 	case 6:
-		return `jsonb_build_object('id',t.id,'node',t.node,'event_id',t.event_id,'channel',t.channel,'recipient',t.recipient,'created_at',t.created_at,'done_at',t.done_at,'attempts',t.attempts,'completed',t.done_at IS NOT NULL)`
+		return `jsonb_build_object('id',t.id,'node',t.node,'event_id',t.event_id,'channel',t.channel,'recipient',t.recipient,'created_at',t.created_at,'done_at',t.done_at,'attempts',t.attempts,'completed',t.done_at IS NOT NULL) || (SELECT jsonb_build_object('source',p.public_source,'subject',p.public_subject,'summary',p.public_summary,'content_state',p.public_content_state,'content_reason',p.public_content_reason,'truncated',p.public_truncated) FROM ` + notificationPublicReadSQL() + ` p WHERE p.id=t.id)`
 	}
 	return `'{}'::jsonb`
 }

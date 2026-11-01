@@ -92,7 +92,271 @@ paths:
                       node: {type: string, const: docker}
                       node_modes: {type: array, items: {type: string, enum: [docker, native]}}
                   features: {type: array, items: {type: string}}
+                  notification_tests:
+                    type: object
+                    description: 根据共享Vault和30秒内实际测试工作器心跳判断；不可用时仍可读取本人已有任务。
+                    required: [available]
+                    properties:
+                      available: {type: boolean}
+                      reason: {type: string}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v3/account/password:
+    post:
+      operationId: changeOwnPassword
+      description: |
+        所有已登录角色均可修改本人密码。需要当前密码、可信 HTTPS 和 CSRF。
+        新密码为 12～72 个 UTF-8 字节；成功时原子撤销本账号全部会话，其他账号不受影响。
+        当前密码错误返回 400，不能当作会话失效。五分钟内单账号最多十次尝试。
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password, confirm_password]
+              properties:
+                current_password: {type: string, format: password, minLength: 1, maxLength: 72}
+                new_password: {type: string, format: password, minLength: 12, maxLength: 72}
+                confirm_password: {type: string, format: password, minLength: 12, maxLength: 72}
+      responses:
+        '200': {description: 修改成功，请重新登录}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {description: 修改密码尝试次数超限}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/rules:
+    get:
+      operationId: readPublicMonitoringRules
+      description: 管理员读取已保存的公共规则。版本为十进制字符串；不推断节点已生效。
+      responses:
+        '200':
+          description: 公共规则及保存版本
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MonitoringRulesView'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    put:
+      operationId: savePublicMonitoringRules
+      description: 管理员、可信 HTTPS。凭据与规则和账号版本绑定，有效十分钟；编辑前备份与保存同事务提交。只保存，不改变节点和运行设置。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/MonitoringRulesEdit'}
+                - type: object
+                  required: [preview]
+      responses:
+        '200':
+          description: 新的保存版本
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MonitoringRulesView'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/rules/preview:
+    post:
+      operationId: previewPublicMonitoringRules
+      description: 仅校验并比较规则，不保存、不下发、不连接子控。
+      parameters: [{$ref: '#/components/parameters/CSRF'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MonitoringRulesEdit'}
+      responses:
+        '200':
+          description: 十分钟预览凭据及变更字段
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, expires_at, changed_fields]
+                properties:
+                  token: {type: string}
+                  expires_at: {type: string, format: date-time}
+                  changed_fields: {type: array, items: {type: string}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/preview:
+    post:
+      operationId: previewMonitoringApplication
+      description: |
+        管理员、可信 HTTPS。只选择已安装、启用且继承公共规则的节点。
+        固定已保存规则、账号、节点、凭据、部署状态和发布摘要；预览十分钟有效。
+        此操作创建持久预览，不改节点、不签发、不停止服务。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version, nodes]
+              properties:
+                expected_version: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+                nodes:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [id, expected_version]
+                    properties:
+                      id: {type: string}
+                      expected_version: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: 所选节点的旧／有效规则及固定版本
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, token, expires_at, release, nodes]
+                properties:
+                  id: {type: string}
+                  token: {type: string}
+                  expires_at: {type: string, format: date-time}
+                  release: {type: string}
+                  nodes: {type: array, items: {$ref: '#/components/schemas/MonitoringApplicationNode'}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications:
+    post:
+      operationId: confirmMonitoringApplication
+      description: |
+        确认固定预览并持久预留所有目标。每批最多二十台、同时最多五台。
+        首错后停止启动新节点，等待已启动任务完成，再暂停；不重启主控。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preview, token]
+              properties:
+                preview: {type: string}
+                token: {type: string}
+      responses:
+        '202':
+          description: 已创建后台任务，不代表下发完成
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MonitoringApplication'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: readMonitoringApplication
+      responses:
+        '200':
+          description: 持久节点进度、原部署日志 ID 与当前权限下实际可用的恢复动作
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MonitoringApplication'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/{id}/resume:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: resumeMonitoringApplication
+      description: 复用原固定计划及检查点，继续剩余节点。失败后的配置或凭据冲突不能静默采用新值。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/MonitoringRecovery'}
+      responses:
+        '202': {$ref: '#/components/responses/MonitoringAccepted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/{id}/rollback:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: rollbackMonitoringApplication
+      description: 显式回退原任务节点，复用固定版本、原备份及子任务。保留中心历史与已保存规则；运行登记以实际回退验收为准。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/MonitoringRecovery'}
+      responses:
+        '202': {$ref: '#/components/responses/MonitoringAccepted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/{id}/nodes/{node}/{action}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+      - {name: node, in: path, required: true, schema: {type: string}}
+      - {name: action, in: path, required: true, schema: {type: string, enum: [resume, rollback]}}
+    post:
+      operationId: recoverMonitoringApplicationNode
+      description: 仅恢复所选节点，父任务其余节点保持暂停。以查询返回的 can_resume/can_rollback 为准。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/MonitoringRecovery'}
+      responses:
+        '202': {$ref: '#/components/responses/MonitoringAccepted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/{id}/reauthorization-preview:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: previewMonitoringReauthorization
+      description: 当前管理员显式重新核对已撤销授权的原任务。十分钟凭据绑定当前账号及任务、节点、凭据和子任务状态；不执行远端操作。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/MonitoringRecovery'}
+      responses:
+        '200':
+          description: 重新授权预览
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, expires_at]
+                properties:
+                  token: {type: string}
+                  expires_at: {type: string, format: date-time}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/monitoring/applications/{id}/reauthorize:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: reauthorizeMonitoringApplication
+      description: 确认预览、记录新管理员授权，保留固定原计划及恢复资料；仍需另行继续或回退，不自动执行 SSH。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version, token]
+              properties:
+                expected_version: {type: string, pattern: '^[1-9][0-9]*$'}
+                token: {type: string}
+      responses:
+        '202': {$ref: '#/components/responses/MonitoringAccepted'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/openapi.yaml:
     get:
       operationId: openapi
@@ -326,6 +590,235 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {description: 节点不存在}
         '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/migration-history/sessions:
+    get:
+      operationId: listMigrationHistorySessions
+      description: 管理员只读查看最近100个迁移会话及历史指标批次，不返回源路径、私钥、原日志或执行授权。
+      responses:
+        '200':
+          description: 只读会话清单；指标批次状态不替代实际查询验真
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, limit, read_only]
+                properties:
+                  limit: {type: integer, const: 100}
+                  read_only: {type: boolean, const: true}
+                  items:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+                      required: [id, phase, created_at, history_records, generations]
+                      properties:
+                        id: {type: string}
+                        phase: {type: string}
+                        created_at: {type: string, format: date-time}
+                        history_records: {type: integer, minimum: 0}
+                        generations:
+                          type: array
+                          items:
+                            type: object
+                            required: [generation, revision, state]
+                            properties:
+                              generation: {type: string}
+                              revision: {type: string}
+                              state: {type: string, enum: [pending, verified]}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 仅管理员可核对迁移历史}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/legacy-history:
+    get:
+      operationId: listLegacyMigrationHistory
+      description: 只读规范化旧任务、日志及配置备份历史；不能继续、回退或删除。未知字段及重复参数均拒绝，原文仅保存在Vault加密归档中。
+      parameters:
+        - {name: session, in: query, required: true, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+        - {name: role, in: query, schema: {type: string, enum: [central, host-manager]}}
+        - {name: table, in: query, schema: {type: string, maxLength: 128}}
+        - {name: cursor, in: query, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+      responses:
+        '200':
+          description: 脱敏只读历史及下一页游标，不返回虚构总条数
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor, read_only]
+                properties:
+                  read_only: {type: boolean, const: true}
+                  next_cursor: {type: string}
+                  items:
+                    type: array
+                    maxItems: 200
+                    items:
+                      type: object
+                      required: [id, role, legacy_table, record_key, summary]
+                      properties:
+                        id: {type: string}
+                        role: {type: string}
+                        legacy_table: {type: string}
+                        record_key: {type: integer}
+                        summary: {type: object, additionalProperties: true}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 仅管理员可核对迁移历史}
+  /api/v3/migration-history/catalog:
+    get:
+      operationId: listVerifiedMigrationMetricCatalog
+      description: |
+        管理员手动读取已核对旧历史的节点及固定指标清单，最多100个节点和64条指标维度。
+        节点筛选仅按编号文本匹配；不接受查询表达式或目标地址。每次复核源索引、批次及实际时序库。
+        未返回不表示不存在；可缩小节点筛选。拒绝重复及未知参数。
+      parameters:
+        - {name: session, in: query, required: true, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+        - {name: generation, in: query, required: true, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+        - {name: node, in: query, schema: {type: string, maxLength: 128}}
+        - {name: q, in: query, schema: {type: string, maxLength: 128}}
+      responses:
+        '200':
+          description: 仅服务端已验证的节点和指标维度；节点范围为原始Unix秒
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes, series, node, read_only]
+                properties:
+                  nodes:
+                    type: array
+                    maxItems: 100
+                    items:
+                      type: object
+                      required: [id, first_sample, last_sample]
+                      properties:
+                        id: {type: string}
+                        first_sample: {type: integer, format: int64}
+                        last_sample: {type: integer, format: int64}
+                  series:
+                    type: array
+                    maxItems: 64
+                    items:
+                      type: object
+                      required: [metric, dimension]
+                      properties:
+                        metric: {type: string}
+                        dimension: {type: string}
+                  node: {type: string}
+                  read_only: {type: boolean, const: true}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 仅管理员可核对迁移历史}
+        '409': {description: 批次、源索引或实际历史库核对失效}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/migration-history:
+    get:
+      operationId: getVerifiedMigrationHistory
+      description: |
+        管理员显式选择已验收的旧版历史批次。只读，不导入、不切换、不与实时曲线合并。
+        仅固定旧指标名称及设备维度，不接受 PromQL、目标地址或任意命令。
+        最多31天、1000个原始样本、64条时序；每次复核当前历史库中的实际样本。
+        保留原采样分辨率、来源、最小值、最大值、计数、真实零与缺失，不插值。
+        拒绝未知字段及重复参数；批次或存储核对失效时返回409。
+      parameters:
+        - {name: session, in: query, required: true, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+        - {name: generation, in: query, required: true, schema: {type: string, pattern: '^[a-f0-9]{64}$'}}
+        - {name: node, in: query, required: true, schema: {type: string, maxLength: 512}}
+        - {name: metric, in: query, required: true, schema: {type: string, maxLength: 512}}
+        - {name: dimension, in: query, schema: {type: string, maxLength: 256}}
+        - {name: start, in: query, required: true, schema: {type: string, format: date-time}}
+        - {name: end, in: query, required: true, schema: {type: string, format: date-time}}
+      responses:
+        '200':
+          description: 已核对的原始旧历史，不补零、不混入实时曲线
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, generation, node, metric, source, points, read_only, interpolated]
+                properties:
+                  session: {type: string}
+                  generation: {type: string}
+                  node: {type: string}
+                  metric: {type: string}
+                  dimension: {type: string}
+                  source: {type: string, const: legacy-v2}
+                  read_only: {type: boolean, const: true}
+                  interpolated: {type: boolean, const: false}
+                  points:
+                    type: array
+                    maxItems: 1000
+                    items:
+                      type: object
+                      required: [time, resolution_seconds, origin, ok]
+                      properties:
+                        time: {type: integer, format: int64, description: Unix秒}
+                        resolution_seconds: {type: integer, enum: [0, 300]}
+                        origin: {type: string, enum: [native, legacy]}
+                        ok: {type: boolean}
+                        value: {type: number}
+                        min: {type: number}
+                        max: {type: number}
+                        count: {type: integer}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 仅管理员可核对迁移历史}
+        '409': {description: 迁移批次或实际历史库尚未通过核对}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}/metric-devices:
+    get:
+      operationId: listServerMetricDevices
+      description: |
+        返回指定节点和时间窗口内实际出现过的磁盘及网卡，不从名称猜测设备，不接受查询表达式。
+        时间窗口最多 31 天；每类最多 256 个设备，超出或过滤异常名称时 truncated=true。
+        设备 ID 是不透明标识，历史查询应原样使用；last_seen 为 Unix 秒，不代表设备当前仍在线。
+        仅接受 start、end，拒绝未知字段和重复时间参数；上游超时 10 秒。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+      responses:
+        '200':
+          description: 所选窗口的历史设备清单，最多 512 个设备
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleDeviceInventory'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 节点不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/servers/{id}/device-metrics:
+    get:
+      operationId: getServerDeviceMetrics
+      description: |
+        只读设备历史；devices 必须来自同一节点和时间窗口的历史设备清单，最多八个、不允许重复。
+        固定磁盘读写字节/操作速率和网卡收发字节/错误/丢包速率白名单，不接受 PromQL 或任意标签。
+        最多 31 天、1000 个时间点、64 条时序、8 MiB 上游响应，上游超时 10 秒。
+        时间点缺少有效值时 values 不含对应键，全缺时 ok=false；断网、设备消失、计数重置不补零。
+        首次采样及超过 60 秒的旧速率不延长成连续曲线；最小返回分辨率 30 秒。
+        仅接受 start、end 和重复的 devices 查询参数，拒绝未知参数或重复时间参数。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/Start'}
+        - {$ref: '#/components/parameters/End'}
+        - name: devices
+          in: query
+          required: true
+          style: form
+          explode: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 8
+            uniqueItems: true
+            items: {type: string}
+      responses:
+        '200':
+          description: 元数据与按时间升序的稀疏曲线；start、end、time 为 Unix 秒
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleDeviceTrend'}}}
+        '400': {description: 时间范围、设备选择或查询参数无效；设备不在当前窗口也需重新选择}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 节点不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/events:
     get:
       operationId: listEvents
@@ -376,7 +869,22 @@ paths:
                     properties:
                       sections:
                         type: object
-                        description: 固定分区 servers、websites、events、notifications、deployments、alerts、resources、monitoring、services。事件排除探针并沿用迁移去重；异常最多 8 项，资源表最多 20 台，各排名最多 10 台。监控正常／异常／未知只统计适用节点。
+                        description: 固定分区 servers、websites、events、notifications、deployments、alerts、resources、monitoring、services、certificates、full_backups、host_watchdog。事件排除探针并沿用迁移去重；异常最多 8 项，资源表最多 20 台，各排名最多 10 台。监控正常／异常／未知只统计适用节点。分区缓存时间不能代替各自观测时间。
+                        properties:
+                          host_watchdog:
+                            type: object
+                            required: [data, updated_at, error]
+                            properties:
+                              data: {$ref: '#/components/schemas/HostWatchdogObservation'}
+                              updated_at: {type: [string, 'null'], format: date-time}
+                              error: {type: string}
+                          services:
+                            type: object
+                            required: [data, updated_at, error]
+                            properties:
+                              data: {$ref: '#/components/schemas/DashboardServiceEvidence'}
+                              updated_at: {type: [string, 'null'], format: date-time}
+                              error: {type: string}
                         additionalProperties:
                           type: object
                           required: [data, updated_at, error]
@@ -536,10 +1044,11 @@ paths:
   /api/v3/servers/{id}/ssh-fingerprint:
     post:
       operationId: submitSshFingerprint
-      description: 只探测已保存节点地址的 SSH 公钥，不发送密码、不执行命令；指纹变化停止。确认绑定账号、节点、地址和端口，有效十分钟。
+      description: 缺省只探测已保存节点地址；kind=uninstall 时仅探测实际安装证据中的 SSH 地址和端口，不应用待下发的新地址。端口必须与实际安装资料一致，客户端只读显示。不发送密码、不执行命令；指纹变化停止。确认绑定账号、节点、实际安装、操作类型、地址和端口，有效十分钟。
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {$ref: '#/components/parameters/DeploymentIdempotency'}
+        - {$ref: '#/components/parameters/CSRF'}
       requestBody:
         required: true
         content:
@@ -550,7 +1059,8 @@ paths:
               required: [expected_version]
               properties:
                 expected_version: {type: integer, minimum: 1}
-                ssh_port: {type: integer, minimum: 1, maximum: 65535, default: 22}
+                kind: {type: string, enum: [uninstall], description: 省略保持原安装和升级行为；uninstall 必须贯穿凭据读取、指纹、凭据保存及预览}
+                ssh_port: {type: integer, minimum: 1, maximum: 65535, default: 22, description: 普通安装和升级缺省为 22；uninstall 必须等于实际安装证据中的端口}
       responses:
         '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
         '400': {description: 字段、凭据、幂等键不正确；拒绝重复或未知字段}
@@ -562,25 +1072,21 @@ paths:
       operationId: getSSHCredentialState
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: kind, in: query, schema: {type: string, enum: [uninstall]}, description: 省略沿用已保存配置凭据；uninstall 读取实际安装目标的独立凭据状态}
       responses:
         '200':
-          description: 仅返回配置标记、节点版本、SSH 端口和已固定指纹
+          description: 仅返回认证配置标记及脱敏目标证据，不返回密码或私钥；kind=uninstall 时目标来自实际安装，保存配置版本仅作并发检查
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  configured: {type: boolean}
-                  version: {type: integer}
-                  ssh_port: {type: integer}
-                  fingerprint: {type: string}
+              schema: {$ref: '#/components/schemas/SSHCredentialState'}
         '403': {description: 需要管理员}
     post:
       operationId: submitSshCredential
-      description: 确认本次指纹后加密保存凭据；三种认证最多选一，编辑均留空保留。路径只由宿主从受控目录读取。私钥最多 64 KiB，不返回任何认证内容。
+      description: 确认本次指纹后加密保存凭据；三种认证最多选一，编辑均留空保留。kind=uninstall 绑定实际安装证据，替换该安装的独立凭据，不覆盖待应用新地址的普通部署凭据；SSH 端口沿用实际安装，不允许客户端切换目标。路径只由宿主从受控目录读取。私钥最多 64 KiB，不返回任何认证内容。
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {$ref: '#/components/parameters/DeploymentIdempotency'}
+        - {$ref: '#/components/parameters/CSRF'}
       requestBody:
         required: true
         content:
@@ -591,6 +1097,7 @@ paths:
               required: [expected_version]
               properties:
                 expected_version: {type: integer, minimum: 1}
+                kind: {type: string, enum: [uninstall], description: 省略保持原安装和升级行为；uninstall 必须贯穿凭据读取、指纹、凭据保存及预览}
                 ssh_port: {type: integer, minimum: 1, maximum: 65535}
                 password: {type: string, writeOnly: true, maxLength: 4096}
                 private_key_content: {type: string, writeOnly: true, description: 未加密 OpenSSH 或 PEM 私钥，最大 64 KiB}
@@ -606,10 +1113,11 @@ paths:
   /api/v3/servers/{id}/deployment-preview:
     post:
       operationId: submitDeploymentPreview
-      description: 仅使用已保存配置；异步由宿主准备证书、规则和配置包，不提前停止服务或切换登记。预览十分钟内有效。
+      description: 安装和升级使用已保存配置。kind=uninstall 使用已验签的实际安装证据和原固定版本恢复资料，不保存草稿，不应用新地址、规则或部署方式；保留子控数据、证书和恢复资料，不移除中心记录。准备不提前停止服务或切换登记；预览绑定账号、配置版本、凭据、安装证明及任务状态，有效十分钟。
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {$ref: '#/components/parameters/DeploymentIdempotency'}
+        - {$ref: '#/components/parameters/CSRF'}
       requestBody:
         required: true
         content:
@@ -620,7 +1128,7 @@ paths:
               required: [expected_version]
               properties:
                 expected_version: {type: integer, minimum: 1}
-                kind: {enum: [install, upgrade]}
+                kind: {enum: [install, upgrade, uninstall]}
       responses:
         '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
         '400': {description: 字段、凭据、幂等键不正确；拒绝重复或未知字段}
@@ -644,7 +1152,7 @@ paths:
   /api/v3/deployments:
     get:
       operationId: listDeployments
-      description: 持久化任务历史；通过管理员确认的准备请求创建任务，日志按游标续读。
+      description: 持久化任务历史；已删除的页面历史不再公开返回，内部任务、防重和恢复链仍保留。通过管理员确认的准备请求创建任务，日志按游标续读；can_delete 及保护原因由服务端计算，缺少证据不能按终态自行推断可删除。
       parameters:
         - {$ref: '#/components/parameters/Cursor'}
         - {$ref: '#/components/parameters/Limit'}
@@ -666,7 +1174,7 @@ paths:
         '503': {$ref: '#/components/responses/Unavailable'}
     post:
       operationId: confirmWebDeployment
-      description: 管理员通过可信 HTTPS 确认十分钟内的部署预览。返回准备回执；宿主确认创建任务后 GET 准备记录返回 result.job，此时才可跳转日志。请求不能携带 edit、命令、程序路径或证书目录。
+      description: 管理员通过可信 HTTPS 确认十分钟内的部署预览。返回准备回执；宿主确认创建任务后 GET 准备记录返回 result.job，此时才可跳转日志。uninstall 沿用原准备请求固定的实际安装范围，不能改用待应用配置；只有实际卸载验收成功才能标记已卸载。请求不能携带 edit、命令、程序路径或证书目录。
       parameters:
         - {$ref: '#/components/parameters/DeploymentIdempotency'}
       requestBody:
@@ -685,6 +1193,68 @@ paths:
         '202': {$ref: '#/components/responses/DeploymentPreparationAccepted'}
         '403': {description: 需要管理员、可信 HTTPS 和有效 CSRF}
         '409': {description: 预览过期或账号、节点、凭据、目标摘要及任务状态变化}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/history-delete-preview:
+    post:
+      operationId: previewDeploymentHistoryDelete
+      description: 仅预览当前明确选择的 1～200 条页面历史，不能隐含删除筛选结果。管理员、可信 HTTPS、CSRF 和幂等键必需。十分钟预览绑定账号版本、配置状态、固定选择及逐项任务状态；受保护项确认时不能自动扩大为可删。仅 succeeded 或 rolled_back 且完成超过 24 小时、没有恢复责任、有效租约及其他引用的历史可能可删；最新任务和当前成功基线受保护。失败不能据此推断可删除。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DeploymentIdempotency'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [records]
+              properties:
+                records: {type: array, minItems: 1, maxItems: 200, uniqueItems: true, items: {type: string, pattern: '^deployment-job:[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'}, description: 当前页明确选择的 record_key}
+      responses:
+        '200':
+          description: 逐项资格、保护原因及短期确认令牌；不删除记录或日志
+          content: {application/json: {schema: {$ref: '#/components/schemas/DeploymentHistoryDeletePreview'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {description: 当前账号有效预览或待处理删除任务达到上限}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/history-delete:
+    post:
+      operationId: deleteDeploymentHistory
+      description: 确认固定预览并创建持久删除任务，不代表删除完成。执行时逐项重新检查保护条件，只隐藏公开页面历史并删除日志；保留 v3_deployment_jobs、防重回执、installation proof 和 recovery chain，不卸载子控，不移除服务器。逐项处理与审计原子提交；重启继续，灾备恢复取消待执行破坏性授权。日志删除后不提供撤销，安装证明与恢复资料仍保留。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DeploymentIdempotency'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, confirm]
+              properties:
+                token: {type: string, pattern: '^[a-f0-9]{64}$', description: 原预览返回的确认凭据，不进入审计或日志}
+                confirm: {const: true}
+      responses:
+        '202':
+          description: 返回持久删除任务；客户端应查询实际逐项结果，网络重试沿用幂等键
+          content: {application/json: {schema: {$ref: '#/components/schemas/DeploymentHistoryDeleteJob'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {description: 预览过期、账号或配置及任务状态变化；原任务资料保留，需重新预览}
+        '429': {description: 当前账号待处理删除任务达到上限}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/deployments/history-delete-jobs/{id}:
+    get:
+      operationId: getDeploymentHistoryDeleteJob
+      description: 仅原管理员读取删除任务与逐项结果；queued 或 running 不代表已删除，未知或响应丢失不标记成功。不存在删除任务列表接口。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: 真实计数、跳过原因及已删除日志条数
+          content: {application/json: {schema: {$ref: '#/components/schemas/DeploymentHistoryDeleteJob'}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {description: 删除任务不存在或不属于当前账号}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/deployments/{id}:
     get:
@@ -707,7 +1277,7 @@ paths:
                   recovery_required: {type: boolean}
                   recovery_reason: {type: string}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/deployments/{id}/resume:
     post:
@@ -735,7 +1305,7 @@ paths:
   /api/v3/deployments/{id}/rollback:
     post:
       operationId: rollbackWebDeployment
-      description: 管理员根据实际可恢复状态操作原任务；需要可信 HTTPS、CSRF、原计划摘要及最新日志游标，不创建新的安装范围。
+      description: 管理员根据实际可恢复状态操作原任务；需要可信 HTTPS、CSRF、原计划摘要及最新日志游标，不创建新的安装范围。卸载回退使用原固定版本资料重新安装并复用保留数据；不保证恢复原容器 ID。
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
         - {$ref: '#/components/parameters/DeploymentIdempotency'}
@@ -785,7 +1355,7 @@ paths:
                   status: {type: string}
         '400': {description: 日志游标或分页参数无效}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '503': {$ref: '#/components/responses/Unavailable'}
 
   /api/v3/alerts/current:
@@ -964,11 +1534,15 @@ paths:
   /api/v3/notifications:
     get:
       operationId: notificationHistory
-      description: 仅返回通知元数据及实时删除保护原因，不返回投递载荷、SMTP 响应或凭据。ID 使用十进制字符串，避免大整数精度丢失。
+      description: 返回通知元数据、受控文字投影及实时删除保护。正文摘要校验载荷摘要，缺失或失配显示未知；不返回原始载荷、SMTP 响应或凭据。ID 使用十进制字符串。
       parameters:
         - {name: channel, in: query, required: true, schema: {type: string, enum: [feishu, email]}}
         - {name: node, in: query, schema: {type: string}}
         - {name: state, in: query, schema: {type: string, enum: [pending, completed]}}
+        - {name: q, in: query, description: 仅搜索已校验的公共文字和公开标识；字面匹配，不搜索原始载荷或供应商响应, schema: {type: string, maxLength: 200}}
+        - {name: recipient, in: query, schema: {type: string, maxLength: 254}}
+        - {name: source, in: query, schema: {$ref: '#/components/schemas/NotificationSource'}}
+        - {name: delivery_state, in: query, schema: {type: string, enum: [completed, migration_pending, paused, sending, waiting, retrying, pending]}}
         - {$ref: '#/components/parameters/Start'}
         - {$ref: '#/components/parameters/End'}
         - {$ref: '#/components/parameters/Cursor'}
@@ -988,6 +1562,104 @@ paths:
                   limit: {type: integer}
         '400': {description: 通道、状态、时间或分页参数不正确}
         '401': {$ref: '#/components/responses/Unauthorized'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications/{id}:
+    get:
+      operationId: notificationDetail
+      description: 返回摘要绑定的受控业务正文，不保证与供应商原始模板逐字相同。缺失、旧版或失配内容不回退到原始载荷。completed 和 accepted 均不代表已进入收件箱或已读。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, pattern: '^[1-9][0-9]*$'}}
+      responses:
+        '200':
+          description: 通知详情
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationDetail'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 通知不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications/{id}/attempts:
+    get:
+      operationId: notificationAttempts
+      description: 独立游标，最多100条。发送器返回错误时结果为unknown，可能已经送达；不返回原始供应商响应。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, pattern: '^[1-9][0-9]*$'}}
+        - {$ref: '#/components/parameters/Cursor'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+      responses:
+        '200':
+          description: 尝试记录，所有ID及代次使用十进制字符串
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/NotificationAttempt'}}
+                  next_cursor: {type: string}
+        '400': {description: 游标或条数不正确}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {description: 通知不存在}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications/test-preview:
+    post:
+      operationId: previewNotificationTest
+      description: 管理员通过可信HTTPS测试已应用设置；不保存或应用草稿。预览十分钟有效，绑定账号、运行版本、Vault及实际目标，最多20个邮箱；飞书仅展示目标标签。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DeploymentIdempotency'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [channel, expected_runtime_version]
+              properties:
+                channel: {type: string, enum: [feishu, email]}
+                expected_runtime_version: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: 固定测试正文及脱敏目标
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationTestPreview'}}}
+        '400': {description: 通道未配置或请求不正确}
+        '403': {description: 管理员、HTTPS或CSRF校验失败}
+        '409': {description: 配置变化、过期预览或幂等冲突}
+        '429': {description: 测试预览配额已满}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications/tests:
+    post:
+      operationId: createNotificationTest
+      description: 确认预览后创建独立持久任务，每通道冷却30秒。每个目标只自动发送一次，未知结果不自动重发。不接受收件人、正文、Webhook或命令。
+      parameters: [{$ref: '#/components/parameters/CSRF'}, {$ref: '#/components/parameters/DeploymentIdempotency'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [preview, confirm]
+              properties:
+                preview: {type: string, minLength: 1}
+                confirm: {type: boolean, const: true}
+      responses:
+        '202':
+          description: 返回持久任务；不表示已发送成功
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationTestJob'}}}
+        '403': {description: 管理员、HTTPS或CSRF校验失败}
+        '409': {description: 配置、预览或幂等冲突}
+        '429': {description: 通道冷却中或未完成任务配额已满}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /api/v3/notifications/tests/{id}:
+    get:
+      operationId: notificationTestJob
+      description: 管理员读取本人创建的测试任务；断线后继续查询原任务，不重复发送。
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: 实际持久结果
+          content: {application/json: {schema: {$ref: '#/components/schemas/NotificationTestJob'}}}
+        '403': {description: 需要管理员权限}
+        '404': {description: 任务不存在或不属于当前账号}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/retention/preview:
     post:
@@ -1475,7 +2147,7 @@ paths:
                   can_cancel: {type: boolean}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/configuration-applications/{id}/logs:
     get:
@@ -1502,7 +2174,7 @@ paths:
         '400': {description: 游标或数量不正确}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/configuration-applications/{id}/resume:
     post:
@@ -1527,7 +2199,7 @@ paths:
         '400': {description: 参数或确认不正确}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '409': {description: 任务版本、成员、租约、恢复保护或幂等键冲突}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/configuration-applications/{id}/rollback:
@@ -1553,7 +2225,7 @@ paths:
         '400': {description: 参数或确认不正确}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '409': {description: 任务版本、成员、租约、恢复保护或幂等键冲突}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/configuration-applications/{id}/cancel:
@@ -1579,7 +2251,7 @@ paths:
         '400': {description: 参数或确认不正确}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
-        '404': {description: 任务不存在}
+        '404': {description: 任务不存在或页面历史已删除}
         '409': {description: 任务版本、成员、租约、恢复保护或幂等键冲突}
         '503': {$ref: '#/components/responses/Unavailable'}
   /api/v3/configuration-restores:
@@ -1741,6 +2413,16 @@ components:
       in: cookie
       name: webscan_v3_session
   requestBodies:
+    MonitoringRecovery:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version: {type: string, pattern: '^[1-9][0-9]*$'}
     WebsiteEdit:
       required: true
       content:
@@ -1768,6 +2450,11 @@ components:
     Start: {name: start, in: query, schema: {type: string, format: date-time}, description: 默认最近 24 小时，范围最多 31 天}
     End: {name: end, in: query, schema: {type: string, format: date-time}, description: 默认当前 UTC 时间}
   responses:
+    MonitoringAccepted:
+      description: 已记录操作；请查询实际任务结果
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/MonitoringApplication'}
     DeploymentPreparationAccepted:
       description: 已接受准备请求，尚未表示部署成功；轮询返回的 id
       content:
@@ -1793,6 +2480,158 @@ components:
       description: 服务暂时不可用；保留已有页面及会话，不跳转登录
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
   schemas:
+    MonitoringApplicationNode:
+      type: object
+      required: [id, name, batch, state, changed, can_resume, can_rollback]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        batch: {type: integer, minimum: 0, description: 从零开始的批次编号}
+        state: {type: string, enum: [pending, preparing, running, succeeded, failed, rolled_back]}
+        changed: {type: boolean}
+        before: {$ref: '#/components/schemas/NodeMonitoring'}
+        effective: {$ref: '#/components/schemas/NodeMonitoring'}
+        job: {type: string, description: 原部署任务日志标识}
+        error_code: {type: string}
+        can_resume: {type: boolean}
+        can_rollback: {type: boolean}
+    MonitoringApplication:
+      type: object
+      required: [id, rules_version, manifest_sha256, release, status, direction, version, expires_at, created_at, updated_at, can_resume, can_rollback, nodes]
+      properties:
+        id: {type: string}
+        rules_version: {type: string}
+        manifest_sha256: {type: string}
+        release: {type: string}
+        status: {type: string, enum: [preview, queued, running, paused, succeeded, rolled_back, expired]}
+        direction: {type: string, enum: [forward, rollback]}
+        version: {type: string, pattern: '^[1-9][0-9]*$'}
+        expires_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        error_code: {type: string}
+        can_resume: {type: boolean}
+        can_rollback: {type: boolean}
+        can_reauthorize: {type: boolean}
+        reauthorization_reason: {type: string}
+        nodes: {type: array, items: {$ref: '#/components/schemas/MonitoringApplicationNode'}}
+    MonitoringRules:
+      type: object
+      additionalProperties: false
+      required: [roots, extensions, important_filenames, critical_paths, exclude_paths, reconciliation_interval_hours]
+      properties:
+        roots: {type: array, minItems: 1, maxItems: 64, uniqueItems: true, items: {type: string}}
+        extensions: {type: array, uniqueItems: true, items: {type: string}}
+        important_filenames: {type: array, uniqueItems: true, items: {type: string}}
+        critical_paths: {type: array, uniqueItems: true, items: {type: string}}
+        exclude_paths: {type: array, uniqueItems: true, items: {type: string}}
+        reconciliation_interval_hours: {type: integer, minimum: 1, maximum: 8760}
+    MonitoringRulesView:
+      type: object
+      required: [version, rules]
+      properties:
+        version: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+        rules: {$ref: '#/components/schemas/MonitoringRules'}
+    MonitoringRulesEdit:
+      type: object
+      additionalProperties: false
+      required: [expected_version, rules]
+      properties:
+        expected_version: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+        rules: {$ref: '#/components/schemas/MonitoringRules'}
+        preview: {type: string, maxLength: 2048}
+    NodeMonitoring:
+      type: object
+      additionalProperties: false
+      required: [source, rules, rules_version]
+      description: 新增节点缺省继承公共规则；旧节点省略此对象保留实际配置。保存不下发，独立节点不随公共规则变化。
+      properties:
+        source: {type: string, enum: [inherited, independent]}
+        rules: {$ref: '#/components/schemas/MonitoringRules'}
+        rules_version: {type: string, pattern: '^(0|[1-9][0-9]*)$'}
+    InstalledTarget:
+      type: object
+      readOnly: true
+      required: [job, plan_digest, release, sha256, mode, endpoint, host, ssh_port]
+      description: 服务端验证的实际安装目标，不取待应用的新地址和部署方式，不接受客户端写入。用于卸载、凭据作用域和恢复绑定。
+      properties:
+        job: {type: string}
+        plan_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
+        release: {type: string}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        mode: {type: string, enum: [native, docker]}
+        endpoint: {type: string}
+        host: {type: string}
+        ssh_port: {type: integer, minimum: 1, maximum: 65535, readOnly: true, description: 实际安装时固定的 SSH 端口，卸载不能改用待应用端口}
+    SSHCredentialState:
+      type: object
+      required: [configured, version, ssh_port, fingerprint]
+      description: 脱敏状态；没有可靠安装证据时不返回 installation，未知不得伪造为已安装或已卸载。
+      properties:
+        configured: {type: boolean}
+        version: {type: integer, description: 已保存节点配置版本，仅用于并发检查，不决定卸载目标}
+        ssh_port: {type: integer}
+        fingerprint: {type: string}
+        installation: {$ref: '#/components/schemas/InstalledTarget'}
+        can_uninstall: {type: boolean, description: 实际安装及恢复资料允许卸载}
+        reason: {type: string, description: 脱敏的保护或不可用原因}
+        outcome: {type: string, enum: [confirmed_removed, still_installed, unknown], description: 实际确认移除、仍安装或无法确认；仅 confirmed_removed 可以显示已卸载}
+    DeploymentTarget:
+      type: object
+      required: [release, sha256, mode]
+      properties:
+        release: {type: string}
+        sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        mode: {type: string, enum: [native, docker]}
+    DeploymentPreview:
+      type: object
+      required: [token, node, kind, version, applied_version, target, comparison, expires_at]
+      description: 十分钟预览绑定账号、配置、凭据、实际安装及发布摘要；uninstall 的 target 是原固定安装版本，数据、证书及恢复资料保留，不能改用当前待部署配置。
+      properties:
+        token: {type: string}
+        node: {type: string}
+        kind: {type: string, enum: [install, upgrade, uninstall]}
+        version: {type: integer, minimum: 1}
+        applied_version: {type: integer, minimum: 0}
+        target: {$ref: '#/components/schemas/DeploymentTarget'}
+        current: {$ref: '#/components/schemas/DeploymentTarget'}
+        comparison: {type: string, description: uninstall-preserve-data 表示独立卸载并保留远程数据}
+        expires_at: {type: string, format: date-time}
+    DeploymentHistoryDeleteItem:
+      type: object
+      required: [id, record_key, status, reason, deleted_logs]
+      properties:
+        id: {type: string}
+        record_key: {type: string}
+        status: {type: string, enum: [eligible, protected, pending, deleted, skipped, failed]}
+        reason: {type: string}
+        deleted_logs: {type: integer, minimum: 0}
+    DeploymentHistoryDeletePreview:
+      type: object
+      required: [token, eligible, protected, expires_at, items, message]
+      properties:
+        token: {type: string, description: 短期确认凭据，不进入审计及日志}
+        eligible: {type: integer, minimum: 0}
+        protected: {type: integer, minimum: 0}
+        expires_at: {type: string, format: date-time}
+        items: {type: array, minItems: 1, maxItems: 200, items: {$ref: '#/components/schemas/DeploymentHistoryDeleteItem'}}
+        message: {type: string}
+    DeploymentHistoryDeleteJob:
+      type: object
+      required: [id, status, selected, deleted, skipped, failed, message, created_at, updated_at, finished_at]
+      description: 提交回执可不包含 items；查询返回逐项结果。部分完成不得显示全部成功，不删除内部部署任务和恢复资料。
+      properties:
+        id: {type: string}
+        status: {type: string, enum: [queued, running, succeeded, partial, cancelled]}
+        selected: {type: integer, minimum: 1, maximum: 200}
+        deleted: {type: integer, minimum: 0}
+        skipped: {type: integer, minimum: 0}
+        failed: {type: integer, minimum: 0}
+        message: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        items: {type: array, maxItems: 200, items: {$ref: '#/components/schemas/DeploymentHistoryDeleteItem'}}
     DeploymentPreparation:
       type: object
       properties:
@@ -1815,8 +2654,152 @@ components:
             fingerprint: {type: string}
             fingerprint_token: {type: string}
             configured: {type: boolean}
-            preview: {type: object}
+            preview: {$ref: '#/components/schemas/DeploymentPreview'}
             job: {type: string}
+    ConsoleMetricDevice:
+      type: object
+      required: [id, kind, name, last_seen]
+      properties:
+        id: {type: string, description: 服务端生成的不透明设备标识，查询时原样返回}
+        kind: {type: string, enum: [disk, network]}
+        name: {type: string, minLength: 1, maxLength: 128}
+        last_seen: {type: [number, 'null'], description: 所选窗口中最近样本的 Unix 秒}
+    ConsoleDeviceInventory:
+      type: object
+      required: [start, end, items, truncated]
+      properties:
+        start: {type: integer, format: int64}
+        end: {type: integer, format: int64}
+        items: {type: array, maxItems: 512, items: {$ref: '#/components/schemas/ConsoleMetricDevice'}}
+        truncated: {type: boolean, description: 每类超过 256 项或无效名称被过滤；不能视为完整清单}
+    ConsoleDeviceTrend:
+      type: object
+      required: [start, end, resolution_seconds, devices, series, points]
+      properties:
+        start: {type: integer, format: int64}
+        end: {type: integer, format: int64}
+        resolution_seconds: {type: integer, minimum: 30}
+        devices: {type: array, maxItems: 8, items: {$ref: '#/components/schemas/ConsoleMetricDevice'}}
+        series:
+          type: array
+          maxItems: 64
+          items:
+            type: object
+            required: [key, device_id, metric, unit]
+            properties:
+              key: {type: string, description: points.values 中的稳定键}
+              device_id: {type: string}
+              metric: {type: string, enum: [disk_read, disk_write, disk_read_iops, disk_write_iops, net_receive, net_transmit, net_receive_errors, net_transmit_errors, net_receive_drops, net_transmit_drops]}
+              unit: {type: string, enum: [bytes/s, operations/s, packets/s]}
+        points:
+          type: array
+          maxItems: 1000
+          items:
+            type: object
+            required: [time, ok, values]
+            properties:
+              time: {type: integer, format: int64}
+              ok: {type: boolean, description: 至少一条所选时序有有效值，不代表所有设备都有值}
+              values: {type: object, maxProperties: 64, additionalProperties: {type: number, minimum: 0}, description: 缺少的时序键保持缺失，不补零}
+    HostWatchdogObservation:
+      type: [object, 'null']
+      description: |
+        由摘要工作器读取宿主私有 Unix socket 后持久化；浏览器不能指定探测地址或命令。
+        未配置、不可达、过期或分区失败均不能推断健康。fresh 要求观测时间在当前前 45 秒至后 5 秒内。
+      required: [configured, available, fresh, reason, status]
+      properties:
+        configured: {type: boolean}
+        available: {type: boolean}
+        fresh: {type: boolean}
+        reason: {type: string, description: 脱敏状态原因，不含凭据或私有路径}
+        status: {$ref: '#/components/schemas/HostWatchdogStatus'}
+    HostWatchdogStatus:
+      type: [object, 'null']
+      required: [instance, observed_at, runtime_version, frozen, reason, pending, checks, environment]
+      properties:
+        instance: {type: string}
+        observed_at: {type: string, format: date-time, description: 实际宿主观测时间，未观测时为零时间}
+        runtime_version: {type: integer, minimum: 0}
+        frozen: {type: boolean, description: 通知配置/恢复核验冻结；不伪造数据库或采集健康状态}
+        reason: {type: string}
+        pending: {type: integer, minimum: 0, description: 宿主通知中 queued/sending 数量，不是数据库事务数量}
+        checks:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            required: [component, state, reason, observed_at, latency_ms]
+            properties:
+              component: {type: string, enum: [api, postgres, metrics, storage]}
+              state: {type: string, enum: [normal, abnormal, unknown]}
+              reason: {type: string}
+              observed_at: {type: string, format: date-time}
+              latency_ms: {type: integer, minimum: 0}
+        environment:
+          type: object
+          required: [os, architecture, kernel, boot_id, uptime_seconds, memory_bytes, storage]
+          properties:
+            os: {type: string}
+            architecture: {type: string}
+            kernel: {type: string}
+            boot_id: {type: string}
+            uptime_seconds: {type: [number, 'null'], minimum: 0}
+            memory_bytes: {type: [integer, 'null'], minimum: 0, description: 宿主总内存；不是容器内存}
+            storage:
+              type: [array, 'null']
+              maxItems: 3
+              items:
+                type: object
+                required: [component, total_bytes, available_bytes, inodes, available_inodes]
+                properties:
+                  component: {type: string, enum: [watchdog_state, postgres, metrics]}
+                  total_bytes: {type: integer, minimum: 0}
+                  available_bytes: {type: integer, minimum: 0}
+                  inodes: {type: integer, minimum: 0}
+                  available_inodes: {type: integer, minimum: 0}
+    DashboardServiceEvidence:
+      type: [object, 'null']
+      properties:
+        database_bytes: {type: integer, minimum: 0, description: 当前业务 schema 中 v3 表及索引占用，不是磁盘总量或剩余空间}
+        roles:
+          type: object
+          description: |
+            实际工作器心跳，包括 notify-email、notify-feishu 和 notification-tests。
+            healthy 依据二十秒内心跳及无错误；空队列不能代替健康证据，通道健康不代表收件人已读。
+            只公开心跳、健康和错误标记，不返回通知载荷、凭据或租约所有者。
+          additionalProperties:
+            type: object
+            required: [heartbeat, healthy, has_error]
+            properties:
+              heartbeat: {type: string, format: date-time}
+              healthy: {type: boolean}
+              has_error: {type: boolean}
+        last_cleanup:
+          type: [object, 'null']
+          properties:
+            status: {type: string}
+            deleted: {type: integer}
+            updated_at: {type: string, format: date-time}
+    RuntimeSettingsValues:
+      type: object
+      description: |
+        按字段路径返回的白名单投影，缺失不表示零或默认值。save 只保存，apply 后工作器读取运行值。
+        monitoring.interval_seconds 是告警判断参考周期，collector.interval_seconds 是实际指标拉取周期。
+        无 backup 运行时字段保留原宿主 03:00 定时器及原份数策略；首次显式设置任一 backup 字段后，
+        未给出的项按 enabled=true、time=03:00、timezone=UTC、keep_days=7 解释。
+        运行时策略不改写旧签名定时器资料；已有安装必须显式升级维护程序后才能执行新策略。
+      properties:
+        collector.interval_seconds: {type: integer, minimum: 10, maximum: 3600, description: 已应用时才改变主控实际指标采集周期；缺失沿用启动配置}
+        backup.enabled: {type: boolean, description: 只控制自动备份，关闭不禁止手动完整备份}
+        backup.time: {type: string, pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$', description: 所选时区每天 HH:MM}
+        backup.timezone: {type: string, minLength: 1, maxLength: 128, description: 服务端可解析的明确 IANA 时区，如 Asia/Shanghai 或 UTC；拒绝 Local}
+        backup.keep_days: {type: integer, minimum: 1, maximum: 3650, description: 保留天数，不是备份份数；最近成功备份继续受保护}
+      additionalProperties:
+        oneOf:
+          - {type: boolean}
+          - {type: integer}
+          - {type: string}
+          - {type: array, items: {type: string}}
     SettingsState:
       type: object
       required: [generation, applied_generation, runtime_version, pending, updated_at]
@@ -1843,8 +2826,12 @@ components:
               min: {type: integer}
               max: {type: integer}
               choices: {type: array, items: {type: string}}
-        values: {type: object, description: 按字段路径返回已保存值；缺失表示未设置，不伪造默认值}
-        runtime_values: {type: object, description: 同白名单的当前运行值}
+        values:
+          allOf: [{$ref: '#/components/schemas/RuntimeSettingsValues'}]
+          description: 已保存的字段值；保存不代表已应用
+        runtime_values:
+          allOf: [{$ref: '#/components/schemas/RuntimeSettingsValues'}]
+          description: 当前已应用字段值，工作器实际执行以此为准
         secret_configured: {type: object, additionalProperties: {type: boolean}}
         runtime_secret_configured: {type: object, additionalProperties: {type: boolean}}
     SettingsEditorRequest:
@@ -1861,14 +2848,8 @@ components:
           additionalProperties: false
           properties:
             values:
-              type: object
-              description: 仅接受 fields 中的路径和严格类型；不是任意配置编辑器
-              additionalProperties:
-                oneOf:
-                  - {type: boolean}
-                  - {type: integer}
-                  - {type: string}
-                  - {type: array, items: {type: string}}
+              allOf: [{$ref: '#/components/schemas/RuntimeSettingsValues'}]
+              description: 仅接受 fields 中的路径和严格类型；不是任意配置编辑器。apply 时 edit 必须为空。
             secrets:
               type: object
               additionalProperties: false
@@ -2150,7 +3131,7 @@ components:
               delete_reason: {type: string}
     NotificationRecord:
       type: object
-      required: [id, node, event_id, channel, recipient, created_at, done_at, attempts, state, next_try, record_key, can_delete, delete_reason]
+      required: [id, node, event_id, channel, recipient, created_at, done_at, attempts, state, next_try, record_key, can_delete, delete_reason, source, subject, summary, content_state, content_reason, truncated]
       properties:
         id: {type: string, pattern: '^[1-9][0-9]*$'}
         node: {type: string}
@@ -2165,6 +3146,72 @@ components:
         record_key: {type: string}
         can_delete: {type: boolean}
         delete_reason: {type: string}
+        source: {$ref: '#/components/schemas/NotificationSource'}
+        subject: {type: string, description: 最多1024个UTF-8字节}
+        summary: {type: string, description: 最多4096个UTF-8字节}
+        content_state: {type: string, enum: [available, unsupported]}
+        content_reason: {type: string}
+        truncated: {type: boolean}
+    NotificationSource:
+      type: string
+      enum: [event, server_health, website, test, legacy, unknown]
+    NotificationDetail:
+      type: object
+      required: [notification, body, outcome]
+      properties:
+        notification: {$ref: '#/components/schemas/NotificationRecord'}
+        body: {type: string, description: 受控业务投影，最多32768个UTF-8字节；不能校验时为空}
+        outcome:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, enum: [pending, accepted, unknown]}
+            message: {type: string}
+    NotificationAttempt:
+      type: object
+      required: [id, epoch, success, outcome, message, created_at]
+      properties:
+        id: {type: string, pattern: '^[1-9][0-9]*$'}
+        epoch: {type: string, pattern: '^[0-9]+$'}
+        success: {type: boolean, description: 发送器是否返回成功；false不证明没有送达}
+        outcome: {type: string, enum: [accepted, unknown]}
+        message: {type: string}
+        created_at: {type: string, format: date-time}
+    NotificationTestPreview:
+      type: object
+      required: [token, channel, runtime_version, expires_at, recipients, subject, body]
+      properties:
+        token: {type: string}
+        channel: {type: string, enum: [feishu, email]}
+        runtime_version: {type: integer, minimum: 1}
+        expires_at: {type: string, format: date-time}
+        recipients: {type: array, maxItems: 20, items: {type: string}}
+        subject: {type: string}
+        body: {type: string}
+    NotificationTestJob:
+      type: object
+      required: [id, channel, runtime_version, status, created_at, updated_at, finished_at, message, items]
+      properties:
+        id: {type: string}
+        channel: {type: string, enum: [feishu, email]}
+        runtime_version: {type: integer, minimum: 1}
+        status: {type: string, enum: [queued, running, succeeded, partial, failed, unknown, cancelled]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        message: {type: string}
+        items:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [ordinal, recipient, state, outcome, message]
+            properties:
+              ordinal: {type: integer, minimum: 1, maximum: 20}
+              recipient: {type: string}
+              state: {type: string, enum: [queued, sending, accepted, unknown, cancelled]}
+              outcome: {type: string}
+              message: {type: string}
     WebsiteBackupDocument:
       type: object
       additionalProperties: false
@@ -2253,8 +3300,8 @@ components:
         id: {type: string}
         node: {type: string}
         username: {type: string}
-        kind: {type: string, enum: [install, upgrade, recover], description: recover 为本地管理员创建的历史恢复任务；公开提交仍不接受该类型}
-        status: {type: string, enum: [queued, running, failed, interrupted, succeeded, rolled_back]}
+        kind: {type: string, enum: [install, upgrade, recover, uninstall], description: recover 为本地管理员创建的历史恢复任务；公开提交仍不接受该类型。uninstall 独立于记录移除，保留数据、证书及恢复资料}
+        status: {type: string, enum: [queued, running, failed, interrupted, succeeded, rolled_back], description: 卸载仅在远程实际结果验收通过后 succeeded；响应不明保持待确认或失败，不能标记已卸载}
         direction: {type: string, enum: [forward, rollback]}
         node_version: {type: integer}
         plan_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
@@ -2266,6 +3313,9 @@ components:
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
         finished_at: {type: [string, 'null'], format: date-time}
+        record_key: {type: string, readOnly: true, description: 稳定部署历史标识，格式为 deployment-job 加冒号及任务 ID}
+        can_delete: {type: boolean, readOnly: true, description: 服务端按引用和保护期限计算；缺失视为禁止删除，确认及执行时仍重新核对}
+        delete_reason: {type: string, readOnly: true, description: 最新任务、成功基线、恢复链、部署准备或其他保护引用的实际原因}
     Error:
       type: object
       required: [code, message]
@@ -2283,8 +3333,12 @@ components:
         mode: {type: string, enum: [native, docker]}
         version: {type: integer, readOnly: true}
         applied_version: {type: integer, readOnly: true}
+        monitoring: {$ref: '#/components/schemas/NodeMonitoring'}
         can_remove: {type: boolean, readOnly: true, description: 是否允许仅移除中心记录；不表示远程卸载可用}
         remove_reason: {type: string, readOnly: true, description: 关联网站或未完成任务等移除保护原因}
+        can_uninstall: {type: boolean, readOnly: true, description: 服务端按实际安装与恢复证据及任务互斥计算，不能按 enabled 或保存部署方式推断}
+        uninstall_reason: {type: string, readOnly: true, description: 无法确认安装归属、原固定物料缺失或存在任务冲突的实际保护原因}
+        lifecycle: {type: string, enum: [unknown, installed, uninstalled, pending], readOnly: true, description: 实际安装生命周期；只有确认程序与自启动已移除才为 uninstalled，离线或响应不明不视为成功}
         shard: {type: integer, readOnly: true}
         collection_state: {type: string, enum: [normal, unreachable, stale, unknown, disabled], readOnly: true}
         status:

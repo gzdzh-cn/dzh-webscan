@@ -20,13 +20,14 @@ import (
 )
 
 type pgBackupLine struct {
-	Type    string          `json:"type"`
-	Format  int             `json:"format,omitempty"`
-	Version int             `json:"schema_version,omitempty"`
-	Table   string          `json:"table,omitempty"`
-	Data    json.RawMessage `json:"data,omitempty"`
-	Rows    int64           `json:"rows,omitempty"`
-	SHA256  string          `json:"sha256,omitempty"`
+	Type       string          `json:"type"`
+	SnapshotAt time.Time       `json:"snapshot_at,omitempty"`
+	Format     int             `json:"format,omitempty"`
+	Version    int             `json:"schema_version,omitempty"`
+	Table      string          `json:"table,omitempty"`
+	Data       json.RawMessage `json:"data,omitempty"`
+	Rows       int64           `json:"rows,omitempty"`
+	SHA256     string          `json:"sha256,omitempty"`
 }
 
 // A stored website snapshot may be 24 MiB. Its containing JSONL row must fit
@@ -105,7 +106,11 @@ func backupPostgres(ctx context.Context, tx *sql.Tx, version int, directory stri
 	hash := sha256.New()
 	buffer := bufio.NewWriterSize(io.MultiWriter(f, hash), 64<<10)
 	encoder := json.NewEncoder(buffer)
-	if err = encoder.Encode(pgBackupLine{Type: "header", Format: 1, Version: version}); err != nil {
+	var snapshotAt time.Time
+	if err = tx.QueryRowContext(ctx, "SELECT transaction_timestamp()").Scan(&snapshotAt); err != nil {
+		return "", err
+	}
+	if err = encoder.Encode(pgBackupLine{Type: "header", Format: 1, Version: version, SnapshotAt: snapshotAt.UTC()}); err != nil {
 		return "", err
 	}
 	tables, err := postgresTables(ctx, tx)
@@ -165,7 +170,7 @@ func backupPostgres(ctx context.Context, tx *sql.Tx, version int, directory stri
 }
 
 func postgresTables(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p') AND NOT relispartition AND relname LIKE 'v3\_%' ESCAPE '\' ORDER BY CASE WHEN relname='v3_accounts' THEN 0 WHEN relname='v3_notifications' THEN 1 WHEN relname='v3_websites' THEN 2 WHEN relname='v3_node_identities' THEN 3 WHEN relname='v3_nodes' THEN 4 WHEN relname='v3_pki_authorities' THEN 5 WHEN relname='v3_credentials' THEN 6 WHEN relname='v3_node_certificates' THEN 7 WHEN relname='v3_deployment_jobs' THEN 8 WHEN relname='v3_node_configurations' THEN 9 WHEN relname='v3_node_runtime' THEN 10 WHEN relname IN ('v3_website_backups','v3_configuration_backups','v3_configuration_revisions') THEN 9 WHEN relname IN ('v3_history_previews','v3_configuration_delete_previews') THEN 10 WHEN relname IN ('v3_history_jobs','v3_configuration_delete_jobs','v3_configuration_applications','v3_deployment_preparations','v3_root_rotations') THEN 11 ELSE 12 END,relname`)
+	rows, err := tx.QueryContext(ctx, `SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p') AND NOT relispartition AND relname LIKE 'v3\_%' ESCAPE '\' ORDER BY CASE WHEN relname='v3_accounts' THEN 0 WHEN relname='v3_notifications' THEN 1 WHEN relname='v3_websites' THEN 2 WHEN relname='v3_node_identities' THEN 3 WHEN relname='v3_nodes' THEN 4 WHEN relname='v3_pki_authorities' THEN 5 WHEN relname='v3_credentials' THEN 6 WHEN relname='v3_node_certificates' THEN 7 WHEN relname IN ('v3_single_backup_policies','v3_single_backup_runs') THEN 8 WHEN relname='v3_single_backup_slots' THEN 9 WHEN relname='v3_deployment_jobs' THEN 8 WHEN relname='v3_node_configurations' THEN 9 WHEN relname='v3_migration_sessions' THEN 9 WHEN relname='v3_legacy_history' THEN 10 WHEN relname IN ('v3_migration_revisions','v3_migration_target_journals') THEN 10 WHEN relname IN ('v3_migration_node_sources','v3_migration_shadow_runs','v3_migration_final_batches','v3_migration_metric_runs','v3_migration_cutovers') THEN 11 WHEN relname='v3_migration_deltas' THEN 11 WHEN relname='v3_node_runtime' THEN 10 WHEN relname IN ('v3_website_backups','v3_configuration_backups','v3_configuration_revisions') THEN 9 WHEN relname IN ('v3_history_previews','v3_configuration_delete_previews','v3_deployment_history_delete_previews','v3_notification_test_previews') THEN 10 WHEN relname IN ('v3_history_jobs','v3_configuration_delete_jobs','v3_configuration_applications','v3_deployment_preparations','v3_root_rotations','v3_monitoring_applications','v3_deployment_history_delete_jobs','v3_notification_test_jobs') THEN 11 ELSE 12 END,relname`)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +232,9 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 		return errors.New("恢复目标必须为空；禁止覆盖正在使用的数据库")
 	}
 	if _, err = tx.ExecContext(ctx, Schema); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, migrationRestoreCheckpointSchema); err != nil {
 		return err
 	}
 	if header.Version >= 2 {
@@ -419,13 +427,97 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	if header.Version >= 39 {
+		if _, err = tx.ExecContext(ctx, monitoringApplicationSchema); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 40 {
+		if _, err = tx.ExecContext(ctx, deploymentHistoryDeleteSchema); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 41 {
+		if _, err = tx.ExecContext(ctx, deploymentUninstallSchema); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 42 {
+		if _, err = tx.ExecContext(ctx, notificationPublicSchema+notificationTestSchema+`INSERT INTO v3_schema(version) VALUES(42);`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 43 {
+		if _, err = tx.ExecContext(ctx, hostWatchdogHistorySchema+`INSERT INTO v3_schema(version) VALUES(43);`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 44 {
+		if _, err = tx.ExecContext(ctx, singleBackupRuntimePolicySchema); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 45 {
+		if _, err = tx.ExecContext(ctx, migrationSessionSchema+`INSERT INTO v3_schema(version) VALUES(45);`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 46 {
+		if _, err = tx.ExecContext(ctx, migrationTargetJournalSchema+migrationNodesSchema+migrationShadowSchema+`INSERT INTO v3_schema(version) VALUES(46);`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 47 {
+		if _, err = tx.ExecContext(ctx, migrationFinalMappingSchema+migrationMetricHistorySchema+`INSERT INTO v3_schema(version) VALUES(47);`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 48 {
+		if _, err = tx.ExecContext(ctx, migrationCutoverSchema+`INSERT INTO v3_schema(version) VALUES(48);`); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 49 {
+		if _, err = tx.ExecContext(ctx, migrationRecoverySchema+`INSERT INTO v3_schema(version) VALUES(49);`); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 50 {
+		if _, err = tx.ExecContext(ctx, migrationLegacyHistorySchema+`INSERT INTO v3_schema(version) VALUES(50);`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 51 {
+		if _, err = tx.ExecContext(ctx, migrationCutoverNodesSchema+`INSERT INTO v3_schema(version) VALUES(51);`); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 52 {
+		if _, err = tx.ExecContext(ctx, migrationReverseMetricJournalSchema+migrationReverseMetricsSchema+`INSERT INTO v3_schema(version) VALUES(52);`); err != nil {
+			return err
+		}
+	}
+
 	tables, err := postgresTables(ctx, tx)
 	if err != nil {
 		return err
 	}
 	allowed := map[string]bool{}
+	insertStatements := map[string]string{}
 	for _, table := range tables {
 		allowed[table] = true
+		statement, e := postgresRestoreInsert(ctx, tx, table)
+		if e != nil {
+			return e
+		}
+		insertStatements[table] = statement
 	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM v3_settings;DELETE FROM v3_schema"); err != nil {
 		return err
@@ -461,12 +553,12 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 			if !allowed[line.Table] || !seen[line.Table] {
 				return errors.New("备份记录的表不正确")
 			}
-			if _, err = tx.ExecContext(ctx, "INSERT INTO "+quotePG(line.Table)+" SELECT (jsonb_populate_record(NULL::"+quotePG(line.Table)+",$1::jsonb)).*", []byte(line.Data)); err != nil {
+			if _, err = tx.ExecContext(ctx, insertStatements[line.Table], []byte(line.Data)); err != nil {
 				return errors.New("备份记录恢复失败，数据库未修改")
 			}
 			rows++
 		case "footer":
-			if line.Rows != rows || line.SHA256 != hex.EncodeToString(hash.Sum(nil)) {
+			if line.Rows != rows || line.SHA256 != header.SHA256 || line.SHA256 != hex.EncodeToString(hash.Sum(nil)) {
 				return errors.New("恢复校验失败，数据库未修改")
 			}
 			footer = true
@@ -481,12 +573,23 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 	if err = scanner.Err(); err != nil {
 		return err
 	}
-	if !footer || len(seen) != len(allowed) {
+	if !footer {
 		return errors.New("备份不完整，数据库未修改")
+	}
+	for table := range allowed {
+		// Pre-checkpoint archives legitimately omit only this new private table.
+		if !seen[table] && table != "v3_migration_restore_checkpoint" {
+			return errors.New("备份不完整，数据库未修改")
+		}
 	}
 	version, err := currentSchema(ctx, tx)
 	if err != nil || version != header.Version {
 		return errors.New("恢复数据库版本与备份不一致")
+	}
+	if header.Version >= 42 {
+		if err = quarantineNotificationTestsTx(ctx, tx); err != nil {
+			return err
+		}
 	}
 	if header.Version >= 4 {
 		// Runtime evidence is not historical business data. A restore must await
@@ -514,6 +617,11 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	if header.Version >= 39 {
+		if _, err = tx.ExecContext(ctx, `UPDATE v3_monitoring_applications SET recovery_hold=true WHERE status IN ('queued','running','paused');DELETE FROM v3_monitoring_application_authorizations;DELETE FROM v3_role_status WHERE role='monitoring-applications'`); err != nil {
+			return err
+		}
+	}
 	if header.Version >= 34 {
 		// Restore retains issuance ancestry, not permission to finish a
 		// destructive name change using an archived task or SSH authority.
@@ -529,7 +637,7 @@ func (s *Store) RestorePostgres(ctx context.Context, path string) error {
 	if header.Version >= 9 {
 		// Archived cleanup and certificate heartbeats do not prove that host
 		// workers or trust files are healthy in the restored cluster.
-		if _, err = tx.ExecContext(ctx, "DELETE FROM v3_role_status WHERE role IN ('retention','pki-maintenance')"); err != nil {
+		if _, err = tx.ExecContext(ctx, "DELETE FROM v3_role_status WHERE role IN ('retention','pki-maintenance','notify-email','notify-feishu','host-watchdog-history')"); err != nil {
 			return err
 		}
 	}
@@ -542,6 +650,23 @@ DELETE FROM v3_role_status WHERE role='single-backup'`); err != nil {
 			return err
 		}
 	}
+	if header.Version >= 44 {
+		// Incomplete archived slots cannot authorize execution on a recovered
+		// host. Completed local dates remain recorded to prevent duplicate runs.
+		if _, err = tx.ExecContext(ctx, `DELETE FROM v3_single_backup_slots WHERE completed_at IS NULL`); err != nil {
+			return err
+		}
+	}
+
+	if header.Version >= 45 {
+		// A restored report preserves history; it cannot prove that the old
+		// writers, source paths or remote generations are still the same.
+		if _, err = tx.ExecContext(ctx, `UPDATE v3_migration_sessions SET recovery_hold=true,version=version+1,freeze_digest='',freeze_at=NULL,phase=CASE WHEN phase IN ('frozen','reconciled','active','rolled_back') THEN 'indexed' ELSE phase END;
+INSERT INTO v3_migration_domains(domain,source,pending) SELECT 'session:'||id,id,true FROM v3_migration_sessions ON CONFLICT(domain) DO UPDATE SET source=EXCLUDED.source,pending=true`); err != nil {
+			return err
+		}
+	}
+
 	if header.Version >= 10 {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM v3_website_backup_previews"); err != nil {
 			return err
@@ -629,7 +754,60 @@ UPDATE v3_history_previews SET expires_at=clock_timestamp(),used=true`); err != 
 			}
 		}
 	}
+	if header.Version >= 40 {
+		if _, err = tx.ExecContext(ctx, `UPDATE v3_deployment_history_delete_previews SET expires_at=LEAST(expires_at,clock_timestamp()),used=true;
+UPDATE v3_deployment_history_delete_items SET status='skipped',reason='灾备恢复后需重新预览授权' WHERE status='pending';
+UPDATE v3_deployment_history_delete_jobs j SET status='cancelled',skipped=(SELECT count(*) FROM v3_deployment_history_delete_items i WHERE i.job=j.id AND i.status='skipped'),message='灾备恢复后已撤销未执行的删除授权',updated_at=clock_timestamp(),finished_at=clock_timestamp() WHERE status IN ('queued','running')`); err != nil {
+			return err
+		}
+	}
+	if header.Version >= 46 {
+		// Logical archives contain journal evidence, not executable capture
+		// functions. Fence direct writes until independently verified recovery.
+		if err = installMigrationTargetRecoveryGuardsTx(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err = recordMigrationRestoreCheckpointTx(ctx, tx, header); err != nil {
+		return err
+	}
+	if header.Version >= 49 {
+		if err = consumeMigrationRestoreCheckpointTx(ctx, tx); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// jsonb_populate_record converts JSON null to SQL NULL. A non-null JSON column
+// can legitimately contain the JSON null scalar (e.g. a journal's absent
+// before image). Preserve it without replacing the scalar by a different value.
+func postgresRestoreInsert(ctx context.Context, tx *sql.Tx, table string) (string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT a.attname,t.typname,a.attnotnull FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid WHERE a.attrelid=(quote_ident(current_schema())||'.'||quote_ident($1))::regclass AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, table)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var expressions []string
+	for rows.Next() {
+		var name, kind string
+		var required bool
+		if err := rows.Scan(&name, &kind, &required); err != nil {
+			return "", err
+		}
+		value := "r." + quotePG(name)
+		if required && (kind == "jsonb" || kind == "json") {
+			value = "COALESCE(" + value + ",'null'::" + kind + ")"
+		}
+		expressions = append(expressions, value)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(expressions) == 0 {
+		return "", errors.New("恢复表结构不正确")
+	}
+	return "INSERT INTO " + quotePG(table) + " SELECT " + strings.Join(expressions, ",") + " FROM jsonb_populate_record(NULL::" + quotePG(table) + ",$1::jsonb) AS r", nil
 }
 
 // Inspection bounds an individual record but streams the whole archive. It
@@ -689,6 +867,7 @@ func inspectPGReader(reader io.Reader) (header pgBackupLine, err error) {
 					return header, errors.New("备份校验失败")
 				}
 				footer = true
+				header.SHA256 = v.SHA256
 			default:
 				return header, errors.New("备份记录类型不正确")
 			}

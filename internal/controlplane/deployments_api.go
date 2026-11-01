@@ -48,7 +48,7 @@ func (a *API) deploymentRoutes(w http.ResponseWriter, r *http.Request, id identi
 			failure(w, 400, "invalid_node", "节点编号不正确")
 			return true
 		}
-		items, err := a.Store.Deployments(ctx, cursor.Time, cursor.ID, node, limit)
+		items, err := a.Store.publicDeployments(ctx, cursor.Time, cursor.ID, node, limit, id.Role == "admin")
 		if err != nil {
 			failure(w, 503, "query_failed", "部署任务查询失败")
 			return true
@@ -70,7 +70,7 @@ func (a *API) deploymentRoutes(w http.ResponseWriter, r *http.Request, id identi
 		failure(w, 404, "not_found", "接口不存在")
 		return true
 	}
-	job, err := a.Store.Deployment(ctx, parts[0])
+	job, err := a.Store.publicDeployment(ctx, parts[0], id.Role == "admin")
 	if err == sql.ErrNoRows {
 		failure(w, 404, "not_found", "部署任务不存在")
 		return true
@@ -80,7 +80,7 @@ func (a *API) deploymentRoutes(w http.ResponseWriter, r *http.Request, id identi
 		return true
 	}
 	if len(parts) == 1 {
-		resume, rollback, reason := a.deploymentRecoveryActions(ctx, job, id)
+		resume, rollback, reason := a.deploymentRecoveryActions(ctx, job.DeploymentJob, id)
 		reply(w, 200, map[string]any{"job": job, "phase": job.Phase(), "can_resume": resume, "can_rollback": rollback, "recovery_required": job.CanRecover(), "recovery_reason": reason})
 		return true
 	}
@@ -97,7 +97,11 @@ func (a *API) deploymentRoutes(w http.ResponseWriter, r *http.Request, id identi
 			return true
 		}
 	}
-	logs, err := a.Store.DeploymentLogs(ctx, job.ID, after, limit)
+	_, logs, err := a.Store.publicDeploymentLogs(ctx, job.ID, after, limit, id.Role == "admin")
+	if err == sql.ErrNoRows {
+		failure(w, 404, "not_found", "部署任务不存在")
+		return true
+	}
 	if err != nil {
 		failure(w, 503, "query_failed", "部署日志读取失败")
 		return true
@@ -114,10 +118,11 @@ func (a *API) deploymentRecoveryActions(ctx context.Context, j DeploymentJob, id
 	if id.Role != "admin" {
 		return false, false, "需要管理员权限"
 	}
-	if !j.CanRecover() {
+	terminalUninstall := j.Kind == "uninstall" && j.Status == "succeeded"
+	if !j.CanRecover() && !terminalUninstall {
 		return false, false, "当前任务不需要恢复"
 	}
-	ready := a.deploymentAvailability(ctx)
+	ready := a.deploymentOperationAvailability(ctx, j.Kind == "uninstall")
 	if !ready.Available {
 		return false, false, ready.Reason
 	}
@@ -129,6 +134,12 @@ func (a *API) deploymentRecoveryActions(ctx context.Context, j DeploymentJob, id
 		return false, false, "任务状态暂不可用"
 	}
 	defer tx.Rollback()
+	if terminalUninstall {
+		if err := authorizeCompletedUninstallRollbackTx(ctx, tx, ready.Trust.vault, j, false); err != nil {
+			return false, false, "卸载后配置、运行状态或恢复资料已变化，无法恢复原程序"
+		}
+		return false, true, ""
+	}
 	if err = checkDeploymentConfigurationTx(ctx, tx, j); err != nil {
 		return false, false, "配置或任务状态已变化，请核对原任务"
 	}
@@ -167,7 +178,7 @@ func (a *API) deploymentRecoveryWrite(w http.ResponseWriter, r *http.Request, id
 		webDeploymentFailure(w, err)
 		return
 	}
-	ready := a.deploymentAvailability(ctx)
+	ready := a.deploymentOperationAvailability(ctx, j.Kind == "uninstall")
 	if !ready.Available {
 		failure(w, 503, "executor_unavailable", ready.Reason)
 		return
@@ -180,7 +191,7 @@ func (a *API) deploymentRecoveryWrite(w http.ResponseWriter, r *http.Request, id
 	if parts[1] == "rollback" {
 		direction = "rollback"
 	}
-	response, err := a.Store.recoverDeployment(ctx, id.Username, r.Header.Get("Idempotency-Key"), j.ID, direction, in.Plan, in.Cursor, true)
+	response, err := a.Store.recoverDeploymentWithTrust(ctx, id.Username, r.Header.Get("Idempotency-Key"), j.ID, direction, in.Plan, in.Cursor, true, ready.Trust.vault)
 	if err != nil {
 		webDeploymentFailure(w, err)
 	} else {

@@ -5,6 +5,28 @@ import { readWithReconnect } from './connection'
 
 export type V3Role = 'admin' | 'operator' | 'viewer'
 export interface V3Session { username: string; role: V3Role; csrf: string }
+export interface V3MonitoringRules {
+  roots: string[]; extensions: string[]; important_filenames: string[]
+  critical_paths: string[]; exclude_paths: string[]; reconciliation_interval_hours: number
+}
+export interface V3NodeMonitoring { source: 'inherited' | 'independent'; rules: V3MonitoringRules; rules_version: string }
+export interface V3MonitoringRulesView { version: string; rules: V3MonitoringRules }
+export interface V3MonitoringRulesEdit { expected_version: string; rules: V3MonitoringRules }
+export interface V3MonitoringRulesPreview { token: string; expires_at: string; changed_fields: string[] }
+export interface V3MonitoringApplicationNode {
+ id: string; name: string; batch: number; state: 'pending' | 'preparing' | 'running' | 'succeeded' | 'failed' | 'rolled_back'
+ job?: string; error_code?: string; before?: V3NodeMonitoring; effective?: V3NodeMonitoring; changed: boolean
+ can_resume: boolean; can_rollback: boolean
+}
+export interface V3MonitoringApplicationPreview {
+ id: string; token: string; expires_at: string; release: string; nodes: V3MonitoringApplicationNode[]
+}
+export interface V3MonitoringApplication {
+ id: string; rules_version: string; manifest_sha256: string; release: string; status: string; direction: string
+ version: string; expires_at: string; error_code?: string; created_at: string; updated_at: string
+ can_resume: boolean; can_rollback: boolean; nodes: V3MonitoringApplicationNode[]
+ can_reauthorize?: boolean; reauthorization_reason?: string
+}
 export interface V3Node {
   id: string; name: string; endpoint: string; server_name: string
   enabled: boolean; mode: 'native' | 'docker'
@@ -12,8 +34,10 @@ export interface V3Node {
   status?: V3ServerDetail['status']; collection_state?: 'normal' | 'unreachable' | 'stale' | 'unknown' | 'disabled'
   configuration?: { registered_version: number; delivered_version: number; runtime_enabled: boolean | null; runtime_mode: string; runtime_endpoint: string }
   can_remove?: boolean; remove_reason?: string
+  can_uninstall?: boolean; uninstall_reason?: string; lifecycle?: 'unknown' | 'installed' | 'uninstalled' | 'pending'
+  monitoring?: V3NodeMonitoring
 }
-export type V3NodeInput = Omit<V3Node, 'version' | 'applied_version' | 'shard' | 'configuration' | 'status' | 'collection_state' | 'can_remove' | 'remove_reason'>
+export type V3NodeInput = Omit<V3Node, 'version' | 'applied_version' | 'shard' | 'configuration' | 'status' | 'collection_state' | 'can_remove' | 'remove_reason' | 'can_uninstall' | 'uninstall_reason' | 'lifecycle'>
 export interface V3Page<T> { items: T[]; next_cursor: string }
 export interface V3ServerDetail {
   node: V3Node
@@ -21,6 +45,13 @@ export interface V3ServerDetail {
     metrics: Record<'cpu_percent' | 'memory_percent' | 'disk_percent' | 'uptime', number | null> & Record<string, number | null>
     info: Record<'hostname' | 'kernel' | 'architecture' | 'agent_version' | 'agent_mode', string | null> }
   latest_deployment: V3DeploymentJob | null
+}
+export interface V3MetricDevice { id: string; kind: 'disk' | 'network'; name: string; last_seen: number | null }
+export interface V3MetricDeviceList { start: number; end: number; items: V3MetricDevice[]; truncated: boolean }
+export interface V3DeviceTrends {
+  points: import('./charts').MetricPoint[]; resolution_seconds: number; start: number; end: number
+  devices: V3MetricDevice[]
+  series: { key: string; device_id: string; metric: string; unit: string }[]
 }
 export interface V3Event {
   node: string; id: string; received_at: string; payload: Record<string, unknown>
@@ -33,9 +64,17 @@ export interface V3EventFilter {
 export interface V3EventPage extends V3Page<V3Event> { start: string; end: string }
 export interface V3Availability { available: boolean; reason: string }
 export interface V3Capabilities {
- settings?: V3Availability; deployments?: V3Availability; executor?: V3Availability; version?: string
+ metrics_retention?: V3MetricsRetentionView
+ notification_tests?: V3Availability
+ operations?: { uninstall?: V3Availability }; settings?: V3Availability; deployments?: V3Availability; executor?: V3Availability; monitoring_rules?: V3Availability; monitoring_applications?: V3Availability; version?: string
   deployment_defaults?: { central: 'docker'; node: 'docker'; node_modes: ('docker' | 'native')[] }; configuration_application_writes?: boolean; api_version: 3; topology: 'single' | 'ha'; features: string[]; implementation_stage: string
 }
+export interface V3HostWatchdogStatus {
+  instance: string; observed_at: string; runtime_version: number; frozen: boolean; reason: string; pending: number
+  checks: { component: string; state: 'normal' | 'abnormal' | 'unknown'; reason: string; observed_at: string; latency_ms: number }[]
+  environment: { os: string; architecture: string; kernel: string; boot_id: string; uptime_seconds: number | null; memory_bytes: number | null; storage: { component: string; total_bytes: number; available_bytes: number; inodes: number; available_inodes: number }[] }
+}
+export interface V3HostObservation { configured: boolean; available: boolean; fresh: boolean; reason: string; status: V3HostWatchdogStatus | null }
 export interface V3DashboardSection<T> { data: T | null; updated_at: string | null; error: string }
 export interface V3DashboardCounts { applicable: number; normal: number; abnormal: number; unknown: number }
 export interface V3DashboardResource {
@@ -53,6 +92,7 @@ export interface V3Dashboard {
     alerts?: V3DashboardSection<{ total: number; items: { source: 'server' | 'website'; id: string; node: string; name: string; kind: string; since: string; website: string | null }[] }>
     resources?: V3DashboardSection<{ items: V3DashboardResource[]; rankings: Record<'cpu_percent' | 'memory_percent' | 'disk_percent', { id: string; name: string; value: number }[]> }>
     monitoring?: V3DashboardSection<{ states: Partial<Record<'files' | 'scans' | 'delivery', V3DashboardCounts>> | null; pending_events: number | null; oldest_wait_seconds: number | null; pending_scans: number | null; yara_nodes: number; clamav_nodes: number }>
+    host_watchdog?: V3DashboardSection<V3HostObservation>
     services?: V3DashboardSection<{ database_bytes: number; roles: Record<string, { heartbeat: string; healthy: boolean; has_error: boolean }>; last_cleanup: null | { status: string; deleted: number; updated_at: string } }>
     certificates?: V3DashboardSection<{ maintenance: null | { heartbeat: string; fresh: boolean; has_error: boolean; reason: string; collector_expires_at: string | null; ca_expires_at: string | null } }>
     full_backups?: V3DashboardSection<{ policy: null | { enabled: boolean; keep: number }; latest: null | { status: string; created_at: string; updated_at: string; files: number; bytes: number; restore_validated: boolean; has_error: boolean } }>
@@ -85,7 +125,7 @@ export interface V3WebsiteOverview {
   scheduler: { heartbeat: string | null; healthy: boolean | null }
 }
 export interface V3DeploymentPreview {
- token: string; node: string; kind: 'install' | 'upgrade'; version: number; applied_version: number
+ token: string; node: string; kind: 'install' | 'upgrade' | 'uninstall'; version: number; applied_version: number
  target: { release: string; sha256: string; mode: string }; current?: { release: string; sha256: string; mode: string }
  comparison: string; expires_at: string
 }
@@ -96,14 +136,31 @@ export interface V3Preparation {
 }
 export interface V3SSHInput {
  expected_version: number; ssh_port: number; fingerprint_preparation: string; fingerprint_token: string
- password?: string; private_key_content?: string; private_key_path?: string
+ password?: string; private_key_content?: string; private_key_path?: string; kind?: 'uninstall'
+}
+export interface V3InstalledTarget {
+ job: string; plan_digest: string; release: string; sha256: string; mode: 'docker' | 'native'; endpoint: string; host: string; ssh_port: number
+}
+export interface V3SSHCredentialState {
+ configured: boolean; version: number; ssh_port: number; fingerprint: string
+ installation?: V3InstalledTarget; can_uninstall?: boolean; reason?: string; outcome?: 'confirmed_removed' | 'still_installed' | 'unknown'
+}
+export interface V3DeploymentHistoryDeletePreview {
+ token: string; eligible: number; protected: number; expires_at: string; message: string
+ items: { id: string; record_key: string; status: 'eligible' | 'protected'; reason: string }[]
+}
+export interface V3DeploymentHistoryDeleteJob {
+ id: string; status: 'queued' | 'running' | 'succeeded' | 'partial' | 'cancelled'; selected: number; deleted: number; skipped: number; failed: number
+ message: string; created_at: string; updated_at: string; finished_at: string | null
+ items?: { id: string; record_key: string; status: 'pending' | 'deleted' | 'skipped' | 'failed'; reason: string; deleted_logs: number }[]
 }
 export interface V3DeploymentJob {
-  id: string; node: string; username: string; kind: 'install' | 'upgrade' | 'recover'
+  id: string; node: string; username: string; kind: 'install' | 'upgrade' | 'recover' | 'uninstall'
   status: 'queued' | 'running' | 'failed' | 'interrupted' | 'succeeded' | 'rolled_back'
   direction: 'forward' | 'rollback'; node_version: number; plan_digest: string
   step: number; rollback_step: number; recovery_required: boolean; error_code: string; log_cursor: number
   created_at: string; updated_at: string; finished_at: string | null
+  record_key?: string; can_delete?: boolean; delete_reason?: string
 }
 export interface V3DeploymentLog { cursor: number; phase: string; code: string; created_at: string }
 export interface V3DeploymentDetail {
@@ -153,12 +210,26 @@ export interface V3HistoryJob {
   created_at: string; updated_at: string; finished_at: string | null
 }
 export interface V3IncidentFilter { node?: string; current?: boolean; start?: string; end?: string }
+export type V3NotificationSource = 'event' | 'server_health' | 'website' | 'test' | 'legacy' | 'unknown'
+export type V3NotificationDeliveryState = 'completed' | 'migration_pending' | 'paused' | 'sending' | 'waiting' | 'retrying' | 'pending'
 export interface V3Notification {
+  source?: V3NotificationSource; subject?: string; summary?: string; content_state?: 'available' | 'unsupported'; content_reason?: string; truncated?: boolean
   id: string; node: string; event_id: string; channel: 'feishu' | 'email'; recipient: string
   created_at: string; done_at: string | null; attempts: number; state?: 'completed' | 'migration_pending' | 'paused' | 'sending' | 'waiting' | 'retrying' | 'pending'; next_try?: string | null; record_key: string; can_delete: boolean; delete_reason: string
 }
+export interface V3NotificationOutcome { code: 'pending' | 'accepted' | 'unknown'; message: string }
+export interface V3NotificationDetail { notification: V3Notification; body: string; outcome: V3NotificationOutcome }
+export interface V3NotificationAttempt { id: string; epoch: string; success: boolean; outcome: 'accepted' | 'unknown'; message: string; created_at: string }
+export interface V3NotificationTestPreview { token: string; channel: 'feishu' | 'email'; runtime_version: number; expires_at: string; recipients: string[]; subject: string; body: string }
+export interface V3NotificationTestJob {
+  id: string; channel: 'feishu' | 'email'; runtime_version: number
+  status: 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'unknown' | 'cancelled'
+  created_at: string; updated_at: string; finished_at: string | null; message: string
+  items: { ordinal: number; recipient: string; state: 'queued' | 'sending' | 'accepted' | 'unknown' | 'cancelled'; outcome: string; message: string }[]
+}
 export interface V3NotificationFilter {
   channel: V3Notification['channel']; node?: string; state?: '' | 'pending' | 'completed'
+  q?: string; recipient?: string; source?: '' | V3NotificationSource; delivery_state?: '' | V3NotificationDeliveryState
   start?: string; end?: string; cursor?: string; limit?: number
 }
 export interface V3AuditRecord {
@@ -235,7 +306,9 @@ export interface V3SettingsState { generation: string; applied_generation: strin
 export interface V3SettingsField { path: string; label: string; kind: 'bool' | 'integer' | 'text' | 'choice' | 'addresses'; min?: number; max?: number; choices?: string[] }
 export type V3SettingsValue = boolean | number | string | string[]
 export interface V3SettingsEdit { values?: Record<string, V3SettingsValue>; secrets?: Record<string, { action: 'keep' | 'replace' | 'clear'; value?: string }> }
-export interface V3SettingsView { state: V3SettingsState; fields: V3SettingsField[]; values: Record<string, V3SettingsValue>; runtime_values: Record<string, V3SettingsValue>; secret_configured: Record<string, boolean>; runtime_secret_configured: Record<string, boolean> }
+export interface V3MetricsRetentionTarget { raw_hours: number; history_days: number; settings_version: number }
+export interface V3MetricsRetentionView { configured: boolean; available: boolean; reason: string; status?: { state: string; task_id?: string; desired?: V3MetricsRetentionTarget; effective?: V3MetricsRetentionTarget; observed_at: string } }
+export interface V3SettingsView { metrics_retention?: V3MetricsRetentionView; state: V3SettingsState; fields: V3SettingsField[]; values: Record<string, V3SettingsValue>; runtime_values: Record<string, V3SettingsValue>; secret_configured: Record<string, boolean>; runtime_secret_configured: Record<string, boolean> }
 export interface V3SettingsRequest { action: 'save' | 'apply'; expected_generation: string; expected_runtime_version: number; edit: V3SettingsEdit; preview?: string }
 export interface V3SettingsPreview { token: string; action: 'save' | 'apply'; expires_at: string; changed_fields: string[]; retention_shortened: boolean; notifications_enabled: boolean }
 
@@ -305,7 +378,19 @@ export class ControlV3 {
     await this.send('logout', 'POST')
     this.csrf = ''
   }
-  capabilities() { return this.read<V3Capabilities>('capabilities') }
+  changePassword(input: { current_password: string; new_password: string; confirm_password: string }) {
+    return this.send<{ ok: boolean; reauthenticate: boolean }>('account/password', 'POST', input)
+  }
+  monitoringRules(signal?: AbortSignal) { return this.read<V3MonitoringRulesView>('monitoring/rules', signal) }
+  previewMonitoringRules(input: V3MonitoringRulesEdit) { return this.send<V3MonitoringRulesPreview>('monitoring/rules/preview', 'POST', input) }
+  saveMonitoringRules(input: V3MonitoringRulesEdit & { preview: string }, key: string) { return this.send<V3MonitoringRulesView>('monitoring/rules', 'PUT', input, key) }
+  previewMonitoringApplication(input: { expected_version: string; nodes: { id: string; expected_version: number }[] }, key: string) { return this.send<V3MonitoringApplicationPreview>('monitoring/applications/preview', 'POST', input, key) }
+  confirmMonitoringApplication(input: { preview: string; token: string }, key: string) { return this.send<V3MonitoringApplication>('monitoring/applications', 'POST', input, key) }
+  monitoringApplication(id: string, signal?: AbortSignal) { return this.read<V3MonitoringApplication>(`monitoring/applications/${encodeURIComponent(id)}`, signal) }
+  recoverMonitoringApplication(id: string, direction: 'resume' | 'rollback', expected: string, key: string, node?: string) { return this.send<V3MonitoringApplication>(`monitoring/applications/${encodeURIComponent(id)}/${node ? `nodes/${encodeURIComponent(node)}/` : ''}${direction}`, 'POST', { expected_version: expected }, key) }
+  previewMonitoringReauthorization(id: string, expected: string, key: string) { return this.send<{ token: string; expires_at: string }>(`monitoring/applications/${encodeURIComponent(id)}/reauthorization-preview`, 'POST', { expected_version: expected }, key) }
+  reauthorizeMonitoringApplication(id: string, expected: string, token: string, key: string) { return this.send<V3MonitoringApplication>(`monitoring/applications/${encodeURIComponent(id)}/reauthorize`, 'POST', { expected_version: expected, token }, key) }
+  capabilities(signal?: AbortSignal) { return this.read<V3Capabilities>('capabilities', signal) }
   dashboard(signal?: AbortSignal) { return this.read<V3Dashboard>('dashboard', signal) }
   settings(signal?: AbortSignal) { return this.read<V3SettingsView>('settings', signal) }
   previewSettings(input: V3SettingsRequest) { return this.send<V3SettingsPreview>('settings/preview', 'POST', input) }
@@ -346,6 +431,11 @@ export class ControlV3 {
   notifications(filter: V3NotificationFilter, signal?: AbortSignal) {
     return this.read<V3Page<V3Notification> & { start: string; end: string }>(`notifications?${queryParams({ ...filter })}`, signal)
   }
+  notificationDetail(id: string, signal?: AbortSignal) { return this.read<V3NotificationDetail>(`notifications/${encodeURIComponent(id)}`, signal) }
+  notificationAttempts(id: string, cursor = '', limit = 20, signal?: AbortSignal) { return this.read<V3Page<V3NotificationAttempt>>(`notifications/${encodeURIComponent(id)}/attempts?${queryParams({ cursor, limit })}`, signal) }
+  notificationTestPreview(channel: 'feishu' | 'email', expectedRuntimeVersion: number, key: string) { return this.send<V3NotificationTestPreview>('notifications/test-preview', 'POST', { channel, expected_runtime_version: expectedRuntimeVersion }, key) }
+  createNotificationTest(preview: string, key: string) { return this.send<V3NotificationTestJob>('notifications/tests', 'POST', { preview, confirm: true }, key) }
+  notificationTest(id: string, signal?: AbortSignal) { return this.read<V3NotificationTestJob>(`notifications/tests/${encodeURIComponent(id)}`, signal) }
   audit(filter: V3AuditFilter = {}, signal?: AbortSignal) {
     return this.read<V3Page<V3AuditRecord> & { start: string; end: string }>(`audit?${queryParams({ ...filter })}`, signal)
   }
@@ -360,6 +450,14 @@ export class ControlV3 {
   serverMetrics(id: string, start: string, end: string, signal?: AbortSignal) {
     return this.read<{ points: import('./charts').MetricPoint[]; resolution_seconds: number; start: number; end: number }>(`servers/${encodeURIComponent(id)}/metrics?${queryParams({ start, end })}`, signal)
   }
+  metricDevices(id: string, start: string, end: string, signal?: AbortSignal) {
+    return this.read<V3MetricDeviceList>(`servers/${encodeURIComponent(id)}/metric-devices?${queryParams({ start, end })}`, signal)
+  }
+  deviceMetrics(id: string, devices: string[], start: string, end: string, signal?: AbortSignal) {
+    const query = new URLSearchParams({ start, end })
+    for (const device of devices) query.append('devices', device)
+    return this.read<V3DeviceTrends>(`servers/${encodeURIComponent(id)}/device-metrics?${query}`, signal)
+  }
   // Callers keep the same key for an explicitly retried operation. Writes are
   // never replayed by the reconnect loop or combined with unsaved form state.
   saveServer(node: V3NodeInput, expectedVersion: number, idempotencyKey: string) {
@@ -368,12 +466,15 @@ export class ControlV3 {
   removeServerRecords(records: { id: string; expected_version: number }[], idempotencyKey: string) {
     return this.send<{ removed: number; message: string }>('servers/remove', 'POST', { records, confirm: true }, idempotencyKey)
   }
-  sshCredential(id: string, signal?: AbortSignal) { return this.read<{ configured: boolean; version: number; ssh_port: number; fingerprint: string }>(`servers/${encodeURIComponent(id)}/ssh-credential`, signal) }
-  sshFingerprint(id: string, version: number, port: number, key: string) { return this.send<V3Preparation>(`servers/${encodeURIComponent(id)}/ssh-fingerprint`, 'POST', { expected_version: version, ssh_port: port }, key) }
+  sshCredential(id: string, signal?: AbortSignal, kind?: 'uninstall') { return this.read<V3SSHCredentialState>(`servers/${encodeURIComponent(id)}/ssh-credential${kind ? '?kind=uninstall' : ''}`, signal) }
+  sshFingerprint(id: string, version: number, port: number, key: string, kind?: 'uninstall') { return this.send<V3Preparation>(`servers/${encodeURIComponent(id)}/ssh-fingerprint`, 'POST', { expected_version: version, ssh_port: port, ...(kind ? { kind } : {}) }, key) }
   saveSSHCredential(id: string, input: V3SSHInput, key: string) { return this.send<V3Preparation>(`servers/${encodeURIComponent(id)}/ssh-credential`, 'POST', input, key) }
-  prepareDeployment(id: string, version: number, kind: 'install' | 'upgrade', key: string) { return this.send<V3Preparation>(`servers/${encodeURIComponent(id)}/deployment-preview`, 'POST', { expected_version: version, kind }, key) }
+  prepareDeployment(id: string, version: number, kind: 'install' | 'upgrade' | 'uninstall', key: string) { return this.send<V3Preparation>(`servers/${encodeURIComponent(id)}/deployment-preview`, 'POST', { expected_version: version, kind }, key) }
   deploymentPreparation(id: string, signal?: AbortSignal) { return this.read<V3Preparation>(`deployment-preparations/${encodeURIComponent(id)}`, signal) }
   confirmDeployment(preparation: string, preview: V3DeploymentPreview, key: string) { return this.send<V3Preparation>('deployments', 'POST', { expected_version: preview.version, preparation, preview_token: preview.token }, key) }
+  previewDeploymentHistoryDelete(records: string[], key: string, signal?: AbortSignal) { return this.send<V3DeploymentHistoryDeletePreview>('deployments/history-delete-preview', 'POST', { records }, key, signal) }
+  deleteDeploymentHistory(token: string, key: string, signal?: AbortSignal) { return this.send<V3DeploymentHistoryDeleteJob>('deployments/history-delete', 'POST', { token, confirm: true }, key, signal) }
+  deploymentHistoryDeleteJob(id: string, signal?: AbortSignal) { return this.read<V3DeploymentHistoryDeleteJob>(`deployments/history-delete-jobs/${encodeURIComponent(id)}`, signal) }
   recoverDeployment(id: string, action: 'resume' | 'rollback', plan: string, cursor: number, key: string) { return this.send<{ id: string; status: string }>(`deployments/${encodeURIComponent(id)}/${action}`, 'POST', { plan_digest: plan, log_cursor: cursor }, key) }
   events(filter: V3EventFilter, signal?: AbortSignal, reconnect = true) {
     const path = `events?${queryParams({ ...filter })}`
@@ -486,6 +587,18 @@ export class ControlV3 {
   }
   checkWebsite(id: number, expectedVersion: number, idempotencyKey: string) {
     return this.send<{ id: number; message: string }>(`websites/${id}/check`, 'POST', { expected_version: expectedVersion }, idempotencyKey)
+  }
+  migrationHistorySessions(signal?: AbortSignal) {
+    return this.read<{ items: { id: string; phase: string; created_at: string; history_records: number; generations: { generation: string; revision: string; state: string }[] }[] }>('migration-history/sessions', signal)
+  }
+  migrationMetricCatalog(session: string, generation: string, node = '', q = '', signal?: AbortSignal) {
+    return this.read<{ nodes: { id: string; first_sample: number; last_sample: number }[]; series: { metric: string; dimension: string }[]; node: string; read_only: true }>(`migration-history/catalog?${queryParams({ session, generation, node, q })}`, signal)
+  }
+  migrationMetricHistory(session: string, generation: string, node: string, metric: string, dimension: string, start: string, end: string, signal?: AbortSignal) {
+    return this.read<{ session: string; generation: string; node: string; metric: string; dimension?: string; source: 'legacy-v2'; points: { time: number; resolution_seconds: number; origin: string; ok: boolean; value?: number; min?: number; max?: number; count?: number }[]; read_only: true; interpolated: false }>(`migration-history?${queryParams({ session, generation, node, metric, dimension, start, end })}`, signal)
+  }
+  legacyHistory(session: string, role = '', table = '', cursor = '', limit = 20, signal?: AbortSignal) {
+    return this.read<{ items: { id: string; role: string; legacy_table: string; record_key: number; summary: Record<string, unknown> }[]; next_cursor: string; read_only: true }>(`legacy-history?${queryParams({ session, role, table, cursor, limit })}`, signal)
   }
   deployments(node = '', cursor = '', limit = 20, signal?: AbortSignal) {
     return this.read<V3Page<V3DeploymentJob> & { limit: number }>(`deployments?${queryParams({ node, cursor, limit })}`, signal)

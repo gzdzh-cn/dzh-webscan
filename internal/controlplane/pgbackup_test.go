@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,9 +86,20 @@ func TestPostgresBackupRestorePreservesRowsAndSequences(t *testing.T) {
 	if err = target.DB.QueryRow("SELECT payload FROM v3_legacy_records").Scan(&payload); err != nil || !strings.Contains(string(payload), "9007199254740993") {
 		t.Fatal(string(payload), err)
 	}
-	added := savedSite(t, target, "after-restore")
-	if added.ID <= site.ID {
-		t.Fatal("identity sequence rewound", added.ID)
+	// A restored cluster must remain fenced until its remote epochs, events,
+	// metrics and old writers have been reconciled. Sequence verification does
+	// not authorize a live write or clear that recovery protection.
+	if _, err = target.SaveSite(ctx, "admin", "after-restore", SiteInput{Name: "blocked", URL: "https://blocked.example.test"}, 0); !errors.Is(err, ErrMigrationPending) {
+		t.Fatal("restore write fence", err)
+	}
+	var next int64
+	if err = target.DB.QueryRow("SELECT nextval(pg_get_serial_sequence('v3_websites','id'))").Scan(&next); err != nil || next <= site.ID {
+		t.Fatal("identity sequence rewound", next, err)
+	}
+	var snapshot time.Time
+	var phase, backupSHA string
+	if err = target.DB.QueryRow("SELECT phase,backup_sha256,backup_at FROM v3_migration_recovery_state WHERE id=1").Scan(&phase, &backupSHA, &snapshot); err != nil || phase != "held" || backupSHA != header.SHA256 || !snapshot.Equal(header.SnapshotAt) {
+		t.Fatal("restore evidence", phase, err)
 	}
 	if err = s.RestorePostgres(ctx, path); err == nil {
 		t.Fatal("restored over live schema")

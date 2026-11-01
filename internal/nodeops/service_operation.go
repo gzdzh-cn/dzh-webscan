@@ -62,7 +62,7 @@ func serviceMutation(program string, args []string) bool {
 	}
 	if program == "docker" && len(args) > 2 && args[0] == "--host" && args[1] == "unix:///var/run/docker.sock" {
 		switch args[2] {
-		case "start", "stop", "update", "rename", "compose":
+		case "start", "stop", "update", "rename", "compose", "rm":
 			return true
 		}
 	}

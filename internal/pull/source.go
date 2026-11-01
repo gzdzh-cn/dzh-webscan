@@ -29,6 +29,7 @@ type Source struct {
 	NodeID, Version string
 	WriteMu         *sync.Mutex
 	fetch           chan struct{}
+	recoveryKey     [32]byte
 	configuration   Configuration
 }
 
@@ -58,13 +59,17 @@ func New(db *sql.DB, node, version string, mu *sync.Mutex, configurations ...Con
 	if mu == nil {
 		mu = new(sync.Mutex)
 	}
+	var recoveryKey [32]byte
+	if _, e := rand.Read(recoveryKey[:]); e != nil {
+		return nil, e
+	}
 	mu.Lock()
-	_, e := db.Exec(schema)
+	_, e := db.Exec(schema + recoverySchema)
 	mu.Unlock()
 	if e != nil {
 		return nil, e
 	}
-	return &Source{DB: db, NodeID: node, Version: version, WriteMu: mu, fetch: make(chan struct{}, 1), configuration: configuration}, nil
+	return &Source{DB: db, NodeID: node, Version: version, WriteMu: mu, fetch: make(chan struct{}, 1), configuration: configuration, recoveryKey: recoveryKey}, nil
 }
 
 func (s *Source) Capabilities() *agentv1.CapabilitiesResponse {

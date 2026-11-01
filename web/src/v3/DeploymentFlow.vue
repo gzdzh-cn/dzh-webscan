@@ -3,7 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import type { V3DeploymentPreview, V3Node, V3Preparation, V3SSHInput } from '../controlV3'
 import { useConsole } from './context'
 import { privateKeyFileReader } from '../privateKeyFile'
-const props = defineProps<{ node: Pick<V3Node, 'id' | 'version' | 'applied_version' | 'mode'>; upgrade?: boolean }>()
+const props = defineProps<{ node: Pick<V3Node, 'id' | 'version' | 'applied_version' | 'mode'>; upgrade?: boolean; operation?: 'uninstall' }>()
 const emit = defineEmits<{ job: [id: string]; status: [text: string, error: boolean]; busy: [value: boolean] }>()
 const { client } = useConsole()
 const busy = ref(false), message = ref(''), error = ref(''), configured = ref(false), statusLoaded = ref(false)
@@ -11,7 +11,10 @@ const auth = ref<'key' | 'path' | 'password'>('key'), port = ref(22), content = 
 const fileInput = ref<HTMLInputElement>(), fileError = ref(''), drag = ref(false)
 const fingerprint = ref<V3Preparation | null>(null), preview = ref<V3DeploymentPreview | null>(null), preparation = ref('')
 const unfinishedJob = ref(''), fileReading = ref(false), portEdited = ref(false), configuredPort = ref(22)
-const saved = computed(() => props.node.version > 0), kind = computed(() => props.upgrade || props.node.applied_version > 0 ? 'upgrade' : 'install')
+const uninstall = computed(() => props.operation === 'uninstall')
+const credentialState = ref<Awaited<ReturnType<typeof client.sshCredential>>>()
+const saved = computed(() => props.node.version > 0), kind = computed(() => uninstall.value ? 'uninstall' : props.upgrade || props.node.applied_version > 0 ? 'upgrade' : 'install')
+const actionLabel = computed(() => uninstall.value ? '卸载' : '部署')
 const credentialChanged = computed(() => Boolean(content.value || password.value || path.value))
 let generation = 0, alive = true, controller = new AbortController()
 const intents = new Map<string, { body: string; key: string }>()
@@ -21,8 +24,8 @@ function key(action: string, body: unknown) {
  if (old?.body === raw) return old.key
  const next = { body: raw, key: crypto.randomUUID() }; intents.set(action, next); return next.key
 }
-const phases: Record<string, string> = { queued: '等待宿主执行器', validating: '正在校验配置', 'reading-fingerprint': '正在读取 SSH 指纹', 'preparing-identity': '正在准备节点证书', 'preparing-configuration': '正在生成部署配置', 'creating-task': '正在创建部署任务' }
-const failures: Record<string, string> = { fingerprint_changed: 'SSH 指纹已变化，已停止。请在主服务器核实后处理。', credential_unavailable: 'SSH 凭据不可用，请检查密钥内容或主服务器路径及权限。', upgrade_unnecessary: '版本、摘要和配置均相同，无需升级。', downgrade_rejected: '目标版本低于当前版本，已拒绝降级。', mode_migration_required: '部署方式已变化，请使用专门迁移流程。', deployment_busy: '存在未完成部署，请打开原任务继续或回退。', preparation_conflict: '配置、账号或准备资料已变化或过期，请重新预览。', issuer_unavailable: '宿主签发器不可用，请检查 CA 及证书维护服务。', preparation_failed: '部署准备失败，服务尚未切换。请检查 SSH、执行器和发布资料后重试。' }
+const phases: Record<string, string> = { queued: '等待宿主执行器', validating: '正在校验配置', 'reading-fingerprint': '正在读取 SSH 指纹', 'preparing-identity': '正在准备节点证书', 'preparing-configuration': '正在生成部署配置', 'creating-task': '正在创建部署任务', 'preparing-uninstall': '正在核对实际安装和固定恢复资料' }
+const failures: Record<string, string> = { fingerprint_changed: 'SSH 指纹已变化，已停止。请在主服务器核实后处理。', credential_unavailable: 'SSH 凭据不可用，请检查密钥内容或主服务器路径及权限。', upgrade_unnecessary: '版本、摘要和配置均相同，无需升级。', downgrade_rejected: '目标版本低于当前版本，已拒绝降级。', mode_migration_required: '部署方式已变化，请使用专门迁移流程。', deployment_busy: '存在未完成部署，请打开原任务继续或回退。', preparation_conflict: '配置、账号或准备资料已变化或过期，请重新预览。', issuer_unavailable: '宿主签发器不可用，请检查 CA 及证书维护服务。', preparation_failed: '部署准备失败，服务尚未切换。请检查 SSH、执行器和发布资料后重试。', uninstall_protected: '实际安装或恢复资料未通过核对，已停止卸载；原服务和数据保留。' }
 function report(text: string, failed = false) { message.value = failed ? '' : text; error.value = failed ? text : ''; emit('status', text, failed) }
 async function operation(work: (current: number) => Promise<void>) {
  if (busy.value) return
@@ -36,7 +39,7 @@ async function wait(p: V3Preparation, current: number, action: string) {
   if (!document.hidden) {
    p = await client.deploymentPreparation(p.id, controller.signal)
    if (!alive || current !== generation || controller.signal.aborted) throw new DOMException('已取消', 'AbortError')
-   report(phases[p.phase] || '正在准备部署…')
+   report(phases[p.phase] || `正在准备${actionLabel.value}…`)
    if (p.status === 'failed' || p.status === 'expired') { intents.delete(action); throw new Error(failures[p.error_code || ''] || '准备请求已过期，请重试。') }
    if (p.status === 'succeeded') return p
   }
@@ -47,7 +50,7 @@ async function wait(p: V3Preparation, current: number, action: string) {
 async function readFingerprint(current: number) {
  preview.value = null; fingerprint.value = null
  if (!saved.value) throw new Error('请先保存服务器配置。')
- const p = await wait(await client.sshFingerprint(props.node.id, props.node.version, port.value, key('fingerprint', [props.node, port.value])), current, 'fingerprint')
+ const p = await wait(await client.sshFingerprint(props.node.id, props.node.version, port.value, key('fingerprint', [props.node, port.value, props.operation]), props.operation), current, 'fingerprint')
  if (!alive || current !== generation) return
  fingerprint.value = p; report('请核对下面的 SSH 指纹，确认后继续。')
 }
@@ -55,8 +58,8 @@ async function prepare(current: number) {
  preview.value = null
  const p = await wait(await client.prepareDeployment(props.node.id, props.node.version, kind.value, key('prepare', [props.node, kind.value])), current, 'prepare')
  if (!alive || current !== generation) return
- if (!p.result?.preview) throw new Error('部署预览未生成，请重试。')
- preparation.value = p.id; preview.value = p.result.preview; report('部署预览已就绪，请确认操作范围。')
+ if (!p.result?.preview || p.result.preview.kind !== kind.value) throw new Error('预览操作类型不符或未生成，请重试。')
+ preparation.value = p.id; preview.value = p.result.preview; report(`${actionLabel.value}预览已就绪，请确认操作范围。`)
 }
 function begin() {
  return operation(async current => {
@@ -65,7 +68,25 @@ function begin() {
   const unfinished = tasks.items.find(job => !['succeeded', 'rolled_back'].includes(job.status))
   unfinishedJob.value = unfinished?.id || ''
   if (unfinished) { report('存在未完成部署，请打开原任务继续或回退。', true); return }
-  if (!statusLoaded.value && saved.value) { const status = await client.sshCredential(props.node.id, controller.signal); configured.value = status.configured; statusLoaded.value = true; if (!alive || current !== generation || controller.signal.aborted) return; if (status.ssh_port) { configuredPort.value = status.ssh_port; if (!portEdited.value && !credentialChanged.value) port.value = status.ssh_port } }
+  if (uninstall.value) {
+   const capabilities = await client.capabilities(controller.signal)
+   if (!alive || current !== generation || controller.signal.aborted) return
+   // Uninstall uses its own readiness: issuing new certificates or building
+   // monitoring rules is unrelated to removing an already proven installation.
+   if (capabilities.operations?.uninstall?.available !== true) {
+    report(capabilities.operations?.uninstall?.reason || '当前中心未提供独立卸载能力，请检查执行器状态或升级主控。', true); return
+   }
+  }
+  if ((!statusLoaded.value || uninstall.value) && saved.value) {
+   const status = await client.sshCredential(props.node.id, controller.signal, props.operation)
+   if (!alive || current !== generation || controller.signal.aborted) return
+   credentialState.value = status; configured.value = status.configured; statusLoaded.value = true
+   const actualPort = uninstall.value ? status.installation?.ssh_port : status.ssh_port
+   if (actualPort) { configuredPort.value = actualPort; if (uninstall.value || !portEdited.value && !credentialChanged.value) port.value = actualPort }
+  }
+  if (uninstall.value && (!credentialState.value?.can_uninstall || !credentialState.value.installation)) {
+   report(credentialState.value?.reason || '缺少实际安装证据，无法安全卸载。', true); return
+  }
   if (!configured.value || credentialChanged.value || portEdited.value && port.value !== configuredPort.value) await readFingerprint(current)
   else await prepare(current)
  })
@@ -74,7 +95,7 @@ function confirmFingerprint() {
  return operation(async current => {
   const pin = fingerprint.value
   if (!pin?.result?.fingerprint_token) throw new Error('请重新读取 SSH 指纹。')
-  const input: V3SSHInput = { expected_version: props.node.version, ssh_port: port.value, fingerprint_preparation: pin.id, fingerprint_token: pin.result.fingerprint_token }
+  const input: V3SSHInput = { expected_version: props.node.version, ssh_port: port.value, fingerprint_preparation: pin.id, fingerprint_token: pin.result.fingerprint_token, ...(uninstall.value ? { kind: 'uninstall' as const } : {}) }
   if (auth.value === 'key') input.private_key_content = content.value
   else if (auth.value === 'path') input.private_key_path = path.value
   else input.password = password.value
@@ -99,24 +120,32 @@ function drop(event: DragEvent) { drag.value = false; if (event.dataTransfer) vo
 function selectFile(event: Event) { const input = event.target as HTMLInputElement; if (input.files) void files(input.files); input.value = '' }
 watch(auth, () => { reader.cancel(); content.value = ''; password.value = ''; path.value = ''; fingerprint.value = null; preview.value = null; intents.clear() })
 watch([port, content, password, path], () => { fingerprint.value = null; preview.value = null })
-watch(() => props.node.id, () => { generation++; controller.abort(); controller = new AbortController(); configured.value = false; statusLoaded.value = false; portEdited.value = false; preview.value = null; fingerprint.value = null })
+watch(() => [props.node.id, props.node.version, props.operation] as const, (value, before) => {
+ generation++; controller.abort(); controller = new AbortController(); busy.value = false; emit('busy', false)
+ configured.value = false; statusLoaded.value = false; credentialState.value = undefined; preview.value = null; fingerprint.value = null; unfinishedJob.value = ''; preparation.value = ''; intents.clear()
+ // Saving a new version invalidates prepared actions, while preserving SSH input
+ // entered before Save and Deploy. A different target must clear that input.
+ if (value[0] !== before[0] || value[2] !== before[2]) { reader.cancel(); portEdited.value = false; port.value = 22; content.value = ''; password.value = ''; path.value = '' }
+})
 onUnmounted(() => { alive = false; generation++; reader.cancel(); controller.abort(); content.value = ''; password.value = ''; intents.clear() })
 defineExpose({ begin })
 </script>
 <template>
  <section class="v3-deployment-flow">
   <h3>连接认证</h3><p v-if="saved" class="v3-muted">{{ configured ? '已配置，留空保留。' : '已有凭据不回显，留空保留；未配置时需填写认证信息。' }}</p>
-  <el-alert v-if="upgrade" title="升级使用已保存配置；本次不保存编辑弹窗中的草稿。" type="info" :closable="false" />
+  <el-alert v-if="uninstall" title="仅卸载已确认归属的项目程序和自启动，保留子控数据、证书及恢复资料；中心记录和历史保留。" type="warning" :closable="false" />
+  <div v-if="uninstall && credentialState?.installation" class="detail-grid v3-detail-grid"><div><span>实际安装目标</span><strong>{{ credentialState.installation.host }}:{{ credentialState.installation.ssh_port }}</strong></div><div><span>运行方式 / 版本</span><strong>{{ credentialState.installation.mode }} · {{ credentialState.installation.release }}</strong></div><div><span>安装证明</span><strong>{{ credentialState.installation.job }}</strong></div></div>
+  <el-alert v-if="upgrade && !uninstall" title="升级使用已保存配置；本次不保存编辑弹窗中的草稿。" type="info" :closable="false" />
   <el-button v-if="unfinishedJob" type="primary" @click="emit('job', unfinishedJob)">打开未完成任务</el-button>
   <el-form label-position="top" :disabled="busy">
-   <el-form-item label="SSH 端口"><el-input-number v-model="port" :min="1" :max="65535" @change="portEdited = true" /></el-form-item>
+   <el-form-item label="SSH 端口"><el-input-number v-model="port" :disabled="uninstall" :min="1" :max="65535" @change="portEdited = true" /></el-form-item>
    <el-form-item label="认证方式"><el-radio-group v-model="auth"><el-radio-button value="key">私钥内容</el-radio-button><el-radio-button value="path">主服务器路径</el-radio-button><el-radio-button value="password">密码</el-radio-button></el-radio-group></el-form-item>
    <template v-if="auth === 'key'"><div class="v3-key-drop" :class="{ 'is-dragging': drag }" @dragover.prevent="drag = true" @dragleave.prevent="drag = false" @drop.prevent="drop"><p>拖入一个私钥文件，或<el-button link type="primary" :disabled="busy" @click="fileInput?.click()">选择文件</el-button>（最大 64 KiB）</p><el-input v-model="content" type="textarea" :rows="5" placeholder="粘贴未加密的 OpenSSH / PEM 私钥；内容不会回显" aria-label="私钥内容" /><input ref="fileInput" type="file" hidden @change="selectFile" /></div><el-alert v-if="fileError" :title="fileError" type="error" :closable="false" /></template>
    <el-form-item v-else-if="auth === 'path'" label="主服务器私钥绝对路径"><el-input v-model="path" placeholder="/var/lib/webscan-deploy/ssh-keys/…" /></el-form-item>
    <el-form-item v-else label="SSH 密码"><el-input v-model="password" type="password" show-password autocomplete="new-password" /></el-form-item>
   </el-form>
-  <div v-if="fingerprint?.result" class="v3-deploy-confirm"><h3>确认 SSH 主机指纹</h3><p>{{ fingerprint.result.host }}:{{ fingerprint.result.port }}</p><code>{{ fingerprint.result.fingerprint }}</code><p>确认有效期 10 分钟，指纹变化会停止操作。</p><el-button type="primary" :loading="busy || fileReading" @click="confirmFingerprint">确认指纹并准备部署</el-button></div>
-  <div v-if="preview" class="v3-deploy-confirm"><h3>{{ kind === 'upgrade' ? '升级' : '安装' }}预览</h3><div class="detail-grid v3-detail-grid"><div><span>范围</span><strong>仅 {{ node.id }}，主控保持运行</strong></div><div><span>部署方式</span><strong>{{ preview.target.mode }}</strong></div><div><span>当前版本</span><strong>{{ preview.current?.release || '无法确认旧基线' }}</strong></div><div><span>目标版本</span><strong>{{ preview.target.release }}</strong></div><div><span>目标摘要</span><strong><code>{{ preview.target.sha256 }}</code></strong></div><div><span>配置版本</span><strong>{{ preview.version }}</strong></div></div><el-button type="primary" :loading="busy || fileReading" @click="confirm">确认并创建部署任务</el-button></div>
+  <div v-if="fingerprint?.result" class="v3-deploy-confirm"><h3>确认 SSH 主机指纹</h3><p>{{ fingerprint.result.host }}:{{ fingerprint.result.port }}</p><code>{{ fingerprint.result.fingerprint }}</code><p>确认有效期 10 分钟，指纹变化会停止操作。</p><el-button type="primary" :loading="busy || fileReading" @click="confirmFingerprint">确认指纹并准备{{ actionLabel }}</el-button></div>
+  <div v-if="preview" class="v3-deploy-confirm"><el-alert v-if="uninstall" title="确认后暂停此节点采集并卸载程序；不会移除中心记录，也不会清空子控数据。恢复使用原固定版本资料，不保证原容器 ID。" type="warning" :closable="false" /><h3>{{ uninstall ? '卸载' : kind === 'upgrade' ? '升级' : '安装' }}预览</h3><div class="detail-grid v3-detail-grid"><div><span>范围</span><strong>仅 {{ node.id }}，主控保持运行</strong></div><div><span>部署方式</span><strong>{{ preview.target.mode }}</strong></div><div><span>当前版本</span><strong>{{ preview.current?.release || '无法确认旧基线' }}</strong></div><div><span>目标版本</span><strong>{{ preview.target.release }}</strong></div><div><span>目标摘要</span><strong><code>{{ preview.target.sha256 }}</code></strong></div><div><span>配置版本</span><strong>{{ preview.version }}</strong></div></div><el-button type="primary" :loading="busy || fileReading" @click="confirm">确认并创建部署任务</el-button></div>
   <el-alert v-if="error" :title="error" type="error" :closable="false" /><p v-else-if="message" role="status">{{ message }}</p>
  </section>
 </template>

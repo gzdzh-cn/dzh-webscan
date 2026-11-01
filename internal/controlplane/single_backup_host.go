@@ -53,7 +53,7 @@ func normalizeSingleBackupSources(root string, files, directories []string, outp
 		}
 		// Never silently absorb a runtime dependency placed in either live
 		// engine directory. The logical archive cannot replace that material.
-		for _, engine := range []string{"postgres-data", "metrics-data"} {
+		for _, engine := range []string{"postgres-data", "metrics-data", "raw-metrics-data"} {
 			if singleBackupContains(filepath.Join(root, engine), directory) {
 				return nil, errSingleBackup
 			}
@@ -81,7 +81,7 @@ func normalizeSingleBackupSources(root string, files, directories []string, outp
 		if !snapshotAbsolutePath(file) || singleBackupContains(output, file) || singleBackupContains(file, output) {
 			return nil, errSingleBackup
 		}
-		for _, engine := range []string{"postgres-data", "metrics-data"} {
+		for _, engine := range []string{"postgres-data", "metrics-data", "raw-metrics-data"} {
 			if singleBackupContains(filepath.Join(root, engine), file) {
 				return nil, errSingleBackup
 			}
@@ -102,7 +102,7 @@ func singleBackupSkip(relative, name string) bool {
 	if name == ".lock" || name == ".pki-maintenance.lock" {
 		return true // Locks are recreated and are not recovery state.
 	}
-	return relative == "" && (name == "postgres-data" || name == "metrics-data")
+	return relative == "" && (name == "postgres-data" || name == "metrics-data" || name == "raw-metrics-data")
 }
 
 func captureSingleBackupTree(ctx context.Context, source, target *os.File, prefix, relative string, installation bool, manifest *metricsSnapshotManifest, modes *[]singleBackupMode, total *int64) error {
@@ -119,7 +119,7 @@ func captureSingleBackupTree(ctx context.Context, source, target *os.File, prefi
 			// Validate excluded lock names too: a link/device pretending to be
 			// a lock or engine path must not hide a required recovery file.
 			st, err := singleBackupInfo(source, entry.Name())
-			engine := relative == "" && installation && (entry.Name() == "postgres-data" || entry.Name() == "metrics-data")
+			engine := relative == "" && installation && (entry.Name() == "postgres-data" || entry.Name() == "metrics-data" || entry.Name() == "raw-metrics-data")
 			if err != nil || st.Mode()&os.ModeSymlink != 0 || engine && !st.IsDir() || !engine && (!singleBackupHostFile(st) || st.Size() != 0) {
 				return fmt.Errorf("excluded entry %s/%s: %w", prefix, entry.Name(), errSingleBackup)
 			}

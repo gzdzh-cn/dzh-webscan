@@ -142,7 +142,7 @@ func (a *dockerActivation) plan(ctx context.Context, r Request) (dockerActivatio
 	if err != nil {
 		return p, err
 	}
-	target := ActiveInstallation{Format: 1, Node: r.Node, Spec: r.Spec, RuntimeSHA256: sha(files["runtime.json"]), DefinitionSHA256: sha(files["compose.json"]), Job: r.Job, PlanDigest: r.PlanDigest, CaptureSHA256: sha(capture)}
+	target := ActiveInstallation{Reinstall: r.Reinstall, Format: 1, Node: r.Node, Spec: r.Spec, RuntimeSHA256: sha(files["runtime.json"]), DefinitionSHA256: sha(files["compose.json"]), Job: r.Job, PlanDigest: r.PlanDigest, CaptureSHA256: sha(capture)}
 	target = retainPriorPointerEncoding(a.intentPath(r), target)
 	p.pointer, err = json.Marshal(target)
 	if err != nil {

@@ -23,6 +23,19 @@ func migrationHeld(ctx context.Context, tx *sql.Tx) (bool, error) {
 	}
 	var held bool
 	err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM v3_migration_domains WHERE pending)").Scan(&held)
+	if err != nil || held {
+		return held, err
+	}
+	// Older private restore fixtures predate the recovery-state table. Current
+	// installations must also honor its independent hold, even if domain rows
+	// have been changed by another maintenance operation.
+	var recoveryTable bool
+	if err = tx.QueryRowContext(ctx, "SELECT to_regclass(current_schema()||'.v3_migration_recovery_state') IS NOT NULL").Scan(&recoveryTable); err != nil {
+		return false, err
+	}
+	if recoveryTable {
+		err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM v3_migration_recovery_state WHERE phase<>'complete')").Scan(&held)
+	}
 	return held, err
 }
 func validArchiveSource(source string) bool {

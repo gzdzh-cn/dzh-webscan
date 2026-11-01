@@ -162,9 +162,13 @@ func insertArchivedNotice(ctx context.Context, tx *sql.Tx, source string, v arch
 	if v.channel == "email" {
 		key = digest([]byte(fmt.Sprintf("%d:%s", v.task, recipient)))
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO v3_notifications(node,event_id,channel,recipient,payload,created_at,next_try,attempts,done_at,result,migration_source,migration_task,migration_pending,delivery_key)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'旧版本投递记录，原始结果保存在受控归档',$10,$11,true,$12)`, v.node, v.event, v.channel, recipient, common.JSON(v.payload), v.created, next, attempts, done, source, v.task, key)
-	return err
+	var notificationID int64
+	err := tx.QueryRowContext(ctx, `INSERT INTO v3_notifications(node,event_id,channel,recipient,payload,created_at,next_try,attempts,done_at,result,migration_source,migration_task,migration_pending,delivery_key)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'旧版本投递记录，原始结果保存在受控归档',$10,$11,true,$12) RETURNING id`, v.node, v.event, v.channel, recipient, common.JSON(v.payload), v.created, next, attempts, done, source, v.task, key).Scan(&notificationID)
+	if err != nil {
+		return err
+	}
+	return projectNotificationTx(ctx, tx, notificationID, "legacy")
 }
 
 func mapNotificationRecord(ctx context.Context, tx *sql.Tx, source, table string, r archivedRecord) (bool, error) {

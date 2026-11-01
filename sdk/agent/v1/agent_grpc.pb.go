@@ -23,6 +23,8 @@ const (
 	AgentService_FetchEvents_FullMethodName             = "/webscan.agent.v1.AgentService/FetchEvents"
 	AgentService_AckEvents_FullMethodName               = "/webscan.agent.v1.AgentService/AckEvents"
 	AgentService_ReadMetrics_FullMethodName             = "/webscan.agent.v1.AgentService/ReadMetrics"
+	AgentService_RecoveryState_FullMethodName           = "/webscan.agent.v1.AgentService/RecoveryState"
+	AgentService_ReadRecoveryEvents_FullMethodName      = "/webscan.agent.v1.AgentService/ReadRecoveryEvents"
 	AgentService_UpdateTrust_FullMethodName             = "/webscan.agent.v1.AgentService/UpdateTrust"
 	AgentService_RefreshRootTrust_FullMethodName        = "/webscan.agent.v1.AgentService/RefreshRootTrust"
 	AgentService_PrepareIdentityRenewal_FullMethodName  = "/webscan.agent.v1.AgentService/PrepareIdentityRenewal"
@@ -39,6 +41,9 @@ type AgentServiceClient interface {
 	FetchEvents(ctx context.Context, in *FetchEventsRequest, opts ...grpc.CallOption) (*EventBatch, error)
 	AckEvents(ctx context.Context, in *AckEventsRequest, opts ...grpc.CallOption) (*AckEventsResponse, error)
 	ReadMetrics(ctx context.Context, in *ReadMetricsRequest, opts ...grpc.CallOption) (*MetricsBatch, error)
+	// Read-only DR inventory and retained-event replay; never advances epoch.
+	RecoveryState(ctx context.Context, in *RecoveryStateRequest, opts ...grpc.CallOption) (*RecoveryStateResponse, error)
+	ReadRecoveryEvents(ctx context.Context, in *ReadRecoveryEventsRequest, opts ...grpc.CallOption) (*RecoveryEventsBatch, error)
 	// Additive, optional capability. Only a full snapshot signed by the pinned
 	// CA can advance trust; it cannot change identities or configuration.
 	UpdateTrust(ctx context.Context, in *UpdateTrustRequest, opts ...grpc.CallOption) (*UpdateTrustResponse, error)
@@ -99,6 +104,26 @@ func (c *agentServiceClient) ReadMetrics(ctx context.Context, in *ReadMetricsReq
 	return out, nil
 }
 
+func (c *agentServiceClient) RecoveryState(ctx context.Context, in *RecoveryStateRequest, opts ...grpc.CallOption) (*RecoveryStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoveryStateResponse)
+	err := c.cc.Invoke(ctx, AgentService_RecoveryState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) ReadRecoveryEvents(ctx context.Context, in *ReadRecoveryEventsRequest, opts ...grpc.CallOption) (*RecoveryEventsBatch, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoveryEventsBatch)
+	err := c.cc.Invoke(ctx, AgentService_ReadRecoveryEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentServiceClient) UpdateTrust(ctx context.Context, in *UpdateTrustRequest, opts ...grpc.CallOption) (*UpdateTrustResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UpdateTrustResponse)
@@ -149,6 +174,9 @@ type AgentServiceServer interface {
 	FetchEvents(context.Context, *FetchEventsRequest) (*EventBatch, error)
 	AckEvents(context.Context, *AckEventsRequest) (*AckEventsResponse, error)
 	ReadMetrics(context.Context, *ReadMetricsRequest) (*MetricsBatch, error)
+	// Read-only DR inventory and retained-event replay; never advances epoch.
+	RecoveryState(context.Context, *RecoveryStateRequest) (*RecoveryStateResponse, error)
+	ReadRecoveryEvents(context.Context, *ReadRecoveryEventsRequest) (*RecoveryEventsBatch, error)
 	// Additive, optional capability. Only a full snapshot signed by the pinned
 	// CA can advance trust; it cannot change identities or configuration.
 	UpdateTrust(context.Context, *UpdateTrustRequest) (*UpdateTrustResponse, error)
@@ -180,6 +208,12 @@ func (UnimplementedAgentServiceServer) AckEvents(context.Context, *AckEventsRequ
 }
 func (UnimplementedAgentServiceServer) ReadMetrics(context.Context, *ReadMetricsRequest) (*MetricsBatch, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReadMetrics not implemented")
+}
+func (UnimplementedAgentServiceServer) RecoveryState(context.Context, *RecoveryStateRequest) (*RecoveryStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RecoveryState not implemented")
+}
+func (UnimplementedAgentServiceServer) ReadRecoveryEvents(context.Context, *ReadRecoveryEventsRequest) (*RecoveryEventsBatch, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadRecoveryEvents not implemented")
 }
 func (UnimplementedAgentServiceServer) UpdateTrust(context.Context, *UpdateTrustRequest) (*UpdateTrustResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdateTrust not implemented")
@@ -286,6 +320,42 @@ func _AgentService_ReadMetrics_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_RecoveryState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecoveryStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).RecoveryState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_RecoveryState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).RecoveryState(ctx, req.(*RecoveryStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_ReadRecoveryEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadRecoveryEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).ReadRecoveryEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_ReadRecoveryEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).ReadRecoveryEvents(ctx, req.(*ReadRecoveryEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AgentService_UpdateTrust_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UpdateTrustRequest)
 	if err := dec(in); err != nil {
@@ -380,6 +450,14 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadMetrics",
 			Handler:    _AgentService_ReadMetrics_Handler,
+		},
+		{
+			MethodName: "RecoveryState",
+			Handler:    _AgentService_RecoveryState_Handler,
+		},
+		{
+			MethodName: "ReadRecoveryEvents",
+			Handler:    _AgentService_ReadRecoveryEvents_Handler,
 		},
 		{
 			MethodName: "UpdateTrust",

@@ -39,20 +39,26 @@ type singleInstallProblem struct{ Code, Hint string }
 func (e singleInstallProblem) Error() string { return e.Hint }
 
 type singleInstallSpec struct {
-	Backup        *singleInstallBackupPolicy `json:"backup_policy,omitempty"`
-	ReleaseTrust  *DeploymentTrustConfig     `json:"deployment_trust,omitempty"`
-	RulesFile     string                     `json:"rules_file,omitempty"`
-	Format        int                        `json:"format"`
-	Root          string                     `json:"root"`
-	Instance      string                     `json:"instance"`
-	PublicURL     string                     `json:"public_url"`
-	Username      string                     `json:"username"`
-	APIPort       int                        `json:"api_port"`
-	PostgresPort  int                        `json:"postgres_port"`
-	MetricsPort   int                        `json:"metrics_port"`
-	RuntimeImage  string                     `json:"runtime_image"`
-	PostgresImage string                     `json:"postgres_image"`
-	MetricsImage  string                     `json:"metrics_image"`
+	MetricsLayers      bool                       `json:"metrics_layers,omitempty"`
+	MetricsRetention   bool                       `json:"metrics_retention,omitempty"`
+	RawMetricsPort     int                        `json:"raw_metrics_port,omitempty"`
+	RawMetricsHours    int                        `json:"metrics_raw_hours,omitempty"`
+	HistoryMetricsDays int                        `json:"metrics_history_days,omitempty"`
+	HostWatchdog       bool                       `json:"host_watchdog,omitempty"`
+	Backup             *singleInstallBackupPolicy `json:"backup_policy,omitempty"`
+	ReleaseTrust       *DeploymentTrustConfig     `json:"deployment_trust,omitempty"`
+	RulesFile          string                     `json:"rules_file,omitempty"`
+	Format             int                        `json:"format"`
+	Root               string                     `json:"root"`
+	Instance           string                     `json:"instance"`
+	PublicURL          string                     `json:"public_url"`
+	Username           string                     `json:"username"`
+	APIPort            int                        `json:"api_port"`
+	PostgresPort       int                        `json:"postgres_port"`
+	MetricsPort        int                        `json:"metrics_port"`
+	RuntimeImage       string                     `json:"runtime_image"`
+	PostgresImage      string                     `json:"postgres_image"`
+	MetricsImage       string                     `json:"metrics_image"`
 }
 
 type singleInstallBackupPolicy struct {
@@ -61,6 +67,12 @@ type singleInstallBackupPolicy struct {
 }
 
 func (s *singleInstallSpec) validate() error {
+	if err := s.validateMetricsLayers(); err != nil {
+		return err
+	}
+	if s.HostWatchdog && s.Format != 3 {
+		return errSingleInstall
+	}
 	if s.Backup != nil {
 		if s.Format != 3 || s.Backup.Keep < 1 || s.Backup.Keep > 365 || !singlePKIUpgradePath(s.Backup.Directory) || singleBackupContains(s.Root, s.Backup.Directory) || singleBackupContains(s.Backup.Directory, s.Root) {
 			return errSingleInstall
@@ -80,9 +92,9 @@ func (s *singleInstallSpec) validate() error {
 		return errSingleInstall
 	}
 	seen := map[int]bool{}
-	for _, p := range []int{s.APIPort, s.PostgresPort, s.MetricsPort} {
+	for _, p := range s.localPorts() {
 		if p < 1024 || p > 65535 || seen[p] {
-			return errors.New("三个单中心本机端口须为互不相同的 1024～65535 整数")
+			return errors.New("单中心本机端口须为互不相同的 1024～65535 整数")
 		}
 		seen[p] = true
 	}
@@ -121,6 +133,12 @@ func (s singleInstallSpec) configuration() Config {
 	c.Database.DSNFile = filepath.Join(s.Root, "postgres.dsn")
 	c.Metrics.WriteURL = fmt.Sprintf("http://127.0.0.1:%d", s.MetricsPort)
 	c.Metrics.QueryURL, c.Metrics.SpoolDir = c.Metrics.WriteURL, filepath.Join(s.Root, "state", "metrics-spool")
+	if s.MetricsLayers {
+		c.Metrics.RawURL = fmt.Sprintf("http://127.0.0.1:%d", s.RawMetricsPort)
+	}
+	if s.MetricsRetention {
+		c.Metrics.PolicyFile = filepath.Join(s.Root, "metrics-support", "policy", "policy.json")
+	}
 	c.Collector.CAFile, c.Collector.CertFile, c.Collector.KeyFile = filepath.Join(s.Root, "ca.crt"), filepath.Join(s.Root, "collector.crt"), filepath.Join(s.Root, "collector.key")
 	if s.Format >= 2 {
 		c.Collector.CAFile = filepath.Join(s.Root, "collector-pki", "ca.crt")
@@ -132,6 +150,9 @@ func (s singleInstallSpec) configuration() Config {
 	if s.Format == 3 {
 		c.DeploymentTrust = DeploymentTrustConfig{VaultKeyFile: filepath.Join(s.Root, "vault.key"), PublicKeyFile: filepath.Join(s.Root, "release.pub"), ManifestFile: filepath.Join(s.Root, "release.json"), SignatureFile: filepath.Join(s.Root, "release.sig")}
 		c.Executor = ExecutorConfig{Enabled: true, Mode: "external"}
+	}
+	if s.HostWatchdog {
+		c.HostWatchdog = singleHostWatchdogConfig(s.Root)
 	}
 	return c
 }
@@ -197,6 +218,30 @@ func singleInstallCommand(ctx context.Context, o Options, out io.Writer) (result
 	if o.Action != "resume-single-install" && spec.Format == 3 && spec.Backup == nil {
 		spec.Backup = &singleInstallBackupPolicy{Directory: spec.Root + "-backups", Keep: 7}
 	}
+	if o.Action != "resume-single-install" && spec.Format == 3 {
+		spec.HostWatchdog = true
+		spec.MetricsLayers = true
+		spec.MetricsRetention = true
+	}
+	if o.Action == "resume-single-install" {
+		raw, err := readTrustData(filepath.Join(spec.Root, "install.json"), true, 64<<10)
+		var saved singleInstallManifest
+		if err != nil || singleDecode(raw, &saved) != nil {
+			return errSingleInstall
+		}
+		spec.HostWatchdog = saved.Spec.HostWatchdog
+		spec.MetricsLayers = saved.Spec.MetricsLayers
+		spec.MetricsRetention = saved.Spec.MetricsRetention
+		if spec.RawMetricsPort == 0 {
+			spec.RawMetricsPort = saved.Spec.RawMetricsPort
+		}
+		if spec.RawMetricsHours == 0 {
+			spec.RawMetricsHours = saved.Spec.RawMetricsHours
+		}
+		if spec.HistoryMetricsDays == 0 {
+			spec.HistoryMetricsDays = saved.Spec.HistoryMetricsDays
+		}
+	}
 	if err := spec.validate(); err != nil {
 		return err
 	}
@@ -218,7 +263,7 @@ func singleInstallCommand(ctx context.Context, o Options, out io.Writer) (result
 		return errors.New("此安装入口只支持全新 single，HA 和已有拓扑迁移必须使用专门流程")
 	}
 	if o.Action == "preview-single-install" {
-		return json.NewEncoder(out).Encode(map[string]any{"topology": "single", "fresh_only": true, "root": spec.Root, "public_url": spec.PublicURL, "loopback_ports": []int{spec.APIPort, spec.PostgresPort, spec.MetricsPort}, "services": []string{"postgres", "metrics", "central"}, "requires_existing_https_proxy": true, "environment_verified": false, "backup_policy": spec.Backup})
+		return json.NewEncoder(out).Encode(map[string]any{"topology": "single", "fresh_only": true, "root": spec.Root, "public_url": spec.PublicURL, "loopback_ports": spec.localPorts(), "services": spec.serviceNames(), "requires_existing_https_proxy": true, "environment_verified": false, "backup_policy": spec.Backup})
 	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Geteuid() != 0 {
 		return errors.New("单中心安装须在 Linux amd64 上以 root 执行")
@@ -297,7 +342,7 @@ func (i singleInstaller) preflight(ctx context.Context, s singleInstallSpec, fre
 		if _, err := os.Lstat(s.Root); !os.IsNotExist(err) {
 			return errSingleInstall
 		}
-		for _, p := range []int{s.APIPort, s.PostgresPort, s.MetricsPort} {
+		for _, p := range s.localPorts() {
 			l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
 			if err != nil {
 				return fmt.Errorf("本机 TCP %d 已占用；不会停止原服务", p)
@@ -320,7 +365,7 @@ func singleCompose(s singleInstallSpec, label string) []byte {
 	pg["entrypoint"] = []string{"/bin/sh", "-ec", `export POSTGRES_PASSWORD="$$(cat /run/webscan-postgres-password)"; exec /usr/local/bin/docker-entrypoint.sh postgres -h 127.0.0.1 -p ` + strconv.Itoa(s.PostgresPort)}
 	pg["volumes"] = []any{volume("postgres-password", "/run/webscan-postgres-password", true), volume("postgres-data", "/var/lib/postgresql/data", false)}
 	vm := service(s.MetricsImage)
-	vm["command"] = []string{"-httpListenAddr=127.0.0.1:" + strconv.Itoa(s.MetricsPort), "-storageDataPath=/storage", "-retentionPeriod=15d"}
+	vm["command"] = []string{"-httpListenAddr=127.0.0.1:" + strconv.Itoa(s.MetricsPort), "-storageDataPath=/storage", "-retentionPeriod=" + strconv.Itoa(s.historyDays()) + "d"}
 	vm["volumes"] = []any{volume("metrics-data", "/storage", false)}
 	central := service(s.RuntimeImage)
 	central["entrypoint"] = []string{"/usr/local/bin/webscan"}
@@ -341,8 +386,23 @@ func singleCompose(s singleInstallSpec, label string) []byte {
 	for _, name := range names {
 		volumes = append(volumes, volume(name, filepath.Join(s.Root, name), true))
 	}
+	if s.HostWatchdog {
+		for _, name := range []string{"watchdog-support", "../" + filepath.Base(s.Root) + "-watchdog-run"} {
+			volumes = append(volumes, volume(name, filepath.Join(s.Root, name), true))
+		}
+	}
+	if s.MetricsRetention {
+		volumes = append(volumes, volume("metrics-support", filepath.Join(s.Root, "metrics-support"), true))
+	}
 	central["volumes"] = volumes
-	raw, _ := yaml.Marshal(map[string]any{"services": map[string]any{"postgres": pg, "metrics": vm, "central": central}})
+	services := map[string]any{"postgres": pg, "metrics": vm, "central": central}
+	if s.MetricsLayers {
+		rawVM := service(s.MetricsImage)
+		rawVM["command"] = []string{"-httpListenAddr=127.0.0.1:" + strconv.Itoa(s.RawMetricsPort), "-storageDataPath=/storage", "-retentionPeriod=" + strconv.Itoa(s.RawMetricsHours) + "h"}
+		rawVM["volumes"] = []any{volume("raw-metrics-data", "/storage", false)}
+		services["metrics-raw"] = rawVM
+	}
+	raw, _ := yaml.Marshal(map[string]any{"services": services})
 	return raw
 }
 
@@ -352,7 +412,11 @@ func singleUnit(s singleInstallSpec, docker string) []byte {
 	if s.Format >= 2 {
 		dependency = " " + singleProject(s.Root) + "-pki.service"
 	}
-	return []byte("[Unit]\nDescription=Webscan v3 single-center stack\nRequires=docker.service" + dependency + "\nAfter=docker.service network-online.target" + dependency + "\nWants=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nUMask=0077\nTimeoutStartSec=180\nTimeoutStopSec=90\nExecStart=" + strconv.Quote(docker) + " compose --project-name " + singleProject(s.Root) + " --file " + strconv.Quote(filepath.Join(s.Root, "compose.yaml")) + " up -d --no-recreate --pull never\nExecStop=" + strconv.Quote(docker) + " compose --project-name " + singleProject(s.Root) + " --file " + strconv.Quote(filepath.Join(s.Root, "compose.yaml")) + " stop --timeout 60\n\n[Install]\nWantedBy=multi-user.target\n")
+	start := strconv.Quote(docker) + " compose --project-name " + singleProject(s.Root) + " --file " + strconv.Quote(filepath.Join(s.Root, "compose.yaml")) + " up -d --no-recreate --pull never"
+	if s.MetricsRetention {
+		start = strconv.Quote(filepath.Join(s.Root, "webscan")) + " control-v3 --action start-single-stack --source " + strconv.Quote(filepath.Join(s.Root, "install.json"))
+	}
+	return []byte("[Unit]\nDescription=Webscan v3 single-center stack\nRequires=docker.service" + dependency + "\nAfter=docker.service network-online.target" + dependency + "\nWants=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nUMask=0077\nTimeoutStartSec=180\nTimeoutStopSec=90\nExecStart=" + start + "\nExecStop=" + strconv.Quote(docker) + " compose --project-name " + singleProject(s.Root) + " --file " + strconv.Quote(filepath.Join(s.Root, "compose.yaml")) + " stop --timeout 60\n\n[Install]\nWantedBy=multi-user.target\n")
 }
 
 func prepareSingleInstallation(ctx context.Context, s singleInstallSpec, binary []byte, password, docker string) error {
@@ -410,7 +474,7 @@ func prepareSingleInstallation(ctx context.Context, s singleInstallSpec, binary 
 		if err != nil {
 			return err
 		}
-		policy := singleBackupSchedule{Format: 1, Spec: singleBackupScheduleSpec{Format: 1, Directory: s.Backup.Directory, Keep: s.Backup.Keep, Request: singleBackupSpec{Format: 1, Installation: filepath.Join(s.Root, "install.json"), HostConfig: filepath.Join(s.Root, "executor.yaml"), APIConfig: filepath.Join(s.Root, "config.yaml"), ComposeFile: filepath.Join(s.Root, "compose.yaml")}}, Helper: filepath.Join(s.Root, "webscan"), Hash: trusted.manifest.Helper.SHA256, Release: trusted.manifest.Release}
+		policy := singleBackupSchedule{Format: 1, Spec: singleBackupScheduleSpec{Format: 1, Directory: s.Backup.Directory, Keep: s.Backup.Keep, Request: singleMetricsBackupRequest(s)}, Helper: filepath.Join(s.Root, "webscan"), Hash: trusted.manifest.Helper.SHA256, Release: trusted.manifest.Release}
 		files["backup-schedule.json"], _ = json.Marshal(policy)
 		files["backup.service"], files["backup.timer"] = singleBackupScheduleUnits(policy, filepath.Join(s.Root, "backup-schedule.json"))
 	}
@@ -427,7 +491,13 @@ func prepareSingleInstallation(ctx context.Context, s singleInstallSpec, binary 
 	}
 	// The package is already durable. Any failure below is resumed, never
 	// repaired by regenerating credentials or overwriting a previous package.
-	return os.Chmod(filepath.Join(s.Root, "webscan"), 0700)
+	if err := os.Chmod(filepath.Join(s.Root, "webscan"), 0700); err != nil {
+		return err
+	}
+	if err := ensureSingleMetricsDirectories(s); err != nil {
+		return err
+	}
+	return ensureSingleHostWatchdog(ctx, s)
 }
 
 func readSingleInstallation(s singleInstallSpec, binaryDigest string) (singleInstallJournal, error) {
@@ -539,6 +609,12 @@ func (i singleInstaller) resume(ctx context.Context, s singleInstallSpec, binary
 	if err := os.Chmod(filepath.Join(s.Root, "webscan"), 0700); err != nil {
 		return errSingleInstall
 	}
+	if err := ensureSingleHostWatchdog(ctx, s); err != nil {
+		return err
+	}
+	if err := ensureSingleMetricsDirectories(s); err != nil {
+		return err
+	}
 	stages := []struct {
 		name    string
 		execute func(context.Context) error
@@ -594,6 +670,11 @@ func (i singleInstaller) resume(ctx context.Context, s singleInstallSpec, binary
 			return err
 		}
 	}
+	if s.MetricsRetention {
+		if err := i.activateSingleMetricsRetention(ctx, s); err != nil {
+			return err
+		}
+	}
 	return json.NewEncoder(out).Encode(map[string]any{"status": "installed", "topology": "single", "config": filepath.Join(s.Root, "config.yaml"), "service": singleProject(s.Root) + ".service", "https_proxy_configured": false, "executor_enabled": s.Format == 3, "pki_automatic_renewal": s.Format >= 2})
 }
 
@@ -638,7 +719,7 @@ func (i singleInstaller) imageInspect(ctx context.Context, format, ref string) (
 }
 
 func (i singleInstaller) infrastructure(ctx context.Context, s singleInstallSpec) error {
-	for _, name := range []string{"postgres-data", "metrics-data", "state"} {
+	for _, name := range s.dataDirectoryNames() {
 		path := filepath.Join(s.Root, name)
 		if err := os.Mkdir(path, 0700); err != nil && !os.IsExist(err) {
 			return err
@@ -666,10 +747,10 @@ func (i singleInstaller) infrastructure(ctx context.Context, s singleInstallSpec
 			return err
 		}
 	}
-	if err := i.checkContainers(ctx, s, []string{"postgres", "metrics", "central"}, false); err != nil {
+	if err := i.checkContainers(ctx, s, s.serviceNames(), false); err != nil {
 		return err
 	}
-	if _, err := i.compose(ctx, s, "up", "-d", "--no-recreate", "--pull", "never", "postgres", "metrics"); err != nil {
+	if _, err := i.compose(ctx, s, append([]string{"up", "-d", "--no-recreate", "--pull", "never"}, s.storageServiceNames()...)...); err != nil {
 		return errSingleInstall
 	}
 	return singleWait(ctx, func(op context.Context) error {
@@ -718,7 +799,7 @@ func singleInstallAccount(ctx context.Context, s singleInstallSpec) error {
 }
 
 func (i singleInstaller) start(ctx context.Context, s singleInstallSpec) error {
-	if err := i.checkContainers(ctx, s, []string{"postgres", "metrics", "central"}, false); err != nil {
+	if err := i.checkContainers(ctx, s, s.serviceNames(), false); err != nil {
 		return err
 	}
 	unit, err := readTrustData(filepath.Join(s.Root, "stack.service"), true, 64<<10)
@@ -748,8 +829,22 @@ func (i singleInstaller) start(ctx context.Context, s singleInstallSpec) error {
 			return err
 		}
 	}
+	if s.HostWatchdog {
+		unit, err := readTrustData(filepath.Join(s.Root, "watchdog-support", "watchdog.service"), true, 64<<10)
+		if err != nil {
+			return err
+		}
+		if err = i.publishSingleUnit(singleProject(s.Root)+"-watchdog.service", unit); err != nil {
+			return err
+		}
+	}
 	if _, err := i.run(ctx, "systemctl", "daemon-reload"); err != nil {
 		return errSingleInstall
+	}
+	if s.HostWatchdog {
+		if _, err := i.run(ctx, "systemctl", "enable", "--now", singleProject(s.Root)+"-watchdog.service"); err != nil {
+			return errSingleInstall
+		}
 	}
 	if s.Format >= 2 {
 		if _, err := maintainSinglePKI(ctx, s, time.Now().UTC()); err != nil {
@@ -813,6 +908,12 @@ func (i singleInstaller) publishSingleUnit(name string, unit []byte) error {
 }
 
 func (i singleInstaller) verify(ctx context.Context, s singleInstallSpec) error {
+	active, release, err := singleMetricsActiveInstaller(ctx, s, i)
+	if err != nil {
+		return err
+	}
+	defer release()
+	i = active
 	unit, err := readTrustData(filepath.Join(s.Root, "stack.service"), true, 64<<10)
 	installed, err2 := readTrustData(filepath.Join(i.unitDirectory, singleProject(s.Root)+".service"), true, 64<<10)
 	if err != nil || err2 != nil || !bytes.Equal(unit, installed) {
@@ -840,6 +941,18 @@ func (i singleInstaller) verify(ctx context.Context, s singleInstallSpec) error 
 			return singleInstallProblem{"pki-readiness", "采集器身份或吊销信任校验失败，请检查证书维护服务；未替换密钥"}
 		}
 	}
+	if s.HostWatchdog {
+		expected, e1 := readTrustData(filepath.Join(s.Root, "watchdog-support", "watchdog.service"), true, 64<<10)
+		actual, e2 := readTrustData(filepath.Join(i.unitDirectory, singleProject(s.Root)+"-watchdog.service"), true, 64<<10)
+		if e1 != nil || e2 != nil || !bytes.Equal(expected, actual) {
+			return errSingleInstall
+		}
+		for _, state := range []string{"is-enabled", "is-active"} {
+			if _, err := i.run(ctx, "systemctl", state, "--quiet", singleProject(s.Root)+"-watchdog.service"); err != nil {
+				return errSingleInstall
+			}
+		}
+	}
 	if s.Format == 3 {
 		if err := i.verifySingleWebDeployment(ctx, s); err != nil {
 			return singleInstallProblem{"executor-service", "宿主执行器服务或固定服务定义校验失败，请检查原服务状态"}
@@ -851,7 +964,7 @@ func (i singleInstaller) verify(ctx context.Context, s singleInstallSpec) error 
 	// No identity, platform, ownership or Compose hash check is omitted.
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	for _, service := range []string{"postgres", "metrics", "central"} {
+	for _, service := range s.serviceNames() {
 		if err := singleWait(ctx, func(op context.Context) error {
 			if err := i.checkContainers(op, s, []string{service}, true); err != nil {
 				return singleInstallProblem{"container-readiness", "容器运行、镜像身份或固定 Compose 配置核验未通过，请检查原服务和引擎响应"}
@@ -877,8 +990,20 @@ func (i singleInstaller) verify(ctx context.Context, s singleInstallSpec) error 
 		if err := store.DB.QueryRowContext(op, `SELECT max(version) FROM v3_schema`).Scan(&version); err != nil || version != SchemaVersion {
 			return singleInstallProblem{"database-schema", "业务数据库结构未达到当前程序版本，请按原安装请求继续"}
 		}
+		if s.HostWatchdog {
+			observation, err := store.hostObservation(op)
+			var host systemHostObservation
+			if err != nil || json.Unmarshal(observation, &host) != nil || !host.Fresh || !host.Available || host.Status == nil || host.Status.Frozen || host.Status.RuntimeVersion < 1 {
+				return singleInstallProblem{"watchdog-readiness", "独立宿主看门狗未提供有效运行观测，请检查宿主服务"}
+			}
+		}
 		if err := singleHTTPHealth(op, s.configuration().Metrics.QueryURL+"/health"); err != nil {
 			return singleInstallProblem{"metrics-readiness", "时序库健康检查失败，请检查已安装的时序服务"}
+		}
+		if s.MetricsLayers {
+			if err := singleHTTPHealth(op, s.configuration().Metrics.RawURL+"/health"); err != nil {
+				return singleInstallProblem{"raw-metrics-readiness", "原始指标库健康检查失败，请检查独立原始指标服务"}
+			}
 		}
 		if err := singleHTTPHealth(op, "http://"+s.configuration().Central.Listen+"/healthz"); err != nil {
 			return singleInstallProblem{"central-readiness", "中心健康检查失败，请检查原中心容器日志"}
@@ -893,7 +1018,7 @@ func (i singleInstaller) checkContainers(ctx context.Context, s singleInstallSpe
 		return err
 	}
 	label := digest([]byte(s.Root + digest(binary) + s.Instance))
-	images := map[string]string{"central": s.RuntimeImage, "postgres": s.PostgresImage, "metrics": s.MetricsImage}
+	images := map[string]string{"central": s.RuntimeImage, "postgres": s.PostgresImage, "metrics": s.MetricsImage, "metrics-raw": s.MetricsImage}
 	for _, service := range services {
 		ids, err := i.compose(ctx, s, "ps", "--all", "--quiet", service)
 		id := strings.TrimSpace(string(ids))

@@ -25,6 +25,7 @@ var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 type Store struct {
 	DB              *sql.DB
 	ExportDirectory string
+	HostQuota       *HostQuotaClient
 }
 
 func Open(ctx context.Context, c Config) (*Store, error) {
@@ -49,7 +50,12 @@ func openConfiguredDSN(ctx context.Context, c Config, dsn string) (*Store, error
 		db.Close()
 		return nil, errors.New("PostgreSQL 无法访问，请检查网络及凭据文件")
 	}
-	return &Store{DB: db, ExportDirectory: c.Central.ExportDirectory}, nil
+	quota, err := newHostQuotaClient(c)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{DB: db, ExportDirectory: c.Central.ExportDirectory, HostQuota: quota}, nil
 }
 
 // Initial schema is transactional and isolated from legacy tables. Subsequent
@@ -90,20 +96,24 @@ CREATE TABLE IF NOT EXISTS v3_requests(username text NOT NULL,key text NOT NULL,
 INSERT INTO v3_schema(version) VALUES(1) ON CONFLICT DO NOTHING;`
 
 type Node struct {
-	ID             string                  `json:"id"`
-	Name           string                  `json:"name"`
-	Endpoint       string                  `json:"endpoint"`
-	ServerName     string                  `json:"server_name"`
-	Enabled        bool                    `json:"enabled"`
-	Mode           string                  `json:"mode"`
-	Version        int64                   `json:"version"`
-	AppliedVersion int64                   `json:"applied_version"`
-	Shard          int                     `json:"shard"`
-	Config         json.RawMessage         `json:"-"`
-	RuntimeEpoch   int64                   `json:"-"`
-	Configuration  *NodeConfigurationState `json:"configuration,omitempty"`
-	CanRemove      bool                    `json:"can_remove"`
-	RemoveReason   string                  `json:"remove_reason,omitempty"`
+	ID              string                  `json:"id"`
+	Name            string                  `json:"name"`
+	Endpoint        string                  `json:"endpoint"`
+	ServerName      string                  `json:"server_name"`
+	Enabled         bool                    `json:"enabled"`
+	Mode            string                  `json:"mode"`
+	Version         int64                   `json:"version"`
+	AppliedVersion  int64                   `json:"applied_version"`
+	Shard           int                     `json:"shard"`
+	Config          json.RawMessage         `json:"-"`
+	RuntimeEpoch    int64                   `json:"-"`
+	Configuration   *NodeConfigurationState `json:"configuration,omitempty"`
+	CanRemove       bool                    `json:"can_remove"`
+	RemoveReason    string                  `json:"remove_reason,omitempty"`
+	CanUninstall    bool                    `json:"can_uninstall,omitempty"`
+	UninstallReason string                  `json:"uninstall_reason,omitempty"`
+	Lifecycle       string                  `json:"lifecycle,omitempty"`
+	Monitoring      *NodeMonitoring         `json:"monitoring,omitempty"`
 }
 
 func Shard(id string, n int) int {
@@ -136,6 +146,9 @@ func (n Node) Validate() error {
 }
 func scanNode(row interface{ Scan(...any) error }) (n Node, e error) {
 	e = row.Scan(&n.ID, &n.Name, &n.Endpoint, &n.ServerName, &n.Enabled, &n.Mode, &n.Version, &n.AppliedVersion, &n.Shard, &n.Config)
+	if e == nil {
+		n.Monitoring = monitoringForNode(n)
+	}
 	return
 }
 
@@ -188,6 +201,9 @@ func (s *Store) PutNode(ctx context.Context, n Node, expected int64, shards int)
 	}
 	defer tx.Rollback()
 	if err = lockDeploymentWriteRelationsTx(ctx, tx); err != nil {
+		return err
+	}
+	if err = checkMonitoringNodeReservationTx(ctx, tx, n.ID); err != nil {
 		return err
 	}
 	if err = putNode(ctx, tx, n, expected, shards); err != nil {

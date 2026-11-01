@@ -105,42 +105,66 @@ func Serve(ctx context.Context, c Config, role string) error {
 		}
 	}()
 	failures := make(chan error, 8)
+	reportFailure := func(err error) {
+		select {
+		case failures <- err:
+		case <-ctx.Done():
+		}
+	}
 	if authority != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			failures <- store.runBootstrapProcess(ctx, authority, launch, bootstrap, activation, c.Central.Instance, role, ready)
+			reportFailure(store.runBootstrapProcess(ctx, authority, launch, bootstrap, activation, c.Central.Instance, role, ready))
 		}()
 	}
 	if executor != nil {
 		wg.Add(1)
-		go func() { defer wg.Done(); failures <- executor.Run(ctx) }()
+		go func() { defer wg.Done(); reportFailure(executor.Run(ctx)) }()
 	}
 	if executor != nil && c.NodePKI.Enabled && c.Executor.RulesFile != "" {
 		runtime := executor.Runtime.(*SSHNodeRuntime)
 		preparations := &webDeploymentWorker{store: store, config: bootstrap, trust: &deploymentTrust{vault: executor.Vault, release: runtime.Release, config: c.DeploymentTrust}, instance: c.Central.Instance}
 		wg.Add(1)
-		go func() { defer wg.Done(); failures <- preparations.Run(ctx) }()
+		go func() { defer wg.Done(); reportFailure(preparations.Run(ctx)) }()
+		monitoring := NewMonitoringApplicationWorker(store, bootstrap, preparations.trust, runtime, c.Central.Instance)
+		wg.Add(1)
+		go func() { defer wg.Done(); reportFailure(monitoring.Run(ctx)) }()
 	}
 	if applications != nil {
 		wg.Add(1)
-		go func() { defer wg.Done(); failures <- applications.Run(ctx) }()
+		go func() { defer wg.Done(); reportFailure(applications.Run(ctx)) }()
 	}
-	metrics := &Metrics{WriteURL: c.Metrics.WriteURL, QueryURL: c.Metrics.QueryURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
+	metrics := &Metrics{RawURL: c.Metrics.RawURL, WriteURL: c.Metrics.WriteURL, QueryURL: c.Metrics.QueryURL, HTTP: &http.Client{Timeout: 15 * time.Second}}
 	if role == "websites" || role == "all" {
 		worker := &WebsiteRunner{Store: store, Instance: c.Central.Instance}
 		wg.Add(1)
-		go func() { defer wg.Done(); failures <- worker.Run(ctx) }()
+		go func() { defer wg.Done(); reportFailure(worker.Run(ctx)) }()
 	}
 	if role == "notifier" || role == "all" {
+		if store.HostQuota != nil {
+			wg.Add(1)
+			go func() { defer wg.Done(); reportFailure(RunHostWatchdogHistory(ctx, store, store.HostQuota)) }()
+		}
 		worker := &Notifier{Store: store, Instance: c.Central.Instance}
 		wg.Add(1)
-		go func() { defer wg.Done(); failures <- worker.Run(ctx) }()
+		go func() { defer wg.Done(); reportFailure(worker.Run(ctx)) }()
+		// Test sends have their own single-attempt queue. Missing local Vault
+		// material disables that queue, never the existing business notifier.
+		if vault, err := OpenVault(c.DeploymentTrust.VaultKeyFile, c.DeploymentTrust.PreviousKeyFiles...); err == nil {
+			tests := &NotificationTestWorker{Store: store, Vault: vault, Instance: c.Central.Instance}
+			wg.Add(1)
+			go func() { defer wg.Done(); reportFailure(tests.Run(ctx)) }()
+		} else {
+			op, stop := context.WithTimeout(ctx, 3*time.Second)
+			_, _ = store.DB.ExecContext(op, `INSERT INTO v3_role_status(role,instance,heartbeat,error) VALUES('notification-tests',$1,clock_timestamp(),'测试通知的共享密钥不可用') ON CONFLICT(role,instance) DO UPDATE SET heartbeat=excluded.heartbeat,error=excluded.error,details='{}'::jsonb`, c.Central.Instance)
+			stop()
+		}
 	}
 	if role == "collector" || role == "all" {
 		worker := &Collector{Store: store, Config: c, Metrics: metrics}
 		wg.Add(1)
-		go func() { defer wg.Done(); failures <- worker.Run(ctx) }()
+		go func() { defer wg.Done(); reportFailure(worker.Run(ctx)) }()
 	}
 	if role == "api" || role == "all" {
 		api := NewAPI(store, bootstrap)
@@ -163,7 +187,7 @@ func Serve(ctx context.Context, c Config, role string) error {
 			} else {
 				err = srv.Serve(listener)
 			}
-			failures <- err
+			reportFailure(err)
 		}()
 		defer func() {
 			cancel()

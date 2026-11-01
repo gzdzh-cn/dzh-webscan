@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func (h installationHost) native(ctx context.Context, s ServiceRecord) (nativeStatus, error) {
@@ -152,6 +153,7 @@ func (h installationHost) restoreServices(ctx context.Context, i Installation) e
 	if !i.valid(i.Node) || hasLegacyMembers(i) {
 		return errors.New("invalid-installation")
 	}
+	nativeStopped, nativeStarted := false, false
 	for _, s := range i.Services {
 		if s.Kind == "native" {
 			status, err := h.native(ctx, s)
@@ -161,6 +163,7 @@ func (h installationHost) restoreServices(ctx context.Context, i Installation) e
 			if !s.Running && status.MainPID > 0 {
 				return errors.New("unexpected-node-writer-active")
 			}
+			nativeStopped = status.MainPID == 0
 		} else {
 			c, err := h.ownedContainer(ctx, s)
 			if err != nil {
@@ -184,6 +187,7 @@ func (h installationHost) restoreServices(ctx context.Context, i Installation) e
 				if _, err := h.command(ctx, "systemctl", "start", nativeServiceName); err != nil {
 					return err
 				}
+				nativeStarted = nativeStopped
 			}
 		} else {
 			c, err := h.ownedContainer(ctx, s)
@@ -209,12 +213,8 @@ func (h installationHost) restoreServices(ctx context.Context, i Installation) e
 	}
 	for _, s := range i.Services {
 		if s.Kind == "native" {
-			status, err := h.native(ctx, s)
-			if err != nil {
+			if err := h.confirmNativeRestoration(ctx, s, nativeStarted); err != nil {
 				return err
-			}
-			if (status.MainPID > 0) != s.Running || (status.UnitFileState == "enabled") != s.Enabled {
-				return errors.New("native-restore-not-confirmed")
 			}
 		} else {
 			c, err := h.ownedContainer(ctx, s)
@@ -227,4 +227,39 @@ func (h installationHost) restoreServices(ctx context.Context, i Installation) e
 		}
 	}
 	return nil
+}
+
+// Type=simple acknowledges start before execve. Only a writer started by this
+// operation from a proven stopped unit may briefly expose systemd's executable
+// or argv. Retry reads only, and require the same full ownership proof at the
+// end; never start again or grant this grace to an already running writer.
+func (h installationHost) confirmNativeRestoration(ctx context.Context, s ServiceRecord, started bool) error {
+	var deadline <-chan time.Time
+	var ticker *time.Ticker
+	if started {
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		deadline = timer.C
+		ticker = time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+	}
+	for {
+		status, err := h.native(ctx, s)
+		if err == nil {
+			if (status.MainPID > 0) != s.Running || (status.UnitFileState == "enabled") != s.Enabled {
+				return errors.New("native-restore-not-confirmed")
+			}
+			return nil
+		}
+		if !started || err.Error() != "native-running-program-mismatch" && err.Error() != "native-running-configuration-mismatch" {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-deadline:
+			return err
+		case <-ticker.C:
+		}
+	}
 }

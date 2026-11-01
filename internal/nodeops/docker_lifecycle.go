@@ -26,7 +26,7 @@ func newDockerLifecycle() *dockerLifecycle {
 }
 func (*dockerLifecycle) Supports(phase string) bool { return phaseIndex(phase) >= 0 }
 func (d *dockerLifecycle) valid(r Request) bool {
-	return r.Validate() == nil && r.Recovery == nil && r.Spec.Mode == "docker" && r.Spec.configurationValid() && d.runtime != nil && d.activation != nil && d.activation.runtime == d.runtime && d.activation.backup != nil && d.preflight != nil && d.stage != nil
+	return r.Validate() == nil && r.Recovery == nil && r.Uninstall == nil && r.Spec.Mode == "docker" && r.Spec.configurationValid() && d.runtime != nil && d.activation != nil && d.activation.runtime == d.runtime && d.activation.backup != nil && d.preflight != nil && d.stage != nil
 }
 func dockerPhaseOutcome(phase string) Outcome {
 	return Outcome{Checks: []Check{{ID: "docker-" + phase, Status: "passed", Code: "local-phase-verified"}}}

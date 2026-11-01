@@ -38,9 +38,11 @@ type Config struct {
 		MaxConnections int    `yaml:"max_connections"`
 	} `yaml:"database"`
 	Metrics struct {
-		WriteURL string `yaml:"write_url"`
-		QueryURL string `yaml:"query_url"`
-		SpoolDir string `yaml:"spool_dir"`
+		WriteURL   string `yaml:"write_url"`
+		QueryURL   string `yaml:"query_url"`
+		RawURL     string `yaml:"raw_url,omitempty"`
+		PolicyFile string `yaml:"policy_file,omitempty"`
+		SpoolDir   string `yaml:"spool_dir"`
 	} `yaml:"metrics"`
 	Collector struct {
 		CAFile                   string `yaml:"ca_file"`
@@ -56,6 +58,7 @@ type Config struct {
 	DeploymentTrust DeploymentTrustConfig `yaml:"deployment_trust,omitempty"`
 	Executor        ExecutorConfig        `yaml:"executor,omitempty"`
 	NodePKI         NodePKIConfig         `yaml:"node_pki,omitempty"`
+	HostWatchdog    HostWatchdogConfig    `yaml:"host_watchdog,omitempty"`
 	HA              struct {
 		Entrypoint string     `yaml:"entrypoint"`
 		Members    []HAMember `yaml:"members"`
@@ -145,11 +148,23 @@ func (c *Config) Validate() error {
 	if c.Database.MaxConnections < 2 || c.Database.MaxConnections > 200 {
 		return errors.New("数据库连接数须为 2～200")
 	}
-	for _, v := range []string{c.Metrics.WriteURL, c.Metrics.QueryURL} {
+	metricURLs := []string{c.Metrics.WriteURL, c.Metrics.QueryURL}
+	if c.Metrics.RawURL != "" {
+		metricURLs = append(metricURLs, c.Metrics.RawURL)
+		for _, history := range []string{c.Metrics.WriteURL, c.Metrics.QueryURL} {
+			if strings.TrimRight(c.Metrics.RawURL, "/") == strings.TrimRight(history, "/") {
+				return errors.New("原始指标与历史指标必须使用独立的时序库地址")
+			}
+		}
+	}
+	for _, v := range metricURLs {
 		u, e := url.Parse(v)
 		if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return errors.New("时序库地址格式错误，不允许内嵌凭据")
 		}
+	}
+	if file := c.Metrics.PolicyFile; file != "" && (!filepath.IsAbs(file) || filepath.Clean(file) != file || len(file) > 4096 || strings.ContainsAny(file, "\x00\r\n")) {
+		return errors.New("metrics.policy_file 必须为绝对规范路径")
 	}
 	if file := c.Collector.IdentityFile; file != "" && (!filepath.IsAbs(file) || filepath.Clean(file) != file || strings.ContainsAny(file, "\x00\r\n") || c.Collector.CertFile != "" || c.Collector.KeyFile != "") {
 		return errors.New("collector.identity_file 必须为绝对规范路径，不能同时配置 cert_file 或 key_file")
@@ -182,6 +197,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Executor.validate(c.DeploymentTrust); err != nil {
+		return err
+	}
+	if err := c.HostWatchdog.validate(*c); err != nil {
 		return err
 	}
 	if err := c.NodePKI.validate(); err != nil {

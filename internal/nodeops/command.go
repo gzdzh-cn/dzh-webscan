@@ -66,6 +66,9 @@ func lifecycleHandler(r Request) (Handler, error) {
 	if r.Spec.Mode == "native" {
 		h = newNativeLifecycle()
 	}
+	if r.Uninstall != nil {
+		return withUninstall(h), nil
+	}
 	if r.Recovery != nil {
 		return withRecovery(h), nil
 	}

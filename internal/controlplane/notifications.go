@@ -24,6 +24,7 @@ type Notification struct {
 	Attempts                                 int
 	Settings                                 common.Map
 	DeliveryKey                              string
+	HostQuotaExpiresAt                       time.Time
 }
 
 // claimNotification reserves a persistent, channel-wide rate slot and one
@@ -44,7 +45,8 @@ func (s *Store) claimNotification(ctx context.Context, channel, owner string) (*
 		return nil, nil
 	}
 	var raw []byte
-	if err = tx.QueryRowContext(ctx, "SELECT payload FROM v3_settings WHERE id=1").Scan(&raw); err != nil {
+	var runtimeVersion int64
+	if err = tx.QueryRowContext(ctx, "SELECT version,payload FROM v3_settings WHERE id=1 FOR SHARE").Scan(&runtimeVersion, &raw); err != nil {
 		return nil, err
 	}
 	var settings common.Map
@@ -55,16 +57,55 @@ func (s *Store) claimNotification(ctx context.Context, channel, owner string) (*
 	if !common.B(c["enabled"]) {
 		return nil, nil
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO v3_notification_rates VALUES($1,'[]') ON CONFLICT DO NOTHING", channel); err != nil {
+	reserved, err := channelRateSlotTx(ctx, tx, channel, settings)
+	if err != nil || !reserved {
 		return nil, err
+	}
+	n := &Notification{Owner: owner, Channel: channel, Settings: settings}
+	err = tx.QueryRowContext(ctx, `SELECT id,node,event_id,recipient,payload,attempts,lease_epoch,delivery_key FROM v3_notifications n
+	WHERE channel=$1 AND NOT migration_pending AND done_at IS NULL AND next_try<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp())
+	AND NOT EXISTS(SELECT 1 FROM v3_migration_recovery_notices q WHERE q.notification=n.id AND q.identity_sha256=encode(sha256(convert_to(jsonb_build_array(n.node,n.event_id,n.channel,n.recipient,n.delivery_key,n.payload)::text,'UTF8')),'hex') AND q.resolution<>'verified_unsent')
+	AND NOT EXISTS(SELECT 1 FROM v3_notifications older WHERE older.node=n.node AND older.channel=n.channel AND older.recipient=n.recipient AND older.id<n.id AND older.done_at IS NULL AND NOT EXISTS(SELECT 1 FROM v3_migration_recovery_notices q WHERE q.notification=older.id AND q.identity_sha256=encode(sha256(convert_to(jsonb_build_array(older.node,older.event_id,older.channel,older.recipient,older.delivery_key,older.payload)::text,'UTF8')),'hex') AND q.resolution<>'verified_unsent'))
+	ORDER BY id FOR UPDATE OF n SKIP LOCKED LIMIT 1`, channel).Scan(&n.ID, &n.Node, &n.EventID, &n.Recipient, &n.Payload, &n.Attempts, &n.Epoch, &n.DeliveryKey)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	n.Epoch++
+	if s.HostQuota != nil {
+		grant, e := s.HostQuota.Reserve(ctx, channel, fmt.Sprintf("business:%d:%d:%s", n.ID, n.Epoch, token()), runtimeVersion)
+		if e != nil {
+			return nil, e
+		}
+		if !grant.New || !grant.ExpiresAt.After(time.Now()) {
+			return nil, nil
+		}
+		n.HostQuotaExpiresAt = grant.ExpiresAt
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE v3_notifications SET lease_owner=$2,lease_epoch=$3,lease_until=clock_timestamp()+interval '90 seconds' WHERE id=$1", n.ID, owner, n.Epoch); err != nil {
+		return nil, err
+	}
+	return n, tx.Commit()
+}
+
+// channelRateSlotTx reserves the existing durable rate window. Callers commit
+// the slot only together with a claimed business or test delivery.
+func channelRateSlotTx(ctx context.Context, tx *sql.Tx, channel string, settings common.Map) (bool, error) {
+	c := common.M(settings[channel])
+	var raw []byte
+	var err error
+	if _, err = tx.ExecContext(ctx, "INSERT INTO v3_notification_rates VALUES($1,'[]') ON CONFLICT DO NOTHING", channel); err != nil {
+		return false, err
 	}
 	var now float64
 	if err = tx.QueryRowContext(ctx, "SELECT history,extract(epoch FROM clock_timestamp()) FROM v3_notification_rates WHERE channel=$1 FOR UPDATE", channel).Scan(&raw, &now); err != nil {
-		return nil, err
+		return false, err
 	}
 	var previous []float64
 	if err = json.Unmarshal(raw, &previous); err != nil {
-		return nil, err
+		return false, err
 	}
 	history := []float64{}
 	for _, v := range previous {
@@ -80,32 +121,17 @@ func (s *Store) claimNotification(ctx context.Context, channel, owner string) (*
 	}
 	perMinute = min(600, max(1, perMinute))
 	if len(history) >= perMinute || perSecond > 0 && len(history) > 0 && now-history[len(history)-1] < 1/perSecond {
-		return nil, nil
-	}
-	n := &Notification{Owner: owner, Channel: channel, Settings: settings}
-	err = tx.QueryRowContext(ctx, `SELECT id,node,event_id,recipient,payload,attempts,lease_epoch,delivery_key FROM v3_notifications n
-	WHERE channel=$1 AND NOT migration_pending AND done_at IS NULL AND next_try<=clock_timestamp() AND (lease_until IS NULL OR lease_until<=clock_timestamp())
-	AND NOT EXISTS(SELECT 1 FROM v3_notifications older WHERE older.node=n.node AND older.channel=n.channel AND older.recipient=n.recipient AND older.id<n.id AND older.done_at IS NULL)
-	ORDER BY id FOR UPDATE OF n SKIP LOCKED LIMIT 1`, channel).Scan(&n.ID, &n.Node, &n.EventID, &n.Recipient, &n.Payload, &n.Attempts, &n.Epoch, &n.DeliveryKey)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	n.Epoch++
-	if _, err = tx.ExecContext(ctx, "UPDATE v3_notifications SET lease_owner=$2,lease_epoch=$3,lease_until=clock_timestamp()+interval '90 seconds' WHERE id=$1", n.ID, owner, n.Epoch); err != nil {
-		return nil, err
+		return false, nil
 	}
 	history = append(history, now)
 	raw, err = json.Marshal(history)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE v3_notification_rates SET history=$2 WHERE channel=$1", channel, raw); err != nil {
-		return nil, err
+		return false, err
 	}
-	return n, tx.Commit()
+	return true, nil
 }
 
 func (s *Store) finishNotification(ctx context.Context, n *Notification, failed bool) error {
@@ -149,6 +175,9 @@ type NotificationSender interface {
 type ChannelSender struct{ HTTP *http.Client }
 
 func (s ChannelSender) Send(ctx context.Context, n *Notification) error {
+	if !n.HostQuotaExpiresAt.IsZero() && !n.HostQuotaExpiresAt.After(time.Now()) {
+		return ErrHostQuota
+	}
 	var event common.Map
 	if err := json.Unmarshal(n.Payload, &event); err != nil {
 		return errors.New("通知内容无效")
@@ -212,6 +241,7 @@ func (n *Notifier) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func(channel string) {
 			defer wg.Done()
+			var lastSendFailed bool
 			for ctx.Err() == nil {
 				op, cancel := context.WithTimeout(ctx, 5*time.Second)
 				task, err := n.Store.claimNotification(op, channel, n.Instance)
@@ -219,6 +249,7 @@ func (n *Notifier) Run(ctx context.Context) error {
 				if err == nil {
 					runtimeReady(ctx, "notify-"+channel)
 				}
+				n.notificationHeartbeat(ctx, channel, err != nil || lastSendFailed)
 				if err != nil || task == nil {
 					if !waitRetry(ctx, time.Second) {
 						return
@@ -234,6 +265,8 @@ func (n *Notifier) Run(ctx context.Context) error {
 				op, cancel = context.WithTimeout(ctx, 5*time.Second)
 				finished := n.Store.finishNotification(op, task, err != nil)
 				cancel()
+				lastSendFailed = err != nil || finished != nil
+				n.notificationHeartbeat(ctx, channel, lastSendFailed)
 				if finished != nil && !waitRetry(ctx, time.Second) {
 					return
 				}

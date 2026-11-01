@@ -24,18 +24,28 @@ const nativeUnitPath = "/etc/systemd/system/webscan-agent-native.service"
 // eventual activation/finalization driver. Hashes prove its generated files;
 // neither private keys nor legacy push tokens belong in this pointer.
 type ActiveInstallation struct {
-	Format           int    `json:"format"`
-	Node             string `json:"node"`
-	Spec             Spec   `json:"spec"`
-	RuntimeSHA256    string `json:"runtime_sha256"`
-	DefinitionSHA256 string `json:"definition_sha256"`
-	Job              string `json:"job,omitempty"`
-	PlanDigest       string `json:"plan_digest,omitempty"`
-	CaptureSHA256    string `json:"capture_sha256,omitempty"`
+	Format           int                         `json:"format"`
+	Node             string                      `json:"node"`
+	Spec             Spec                        `json:"spec"`
+	RuntimeSHA256    string                      `json:"runtime_sha256"`
+	DefinitionSHA256 string                      `json:"definition_sha256"`
+	Job              string                      `json:"job,omitempty"`
+	PlanDigest       string                      `json:"plan_digest,omitempty"`
+	CaptureSHA256    string                      `json:"capture_sha256,omitempty"`
+	Restoration      *ActiveRestorationReference `json:"restoration,omitempty"`
+	Reinstall        *ReinstallReference         `json:"reinstall,omitempty"`
+}
+
+type ActiveRestorationReference struct {
+	Job          string `json:"job"`
+	PlanDigest   string `json:"plan_digest"`
+	IntentSHA256 string `json:"intent_sha256"`
+	ObjectSHA256 string `json:"object_sha256"`
 }
 
 type installationHost struct {
 	root, configRoot, unitPath string
+	data, logs                 string
 	command                    func(context.Context, string, ...string) (string, error)
 	processExecutable          func(int) (string, error)
 	processArguments           func(int) ([]string, error)
@@ -186,6 +196,12 @@ func (h installationHost) inventoryWithLegacyProofs(ctx context.Context, node, t
 	} else if !os.IsNotExist(err) {
 		return i, err
 	} else {
+		if removed, err := h.uninstalledInventory(ctx, node); err != nil || removed != nil {
+			if removed != nil {
+				return *removed, err
+			}
+			return i, err
+		}
 		i.Runtime = filepath.Join(h.configRoot, "runtime.json")
 		if _, err := os.Lstat(i.Runtime); err == nil {
 			raw, e := readPrivate(i.Runtime, 2<<20)
@@ -442,6 +458,12 @@ func (h installationHost) container(ctx context.Context, id string) (containerId
 }
 
 func (h installationHost) verifyV3Container(c containerIdentity, a ActiveInstallation) error {
+	if a.Restoration != nil {
+		s, err := h.restoredService(a)
+		if err != nil || s.Kind != "docker" || s.ID != c.ID || s.Proof != c.fingerprint() {
+			return errors.New("restored-container-not-proven")
+		}
+	}
 	if c.Managed != "v3" || c.Node != a.Node || c.Configuration != a.Spec.RuntimeSHA256 || c.Project != dockerProject(a) || c.Service != "agent" || !validDigest(c.ID) || !validRestart(c.Restart) || (c.Status != "running" && c.Status != "exited" && c.Status != "created") {
 		return errors.New("v3-container-ownership-not-proven")
 	}

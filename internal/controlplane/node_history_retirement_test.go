@@ -13,7 +13,76 @@ import (
 
 // Only used by synthetic downgrade fixtures, never by a production command.
 // Older-schema tests must remove later triggers and tables before migration.
-const nodeHistoryRetirementTestDrop = `DROP TABLE IF EXISTS v3_root_identity_issuances;
+const notificationFeaturesTestDrop = `DROP TABLE IF EXISTS v3_migration_reverse_metric_receipts;
+ALTER TABLE IF EXISTS v3_migration_target_journals DROP COLUMN IF EXISTS began_at;
+ALTER TABLE IF EXISTS v3_migration_target_journals DROP COLUMN IF EXISTS sealed_at;
+DROP TABLE IF EXISTS v3_migration_node_activations;
+DELETE FROM v3_schema WHERE version=51;
+DROP TABLE IF EXISTS v3_migration_legacy_history_rows,v3_migration_legacy_history_runs,v3_legacy_history;
+DELETE FROM v3_schema WHERE version=50;
+DROP TABLE IF EXISTS v3_migration_recovery_events,v3_migration_recovery_nodes,v3_migration_recovery_notices,v3_migration_recovery_state;
+DELETE FROM v3_schema WHERE version=49;
+DROP TABLE IF EXISTS v3_migration_cutovers;
+DELETE FROM v3_schema WHERE version=48;
+DROP TABLE IF EXISTS v3_migration_final_changes;
+DROP TABLE IF EXISTS v3_migration_final_owned;
+DROP TABLE IF EXISTS v3_migration_final_batches;
+DROP TABLE IF EXISTS v3_migration_metric_rows;
+DROP TABLE IF EXISTS v3_migration_metric_runs;
+DELETE FROM v3_schema WHERE version=47;
+DROP TABLE IF EXISTS v3_migration_shadow_evidence;
+DROP TABLE IF EXISTS v3_migration_shadow_runs;
+DROP TABLE IF EXISTS v3_migration_node_rows;
+DROP TABLE IF EXISTS v3_migration_node_sources;
+DROP TABLE IF EXISTS v3_migration_target_replays;
+DROP TABLE IF EXISTS v3_migration_target_changes;
+DROP TABLE IF EXISTS v3_migration_target_baselines;
+DROP TABLE IF EXISTS v3_migration_target_tables;
+DROP TABLE IF EXISTS v3_migration_target_journals;
+DELETE FROM v3_schema WHERE version=46;
+DROP TABLE IF EXISTS v3_migration_reconciliations;
+DROP TABLE IF EXISTS v3_migration_freezes;
+DROP TABLE IF EXISTS v3_migration_delta_rows;
+DROP TABLE IF EXISTS v3_migration_deltas;
+DROP TABLE IF EXISTS v3_migration_revision_rows;
+DROP TABLE IF EXISTS v3_migration_revision_tables;
+DROP TABLE IF EXISTS v3_migration_revisions;
+DROP TABLE IF EXISTS v3_migration_sessions;
+DELETE FROM v3_schema WHERE version=45;
+DROP TABLE IF EXISTS v3_single_backup_slots;
+DELETE FROM v3_schema WHERE version=44;
+DROP TABLE IF EXISTS v3_host_notification_imports;
+DELETE FROM v3_schema WHERE version=43;
+DROP TABLE IF EXISTS v3_notification_test_deliveries;
+DROP TABLE IF EXISTS v3_notification_test_jobs;
+DROP TABLE IF EXISTS v3_notification_test_previews;
+DROP TABLE IF EXISTS v3_notification_test_cooldowns;
+DROP TABLE IF EXISTS v3_notification_public;
+DELETE FROM v3_schema WHERE version=42;`
+
+const postMonitoringMigrationsTestDrop = notificationFeaturesTestDrop + `DROP TABLE IF EXISTS v3_web_uninstall_credentials;
+DROP TABLE IF EXISTS v3_node_lifecycle;
+DROP TABLE IF EXISTS v3_deployment_lifecycle_receipts;
+DROP TABLE IF EXISTS v3_deployment_lifecycle_authorizations;
+DROP TABLE IF EXISTS v3_deployment_uninstalls;
+DELETE FROM v3_schema WHERE version=41;
+DROP TABLE IF EXISTS v3_deployment_history_archives;
+DROP TABLE IF EXISTS v3_deployment_history_delete_items;
+DROP TABLE IF EXISTS v3_deployment_history_delete_jobs;
+DROP TABLE IF EXISTS v3_deployment_history_delete_previews;
+DELETE FROM v3_schema WHERE version=40;
+DROP INDEX IF EXISTS v3_deployment_recovery_head;
+DROP INDEX IF EXISTS v3_deployment_success_baseline;
+DROP INDEX IF EXISTS v3_deployment_preview_reference;
+DROP INDEX IF EXISTS v3_deployment_preview_node;
+DROP INDEX IF EXISTS v3_deployment_preparation_history_guard;
+`
+
+const nodeHistoryRetirementTestDrop = postMonitoringMigrationsTestDrop + `DROP TABLE IF EXISTS v3_monitoring_application_authorizations;
+DROP TABLE IF EXISTS v3_monitoring_application_nodes;
+DROP TABLE IF EXISTS v3_monitoring_applications;
+DELETE FROM v3_schema WHERE version=39;
+DROP TABLE IF EXISTS v3_root_identity_issuances;
 DROP FUNCTION IF EXISTS v3_root_issuance_immutable();
 DROP TABLE IF EXISTS v3_root_rotations;
 DELETE FROM v3_schema WHERE version=38;

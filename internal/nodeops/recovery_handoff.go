@@ -13,6 +13,7 @@ import (
 
 type recoveryAdopter interface {
 	validateRecoveryAdoption(Request, string) error
+	recoverySourceIdentity(Request) (string, error)
 }
 
 // This check runs before retiring the current job. Invalid evidence does not
@@ -30,7 +31,8 @@ func (s *Journal) authorizeRecovery(tx *sql.Tx, r Request, current string) (bool
 	} else if err != nil {
 		return false, err
 	}
-	if plan != q.SourcePlanDigest || spec != r.Spec.digest() || retired != 1 {
+	sourceIdentity, err := guard.recoverySourceIdentity(r)
+	if err != nil || plan != q.SourcePlanDigest || spec != sourceIdentity || retired != 1 {
 		return false, nil
 	}
 	var complete, restoring, pending int
@@ -149,10 +151,6 @@ func (q *recoveryLifecycle) verifyRollback(ctx context.Context, r Request) error
 func (q *recoveryLifecycle) sourceEvidence(ctx context.Context, r Request) ([]byte, error) {
 	b := *q.backup
 	b.host = q.host
-	i, err := b.readIntent(ctx, r)
-	if err != nil {
-		return nil, err
-	}
 	raw, err := readPrivate(filepath.Join(b.directory(r), "activation/intent.json"), MaxRequestBytes)
 	if err != nil {
 		return nil, err
@@ -164,6 +162,21 @@ func (q *recoveryLifecycle) sourceEvidence(ctx context.Context, r Request) ([]by
 		return nil, errors.New("recovery-activation-invalid")
 	}
 	a := header.Target
+	if r.Reinstall == nil {
+		r.Reinstall = a.Reinstall
+	}
+	if !sameReinstall(r.Reinstall, a.Reinstall) {
+		return nil, errors.New("recovery-reinstall-mismatch")
+	}
+	i, err := b.readIntent(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if i.Installed.Generation != "v3" {
+		if err := q.host.historicalReinstall(ctx, r, i); err != nil {
+			return nil, err
+		}
+	}
 	if a.Format != 1 || a.Node != r.Node || a.Job != r.Job || a.PlanDigest != r.PlanDigest || a.Spec.digest() != r.Spec.digest() || !validDigest(a.RuntimeSHA256) || !validDigest(a.DefinitionSHA256) {
 		return nil, errors.New("recovery-activation-invalid")
 	}
@@ -171,6 +184,36 @@ func (q *recoveryLifecycle) sourceEvidence(ctx context.Context, r Request) ([]by
 		return nil, err
 	}
 	return json.Marshal(a)
+}
+
+// Reinstall's extra identity is recovered from its immutable activation rather
+// than supplied alongside Recovery by a caller. The public recovery reference
+// still binds the entire original pointer and capture.
+func (q *recoveryLifecycle) boundSourceRequest(ctx context.Context, r Request) (Request, error) {
+	source := r.sourceRequest()
+	raw, err := q.sourceEvidence(ctx, source)
+	if err != nil {
+		return source, err
+	}
+	var a ActiveInstallation
+	if json.Unmarshal(raw, &a) != nil {
+		return source, errors.New("recovery-source-invalid")
+	}
+	source.Reinstall = a.Reinstall
+	if source.Validate() != nil {
+		return source, errors.New("recovery-source-invalid")
+	}
+	return source, nil
+}
+
+func (q *recoveryLifecycle) recoverySourceIdentity(r Request) (string, error) {
+	if !q.valid(r) {
+		return "", errors.New("invalid-recovery")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	source, err := q.boundSourceRequest(ctx, r)
+	return source.identityDigest(), err
 }
 
 // Recompute immutable head evidence without requiring its old runtime state.
@@ -196,7 +239,8 @@ func (q *recoveryLifecycle) headEvidence(ctx context.Context, r Request, seen ma
 		if err != nil || proof != i.HeadEvidenceSHA256 {
 			return Request{}, "", "", errors.New("recovery-head-changed")
 		}
-		return h.sourceRequest(), sha(raw), h.identityDigest(), nil
+		source, err := q.boundSourceRequest(ctx, h)
+		return source, sha(raw), h.identityDigest(), err
 	} else if !os.IsNotExist(err) {
 		return Request{}, "", "", err
 	}
@@ -210,7 +254,7 @@ func (q *recoveryLifecycle) headEvidence(ctx context.Context, r Request, seen ma
 	if json.Unmarshal(raw, &header) != nil {
 		return Request{}, "", "", errors.New("recovery-head-invalid")
 	}
-	h := Request{Protocol: Protocol, Operation: "apply", Job: ref.HeadJob, Node: r.Node, PlanDigest: ref.HeadPlanDigest, Epoch: 1, Phase: "restore", Spec: header.Target.Spec}
+	h := Request{Protocol: Protocol, Operation: "apply", Job: ref.HeadJob, Node: r.Node, PlanDigest: ref.HeadPlanDigest, Epoch: 1, Phase: "restore", Spec: header.Target.Spec, Reinstall: header.Target.Reinstall}
 	if h.Validate() != nil || !h.Spec.configurationValid() {
 		return Request{}, "", "", errors.New("recovery-head-invalid")
 	}
@@ -345,7 +389,11 @@ func (q *recoveryLifecycle) Apply(r Request) (Outcome, error) {
 	if _, err := q.prepare(r, true); err != nil {
 		return Outcome{}, Failure{"remote-state-unknown"}
 	}
-	return q.driver(r.Spec.Mode).Apply(r.sourceRequest())
+	source, err := q.boundSourceRequest(context.Background(), r)
+	if err != nil {
+		return Outcome{}, Failure{"remote-state-unknown"}
+	}
+	return q.driver(r.Spec.Mode).Apply(source)
 }
 func (q *recoveryLifecycle) Reconcile(r Request) (string, Outcome, error) {
 	exists, err := q.prepare(r, false)
@@ -355,7 +403,11 @@ func (q *recoveryLifecycle) Reconcile(r Request) (string, Outcome, error) {
 	if !exists {
 		return "absent", Outcome{}, nil
 	}
-	return q.driver(r.Spec.Mode).Reconcile(r.sourceRequest())
+	source, err := q.boundSourceRequest(context.Background(), r)
+	if err != nil {
+		return "unknown", Outcome{}, Failure{"remote-state-unknown"}
+	}
+	return q.driver(r.Spec.Mode).Reconcile(source)
 }
 func (q *recoveryLifecycle) VerifyCompleted(r Request, out Outcome) error {
 	exists, err := q.prepare(r, false)
@@ -366,5 +418,9 @@ func (q *recoveryLifecycle) VerifyCompleted(r Request, out Outcome) error {
 	if !ok {
 		return Failure{"executor-unavailable"}
 	}
-	return v.VerifyCompleted(r.sourceRequest(), out)
+	source, err := q.boundSourceRequest(context.Background(), r)
+	if err != nil {
+		return Failure{"verification-failed"}
+	}
+	return v.VerifyCompleted(source, out)
 }

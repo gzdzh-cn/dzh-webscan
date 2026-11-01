@@ -20,6 +20,27 @@ type Options struct {
 }
 
 func Command(ctx context.Context, o Options, in io.Reader, out io.Writer) error {
+	if isMigrationRecoveryCommand(o.Action) {
+		return migrationRecoveryCommand(ctx, o, out)
+	}
+	if o.Action == "check-migration-recovery-host" || o.Action == "activate-migration-recovery-host" {
+		return migrationRecoveryHostCommand(ctx, o, out)
+	}
+	if o.Action == "run-host-watchdog" {
+		return runHostWatchdogCommand(ctx, o, out)
+	}
+	if o.Action == "run-metrics-retention" {
+		return runMetricsRetentionCommand(ctx, o, out)
+	}
+	if o.Action == "start-single-stack" {
+		return startSingleMetricsStackCommand(ctx, o, out)
+	}
+	if o.Action == "preview-single-metrics-upgrade" || o.Action == "prepare-single-metrics-upgrade" || o.Action == "run-single-metrics-upgrade" || o.Action == "resume-single-metrics-upgrade" || o.Action == "start-single-metrics-upgrade-stack" {
+		return singleMetricsUpgradeCommand(ctx, o, out)
+	}
+	if o.Action == "preview-single-backup-upgrade" || o.Action == "prepare-single-backup-upgrade" || o.Action == "check-single-backup-upgrade" || o.Action == "run-single-backup-upgrade" || o.Action == "enable-single-backup-upgrade" {
+		return singleBackupUpgradeCommand(ctx, o, out)
+	}
 	if o.Action == "prepare-single-backup-schedule" || o.Action == "configure-single-backup-schedule" || o.Action == "enable-single-backup-schedule" || o.Action == "run-single-backup" {
 		return singleBackupScheduleCommand(ctx, o, out)
 	}
@@ -92,6 +113,9 @@ func Command(ctx context.Context, o Options, in io.Reader, out io.Writer) error 
 		return e
 	}
 	defer s.DB.Close()
+	if isMigrationCommand(o.Action) {
+		return s.localMigrationCommand(ctx, c, o, out)
+	}
 	if rootRotationAction {
 		return s.localRootRotationCommand(ctx, c, o, out)
 	}
@@ -196,5 +220,5 @@ func Command(ctx context.Context, o Options, in io.Reader, out io.Writer) error 
 
 // NewAPI is shared by isolated integration runners and future role launchers.
 func NewAPI(s *Store, c Config) *API {
-	return &API{Store: s, Config: c, bootstrapConfig: &c, Metrics: &Metrics{WriteURL: c.Metrics.WriteURL, QueryURL: c.Metrics.QueryURL, HTTP: &http.Client{Timeout: 15 * time.Second}}}
+	return &API{Store: s, Config: c, bootstrapConfig: &c, Metrics: &Metrics{RawURL: c.Metrics.RawURL, WriteURL: c.Metrics.WriteURL, QueryURL: c.Metrics.QueryURL, HTTP: &http.Client{Timeout: 15 * time.Second}}}
 }

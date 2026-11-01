@@ -14,6 +14,7 @@ var errNodeRemovalInput = errors.New("请选择当前页 1～200 台不重复的
 // require SSH; an unfinished remote operation still owns its recovery record.
 const nodeRemovalReasonSQL = `CASE
  WHEN n.id='central' THEN '中心节点不能从服务器列表移除'
+ WHEN EXISTS(SELECT 1 FROM v3_monitoring_application_nodes WHERE node=n.id AND reserved) THEN '公共规则应用尚未结束，请先继续或回退原任务'
  WHEN EXISTS(SELECT 1 FROM v3_websites WHERE node=n.id AND NOT deleted) THEN '仍有关联网站，请先调整网站的服务器关联'
  WHEN EXISTS(SELECT 1 FROM v3_deployment_jobs WHERE node=n.id AND (status IN ('queued','running') OR recovery_required)) THEN '存在未完成部署，请先继续或回退原任务'
  WHEN EXISTS(SELECT 1 FROM v3_deployment_preparations WHERE node=n.id AND status IN ('queued','running') AND expires_at>clock_timestamp()) THEN '部署准备正在进行，请等待完成或过期'

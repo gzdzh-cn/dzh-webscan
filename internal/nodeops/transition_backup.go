@@ -36,6 +36,9 @@ func newTransitionBackup(root string) *transitionBackup {
 type transitionBinding struct{ Job, Node, Plan, Spec string }
 
 func binding(r Request) transitionBinding {
+	if r.Uninstall != nil || r.Reinstall != nil {
+		return transitionBinding{r.Job, r.Node, r.PlanDigest, r.identityDigest()}
+	}
 	return transitionBinding{r.Job, r.Node, r.PlanDigest, r.Spec.digest()}
 }
 
@@ -89,6 +92,9 @@ func (b *transitionBackup) prepareIntent(ctx context.Context, r Request) (backup
 	installed, err := b.host.inventory(ctx, r.Node, r.Spec.Mode)
 	if err != nil || !installed.valid(r.Node) {
 		return empty, errors.New("installation-ownership-not-proven")
+	}
+	if !sameReinstall(installed.Removal, r.Reinstall) {
+		return empty, errors.New("reinstall-source-not-proven")
 	}
 	stage, err := os.MkdirTemp(job, ".capture-")
 	if err != nil {
@@ -175,6 +181,9 @@ func (b *transitionBackup) readIntent(ctx context.Context, r Request) (backupInt
 	_, err := decodePrivateJSON(filepath.Join(root, "intent.json"), &i, 4<<20)
 	if err != nil || i.Format != 1 || i.Binding != binding(r) || !i.Installed.valid(r.Node) || len(i.Files) > 2050 {
 		return i, errors.New("backup-intent-mismatch")
+	}
+	if !sameReinstall(i.Installed.Removal, r.Reinstall) {
+		return i, errors.New("reinstall-capture-source-changed")
 	}
 	if err := b.verifyWrapperMembers(r, i.Installed); err != nil {
 		return i, err

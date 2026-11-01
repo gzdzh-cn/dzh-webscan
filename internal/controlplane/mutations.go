@@ -12,6 +12,10 @@ var ErrRequestConflict = errors.New("幂等键已用于其他请求，请重新�
 // SaveNode binds optimistic concurrency, idempotency and the audit record to
 // one transaction. A retry gets the original response, even after later edits.
 func (s *Store) SaveNode(ctx context.Context, username, key string, n Node, expected int64, shards int) (json.RawMessage, error) {
+	// Trusted callers supply the complete private configuration themselves.
+	// Monitoring is a decorated public read model on scanned nodes; replaying
+	// it here must not overwrite an internal caller's new scan/resource config.
+	n.Monitoring = nil
 	return s.saveNode(ctx, username, key, n, expected, shards, nil)
 }
 
@@ -20,6 +24,9 @@ func (s *Store) saveNode(ctx context.Context, username, key string, n Node, expe
 	n.Configuration = nil
 	n.CanRemove = false
 	n.RemoveReason = ""
+	n.CanUninstall = false
+	n.UninstallReason = ""
+	n.Lifecycle = ""
 	n.RuntimeEpoch = 0
 	n.Version = 0
 	n.AppliedVersion = 0
@@ -84,6 +91,9 @@ func (s *Store) saveNode(ctx context.Context, username, key string, n Node, expe
 		if version != expected {
 			return nil, ErrConflict
 		}
+		if err = checkMonitoringNodeReservationTx(ctx, tx, n.ID); err != nil {
+			return nil, err
+		}
 		var busy bool
 		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM v3_deployment_jobs WHERE node=$1 AND status NOT IN ('succeeded','rolled_back') AND (status IN ('queued','running') OR recovery_required)) OR EXISTS(SELECT 1 FROM v3_node_identity_recoveries WHERE node=$1 AND status IN ('prepared','requested','signed') AND expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM v3_node_name_changes WHERE node=$1 AND status IN ('prepared','requested','signed') AND expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM v3_node_name_prunings WHERE node=$1 AND status IN ('prepared','requested','signed') AND expires_at>clock_timestamp())", n.ID).Scan(&busy); err != nil {
 			return nil, err
@@ -94,6 +104,15 @@ func (s *Store) saveNode(ctx context.Context, username, key string, n Node, expe
 	}
 	if err = before.capture(ctx, tx, username, "save-node", n.ID); err != nil {
 		return nil, err
+	}
+	if before != nil || n.Monitoring != nil {
+		var vault *Vault
+		if before != nil {
+			vault = before.vault
+		}
+		if err = prepareMonitoringNodeTx(ctx, tx, &n, expected, vault); err != nil {
+			return nil, err
+		}
 	}
 	if err = putNode(ctx, tx, n, expected, shards); err != nil {
 		return nil, err

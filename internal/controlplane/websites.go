@@ -351,7 +351,7 @@ func (s *Store) ClaimSites(ctx context.Context, owner string, limit int) ([]Webs
 	return jobs, tx.Commit()
 }
 
-func enqueueNotice(ctx context.Context, tx *sql.Tx, node, event string, payload common.Map, category string) error {
+func enqueueNotice(ctx context.Context, tx *sql.Tx, node, event string, payload common.Map, category, source string) error {
 	if held, err := migrationHeld(ctx, tx); err != nil {
 		return err
 	} else if held {
@@ -374,7 +374,15 @@ func enqueueNotice(ctx context.Context, tx *sql.Tx, node, event string, payload 
 			recipients = notify.Recipients(common.M(settings["email"]))
 		}
 		for _, recipient := range recipients {
-			if _, err := tx.ExecContext(ctx, "INSERT INTO v3_notifications(node,event_id,channel,recipient,payload) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", node, event, channel, recipient, common.JSON(payload)); err != nil {
+			var notificationID int64
+			err := tx.QueryRowContext(ctx, "INSERT INTO v3_notifications(node,event_id,channel,recipient,payload) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id", node, event, channel, recipient, common.JSON(payload)).Scan(&notificationID)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if err = projectNotificationTx(ctx, tx, notificationID, source); err != nil {
 				return err
 			}
 		}

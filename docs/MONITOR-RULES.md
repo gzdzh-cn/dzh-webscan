@@ -2,6 +2,8 @@
 
 [返回 README](../README.md) · [SH 安装](INSTALLATION.md) · [网站后台](WEBSITE.md) · [日常维护](OPERATIONS.md)
 
+下列 `node_defaults`／`nodes` YAML 及 `--reload-rules` 命令适用于旧版部署格式。v3 使用 PostgreSQL 保存配置及签名包下发，不应照此修改 YAML 期待网页节点立即生效。2026-11-01 未发布工作区已加入公共规则与“继承／独立”选择，保存和下发分开，操作见 [v3 公共监控](V3-CONSOLE.md#系统设置与存储清理)，实际验收状态见 [迁移记录](V3-FEATURE-MIGRATION.md)。匹配规则的含义继续适用。
+
 ## 目录、后缀与忽略规则
 
 ### 公共配置与节点配置的关系

@@ -237,6 +237,9 @@ func mergeRetentionIntoDraftTx(ctx context.Context, tx *sql.Tx, v *Vault, p Rete
 // captured its before-edit backup in this same transaction.
 func applySettingsDraftTx(ctx context.Context, tx *sql.Tx, before *configurationEditBackup, d privateSettingsDraft) (settingsDraftState, error) {
 	var err error
+	if _, err = prepareSettingsFromConfigTx(ctx, tx, before.bootstrap, d.RuntimeVersion, d.RuntimeVersion+1); err != nil {
+		return settingsDraftState{}, err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE v3_settings SET version=version+1,payload=$1,updated_at=clock_timestamp() WHERE id=1`, []byte(d.Desired)); err != nil {
 		return settingsDraftState{}, err
 	}

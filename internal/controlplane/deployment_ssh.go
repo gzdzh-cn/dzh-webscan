@@ -18,6 +18,11 @@ func (s *Store) ConnectDeploymentSSH(ctx context.Context, v *Vault, j Deployment
 	if err != nil {
 		return nil, err
 	}
+	if j.Kind == "uninstall" {
+		if err := s.checkUninstallSSH(ctx, v, j, c); err != nil {
+			return nil, err
+		}
+	}
 	return connectCredentialSSH(ctx, c)
 }
 

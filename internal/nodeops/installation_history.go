@@ -53,7 +53,7 @@ func (h installationHost) installationHistory(ctx context.Context, active *Activ
 			return nil, errors.New("installation-history-invalid")
 		}
 		seen[active.Job] = true
-		r := Request{Protocol: 1, Job: active.Job, Node: active.Node, PlanDigest: active.PlanDigest, Epoch: 1, Phase: "backup", Operation: "apply", Spec: active.Spec}
+		r := Request{Protocol: 1, Job: active.Job, Node: active.Node, PlanDigest: active.PlanDigest, Epoch: 1, Phase: "backup", Operation: "apply", Spec: active.Spec, Reinstall: active.Reinstall}
 		if r.Validate() != nil || !r.Spec.configurationValid() || active.CaptureSHA256 != "" && !validDigest(active.CaptureSHA256) {
 			return nil, errors.New("installation-history-invalid")
 		}
@@ -71,6 +71,9 @@ func (h installationHost) installationHistory(ctx context.Context, active *Activ
 		}
 		result = append(result, installationHistoryLink{r, i, *active})
 		if i.Installed.Generation != "v3" {
+			if err := h.historicalReinstall(ctx, r, i); err != nil {
+				return nil, err
+			}
 			return result, nil
 		}
 		listed := map[string]backupFile{}
@@ -123,7 +126,10 @@ func (h installationHost) historicalActivation(ctx context.Context, link install
 	default:
 		return errors.New("historical-activation-not-proven")
 	}
-	want, _ := json.Marshal(link.target)
+	if err := h.historicalRestoration(ctx, link.target); err != nil {
+		return err
+	}
+	want, _ := json.Marshal(withoutRestoration(link.target))
 	got, _ := json.Marshal(target)
 	if !bytes.Equal(want, got) {
 		return errors.New("historical-pointer-not-proven")

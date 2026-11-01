@@ -29,6 +29,11 @@ type settingsField struct {
 // editable through this projection. Unknown stored fields remain untouched.
 func settingsFields() []settingsField {
 	f := []settingsField{
+		{Path: "collector.interval_seconds", Label: "主控拉取指标间隔（秒）", Kind: "integer", Min: 10, Max: 3600},
+		{Path: "backup.enabled", Label: "自动完整备份", Kind: "bool"},
+		{Path: "backup.time", Label: "每天备份时间（HH:MM）", Kind: "text", Max: 5},
+		{Path: "backup.timezone", Label: "备份时区（IANA，未指定为 UTC）", Kind: "text", Max: 128},
+		{Path: "backup.keep_days", Label: "完整备份保留天数", Kind: "integer", Min: 1, Max: 3650},
 		{Path: "website_monitor.enabled", Label: "网站检测", Kind: "bool"},
 		{Path: "website_monitor.interval_seconds", Label: "网站检测间隔（秒）", Kind: "integer", Min: 10, Max: 3600},
 		{Path: "website_monitor.timeout_seconds", Label: "网站请求超时（秒）", Kind: "integer", Min: 1, Max: 60},
@@ -182,6 +187,9 @@ func editSettings(current configurationValues, edit settingsEdit) (configuration
 	for _, f := range settingsFields() {
 		fields[f.Path] = f
 	}
+	for _, f := range metricsRetentionFields() {
+		fields[f.Path] = f
+	}
 	changed := []string{}
 	for path, raw := range edit.Values {
 		f, ok := fields[path]
@@ -237,6 +245,9 @@ func editSettings(current configurationValues, edit settingsEdit) (configuration
 	}
 	if e = validateSettingsChannels(out); e != nil {
 		return nil, nil, e
+	}
+	if _, e = singleBackupRuntimePolicyFromSettings(out); e != nil {
+		return nil, nil, errSettingsEdit
 	}
 	return out, changed, nil
 }

@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"webscan/internal/common"
 	"webscan/internal/deploy"
 	"webscan/internal/progress"
 )
@@ -66,7 +68,7 @@ func singleBackupScheduleUnits(p singleBackupSchedule, source string) ([]byte, [
 	// No Requires/PartOf dependency on the central stack: timer failure or a
 	// restart must never stop the API, database, metrics engine or executor.
 	service := []byte("[Unit]\nDescription=Webscan consistent single-center backup\nAfter=network-online.target\n\n[Service]\nType=oneshot\nUMask=0077\nTimeoutStartSec=360\nNoNewPrivileges=yes\nNice=10\nIOSchedulingClass=best-effort\nIOSchedulingPriority=7\nExecStart=" + strconv.Quote(p.Helper) + " control-v3 --action run-single-backup --source " + strconv.Quote(source) + "\n")
-	timer := []byte("[Unit]\nDescription=Webscan daily single-center backup\n\n[Timer]\nOnCalendar=*-*-* 03:00:00\nRandomizedDelaySec=15m\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+	timer := []byte("[Unit]\nDescription=Webscan single-center backup schedule check\n\n[Timer]\nOnCalendar=*-*-* *:*:00\nAccuracySec=1s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
 	return service, timer
 }
 
@@ -158,6 +160,10 @@ type singleBackupRunResult struct {
 }
 
 func (s *Store) runSingleBackupSchedule(ctx context.Context, p singleBackupSchedule, plan singleBackupPlan, raw []byte) (singleBackupRunResult, error) {
+	return s.runSingleBackupScheduleMode(ctx, p, plan, raw, false)
+}
+
+func (s *Store) runSingleBackupScheduleMode(ctx context.Context, p singleBackupSchedule, plan singleBackupPlan, raw []byte, timer bool) (singleBackupRunResult, error) {
 	result := singleBackupRunResult{State: "failed"}
 	// Session-scoped ownership spans the filesystem publication and subsequent
 	// task commit. A crashed process releases it; another host cannot overlap.
@@ -184,17 +190,49 @@ func (s *Store) runSingleBackupSchedule(ctx context.Context, p singleBackupSched
 	if err := conn.QueryRowContext(ctx, `SELECT sha256,enabled FROM v3_single_backup_policies WHERE instance=$1`, plan.spec.Instance).Scan(&policyHash, &enabled); err != nil || !enabled || policyHash != digest(raw) {
 		return result, errSingleBackupSchedule
 	}
+	runtimePolicy, err := readSingleBackupRuntimePolicy(ctx, conn)
+	if err != nil {
+		return result, err
+	}
+	if !runtimePolicy.Enabled {
+		result.State = "disabled"
+		return result, nil
+	}
+	var now time.Time
+	if err := conn.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return result, err
+	}
+	if timer && !runtimePolicy.configured && !singleBackupLegacyTimerDue(now) {
+		result.State = "not-due"
+		return result, nil
+	}
 	// Interrupted archives are preserved for explicit inspection, never guessed
 	// to be successful or adopted from a path lacking a committed digest.
 	if _, err := conn.ExecContext(ctx, `UPDATE v3_single_backup_runs SET status='interrupted',reason='上次进程中断，归档保留待核验',updated_at=clock_timestamp() WHERE instance=$1 AND status='running'`, plan.spec.Instance); err != nil {
 		return result, err
 	}
-	if err := s.pruneSingleBackups(ctx, p, plan.spec.Instance, policyHash); err != nil {
+	if err := s.pruneSingleBackupsPolicy(ctx, p, plan.spec.Instance, policyHash, runtimePolicy, now); err != nil {
 		return result, err
 	}
 	var recent bool
-	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_single_backup_runs WHERE instance=$1 AND status='captured' AND policy_sha256=$2 AND created_at>clock_timestamp()-interval '24 hours')`, plan.spec.Instance, policyHash).Scan(&recent); err != nil {
-		return result, err
+	localDate := ""
+	if runtimePolicy.configured {
+		latest, err := singleBackupLatestSuccess(ctx, conn, plan.spec.Instance, policyHash)
+		if err != nil {
+			return result, err
+		}
+		var due bool
+		localDate, due = singleBackupRuntimeDue(runtimePolicy, now, latest)
+		recent = !due
+		if due {
+			if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_single_backup_slots WHERE instance=$1 AND local_date=$2 AND completed_at IS NOT NULL)`, plan.spec.Instance, localDate).Scan(&recent); err != nil {
+				return result, err
+			}
+		}
+	} else {
+		if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_single_backup_runs WHERE instance=$1 AND status='captured' AND policy_sha256=$2 AND created_at>clock_timestamp()-interval '24 hours')`, plan.spec.Instance, policyHash).Scan(&recent); err != nil {
+			return result, err
+		}
 	}
 	if recent {
 		result.State = "not-due"
@@ -202,7 +240,25 @@ func (s *Store) runSingleBackupSchedule(ctx context.Context, p singleBackupSched
 	}
 	id := token()
 	plan.output = filepath.Join(p.Spec.Directory, "backup-"+id)
-	if _, err := conn.ExecContext(ctx, `INSERT INTO v3_single_backup_runs(id,instance,policy_sha256,status,directory) VALUES($1,$2,$3,'running',$4)`, id, plan.spec.Instance, policyHash, plan.output); err != nil {
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_single_backup_runs(id,instance,policy_sha256,status,directory) VALUES($1,$2,$3,'running',$4)`, id, plan.spec.Instance, policyHash, plan.output); err != nil {
+		return result, err
+	}
+	if runtimePolicy.configured {
+		claimed, err := tx.ExecContext(ctx, `INSERT INTO v3_single_backup_slots(instance,local_date,settings_version,policy,run_id) VALUES($1,$2,$3,$4,$5)
+ ON CONFLICT(instance,local_date) DO UPDATE SET settings_version=excluded.settings_version,policy=excluded.policy,run_id=excluded.run_id WHERE v3_single_backup_slots.completed_at IS NULL`, plan.spec.Instance, localDate, runtimePolicy.version, common.JSON(runtimePolicy), id)
+		if err != nil {
+			return result, err
+		}
+		if rows, err := claimed.RowsAffected(); err != nil || rows != 1 {
+			return result, errSingleBackupSchedule
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return result, err
 	}
 	result.ID = id
@@ -213,7 +269,28 @@ func (s *Store) runSingleBackupSchedule(ctx context.Context, p singleBackupSched
 	if backupErr != nil {
 		state, reason = "failed", "备份失败，原服务和已保留备份未覆盖；请检查宿主任务回执"
 	}
-	if _, err := conn.ExecContext(finish, `UPDATE v3_single_backup_runs SET status=$2,reason=$3,manifest_sha256=$4,files=$5,bytes=$6,updated_at=clock_timestamp() WHERE id=$1 AND status='running'`, id, state, reason, receipt.ManifestSHA256, receipt.Files, receipt.Bytes); err != nil {
+	finishTx, err := conn.BeginTx(finish, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return result, err
+	}
+	defer finishTx.Rollback()
+	finished, err := finishTx.ExecContext(finish, `UPDATE v3_single_backup_runs SET status=$2,reason=$3,manifest_sha256=$4,files=$5,bytes=$6,updated_at=clock_timestamp() WHERE id=$1 AND status='running'`, id, state, reason, receipt.ManifestSHA256, receipt.Files, receipt.Bytes)
+	if err != nil {
+		return result, err
+	}
+	if rows, err := finished.RowsAffected(); err != nil || rows != 1 {
+		return result, errSingleBackupSchedule
+	}
+	if runtimePolicy.configured && backupErr == nil {
+		completed, err := finishTx.ExecContext(finish, `UPDATE v3_single_backup_slots SET completed_at=clock_timestamp() WHERE instance=$1 AND local_date=$2 AND run_id=$3 AND completed_at IS NULL`, plan.spec.Instance, localDate, id)
+		if err != nil {
+			return result, err
+		}
+		if rows, err := completed.RowsAffected(); err != nil || rows != 1 {
+			return result, errSingleBackupSchedule
+		}
+	}
+	if err := finishTx.Commit(); err != nil {
 		return result, err
 	}
 	result.State = state
@@ -221,29 +298,40 @@ func (s *Store) runSingleBackupSchedule(ctx context.Context, p singleBackupSched
 	if backupErr != nil {
 		return result, backupErr
 	}
-	return result, s.pruneSingleBackups(ctx, p, plan.spec.Instance, policyHash)
+	return result, s.pruneSingleBackupsPolicy(ctx, p, plan.spec.Instance, policyHash, runtimePolicy, now)
 }
 
 // Retention touches only tasks created under this exact policy and verified
 // immutable manifest. Foreign directories, uncommitted archives and failed
 // tasks are never enumerated for removal.
 func (s *Store) pruneSingleBackups(ctx context.Context, p singleBackupSchedule, instance, policyHash string) error {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,directory,manifest_sha256,status FROM v3_single_backup_runs WHERE instance=$1 AND policy_sha256=$2 AND status IN ('captured','purging') ORDER BY created_at DESC,id DESC`, instance, policyHash)
+	runtimePolicy, err := readSingleBackupRuntimePolicy(ctx, s.DB)
 	if err != nil {
 		return err
 	}
-	type item struct{ id, directory, hash, state string }
+	return s.pruneSingleBackupsPolicy(ctx, p, instance, policyHash, runtimePolicy, time.Now())
+}
+
+func (s *Store) pruneSingleBackupsPolicy(ctx context.Context, p singleBackupSchedule, instance, policyHash string, runtimePolicy singleBackupRuntimePolicy, now time.Time) error {
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,directory,manifest_sha256,status,created_at FROM v3_single_backup_runs WHERE instance=$1 AND policy_sha256=$2 AND status IN ('captured','purging') ORDER BY created_at DESC,id DESC`, instance, policyHash)
+	if err != nil {
+		return err
+	}
+	type item struct {
+		id, directory, hash, state string
+		created                    time.Time
+	}
 	var pending []item
 	kept := 0
 	for rows.Next() {
 		var v item
-		if err := rows.Scan(&v.id, &v.directory, &v.hash, &v.state); err != nil {
+		if err := rows.Scan(&v.id, &v.directory, &v.hash, &v.state, &v.created); err != nil {
 			rows.Close()
 			return err
 		}
 		if v.state == "captured" {
 			kept++
-			if kept <= p.Spec.Keep {
+			if runtimePolicy.configured && (kept == 1 || !v.created.Before(now.Add(-time.Duration(runtimePolicy.KeepDays)*24*time.Hour))) || !runtimePolicy.configured && kept <= p.Spec.Keep {
 				continue
 			}
 		}
@@ -368,7 +456,7 @@ func singleBackupScheduleCommand(ctx context.Context, o Options, out io.Writer) 
 	if o.Action != "run-single-backup" {
 		return errSingleBackupSchedule
 	}
-	r, err := s.runSingleBackupSchedule(ctx, p, plan, raw)
+	r, err := s.runSingleBackupScheduleMode(ctx, p, plan, raw, true)
 	if encodeErr := json.NewEncoder(out).Encode(r); encodeErr != nil {
 		return encodeErr
 	}

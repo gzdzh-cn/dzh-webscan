@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"time"
 	"webscan/internal/nodeconfig"
+	"webscan/internal/nodeops"
 )
 
 var ErrDeploymentBusy = errors.New("该节点存在未完成部署，请先继续或回退原任务")
@@ -42,7 +43,7 @@ type DeploymentRequest struct {
 
 func (in DeploymentRequest) validate() error {
 	sha, err := hex.DecodeString(in.SHA256)
-	if !identifier.MatchString(in.Node) || in.Expected < 1 || !identifier.MatchString(in.Credential) || (in.Kind != "install" && in.Kind != "upgrade") || !releaseVersion.MatchString(in.Release) || len(in.Release) > 128 || err != nil || len(sha) != 32 || hex.EncodeToString(sha) != in.SHA256 {
+	if !identifier.MatchString(in.Node) || in.Expected < 1 || !identifier.MatchString(in.Credential) || (in.Kind != "install" && in.Kind != "upgrade" && in.Kind != "uninstall") || !releaseVersion.MatchString(in.Release) || len(in.Release) > 128 || err != nil || len(sha) != 32 || hex.EncodeToString(sha) != in.SHA256 {
 		return errors.New("节点、部署类型、配置版本、凭据或目标版本校验值不正确")
 	}
 	if in.ManifestSHA256 != "" && !releaseDigest(in.ManifestSHA256) {
@@ -60,14 +61,17 @@ func (in DeploymentRequest) validate() error {
 // artifact paths or secret values. The SSH runtime requires a signature-verified
 // release manifest bound to this plan, including helper and target checksums.
 type DeploymentPlan struct {
-	Request             DeploymentRequest          `json:"request"`
-	Node                Node                       `json:"node"`
-	ConfigDigest        string                     `json:"config_digest"`
-	BeforeBackup        string                     `json:"before_configuration_backup,omitempty"`
-	PreviousRuntime     *deploymentRuntimeBaseline `json:"previous_runtime,omitempty"`
-	TargetRuntime       string                     `json:"target_runtime,omitempty"`
-	TargetRuntimeDigest string                     `json:"target_runtime_digest,omitempty"`
-	Recovery            *deploymentRecoveryPlan    `json:"recovery,omitempty"`
+	Request             DeploymentRequest           `json:"request"`
+	Node                Node                        `json:"node"`
+	ConfigDigest        string                      `json:"config_digest"`
+	BeforeBackup        string                      `json:"before_configuration_backup,omitempty"`
+	PreviousRuntime     *deploymentRuntimeBaseline  `json:"previous_runtime,omitempty"`
+	TargetRuntime       string                      `json:"target_runtime,omitempty"`
+	TargetRuntimeDigest string                      `json:"target_runtime_digest,omitempty"`
+	Recovery            *deploymentRecoveryPlan     `json:"recovery,omitempty"`
+	Uninstall           *deploymentUninstallPlan    `json:"uninstall,omitempty"`
+	Reinstall           *nodeops.ReinstallReference `json:"reinstall,omitempty"`
+	PreviousLifecycle   *deploymentLifecycleState   `json:"previous_lifecycle,omitempty"`
 }
 type DeploymentJob struct {
 	ID               string         `json:"id"`
@@ -167,6 +171,15 @@ func insertDeploymentWithBackup(ctx context.Context, tx *sql.Tx, user string, in
 	if err != nil {
 		return nil, err
 	}
+	if err = checkMonitoringNodeReservationTx(ctx, tx, n.ID); err != nil {
+		return nil, err
+	}
+	if in.Kind == "uninstall" {
+		if before == nil || before.vault == nil {
+			return nil, errNodeUninstall
+		}
+		return insertUninstallDeploymentTx(ctx, tx, user, in, n, guard, before)
+	}
 	if !n.Enabled || n.Version != in.Expected || in.Kind == "upgrade" && n.AppliedVersion == 0 || in.Kind == "install" && n.AppliedVersion != 0 {
 		return nil, ErrConflict
 	}
@@ -189,6 +202,22 @@ func insertDeploymentWithBackup(ctx context.Context, tx *sql.Tx, user string, in
 		return nil, ErrCredentialUnavailable
 	}
 	plan := DeploymentPlan{Request: in, Node: n, ConfigDigest: digest(n.Config)}
+	if before != nil && before.vault != nil {
+		plan.PreviousLifecycle, err = readNodeLifecycleTx(ctx, tx, before.vault, n.ID)
+		if err != nil {
+			return nil, err
+		}
+		if prior := plan.PreviousLifecycle; prior != nil && prior.State == "uninstalled" {
+			if in.Kind != "install" {
+				return nil, errNodeUninstall
+			}
+			old, removal, e := authenticatedUninstalledTx(ctx, tx, before.vault, n, prior)
+			if e != nil {
+				return nil, e
+			}
+			plan.Reinstall = &nodeops.ReinstallReference{SourceJob: old.ID, SourcePlanDigest: old.PlanDigest, TombstoneSHA256: removal.TombstoneSHA256}
+		}
+	}
 	plan.PreviousRuntime, err = runtimeBaselineTx(ctx, tx, n.ID)
 	if err != nil {
 		return nil, err
@@ -215,9 +244,14 @@ func insertDeploymentWithBackup(ctx context.Context, tx *sql.Tx, user string, in
 	if err = tx.QueryRowContext(ctx, "SELECT $1::jsonb", raw).Scan(&canonical); err != nil {
 		return nil, err
 	}
-	j := DeploymentJob{ID: token(), Node: n.ID, Status: "queued", Direction: "forward", PlanDigest: digest(canonical), Plan: plan}
+	j := DeploymentJob{ID: token(), Node: n.ID, Username: user, Kind: in.Kind, NodeVersion: n.Version, Status: "queued", Direction: "forward", PlanDigest: digest(canonical), Plan: plan}
 	if _, err = tx.ExecContext(ctx, "INSERT INTO v3_deployment_jobs(id,node,username,kind,node_version,credential,plan,plan_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", j.ID, n.ID, user, in.Kind, n.Version, in.Credential, canonical, j.PlanDigest); err != nil {
 		return nil, err
+	}
+	if before != nil && before.vault != nil {
+		if err = recordLifecycleAuthorizationTx(ctx, tx, before.vault, j); err != nil {
+			return nil, err
+		}
 	}
 	if err = deploymentLog(ctx, tx, &j, "preflight", "queued"); err != nil {
 		return nil, err
@@ -301,7 +335,7 @@ func (s *Store) ClaimDeployment(ctx context.Context, owner string) (DeploymentJo
 		}
 		return DeploymentJob{}, err
 	}
-	j, err := scanDeployment(tx.QueryRowContext(ctx, "SELECT "+deploymentColumns+" FROM v3_deployment_jobs d WHERE (status='queued' OR (status='running' AND lease_until<=clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM v3_configuration_application_nodes l WHERE l.child=d.id) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1"))
+	j, err := scanDeployment(tx.QueryRowContext(ctx, "SELECT "+deploymentColumns+" FROM v3_deployment_jobs d WHERE (status='queued' OR (status='running' AND lease_until<=clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM v3_configuration_application_nodes l WHERE l.child=d.id) AND NOT EXISTS(SELECT 1 FROM v3_monitoring_application_nodes l WHERE l.child=d.id) ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1"))
 	if err != nil {
 		return j, err
 	}
@@ -399,13 +433,16 @@ func (s *Store) completeDeploymentPhase(ctx context.Context, j DeploymentJob, va
 	if phase == "complete" || (current.Direction == "rollback" || current.Step >= 2) && !current.RecoveryRequired {
 		return ErrDeploymentState
 	}
-	if current.Direction == "forward" && (phase == "verify" || phase == "finalize") {
+	if current.Kind != "uninstall" && current.Direction == "forward" && (phase == "verify" || phase == "finalize") {
 		if err = s.deploymentReady(ctx, tx, current); err != nil {
 			return err
 		}
 	}
 	// Inserting proof takes an FK lock on the node. Acquire the collector
 	// lease first, just as readiness/collection do, before taking that lock.
+	if current.Kind != "uninstall" && proof != nil && (proof.Removal != nil || proof.Restoration != nil) {
+		return errNodeUninstall
+	}
 	if proof != nil && (proof.Installation != nil || proof.Spec != nil) {
 		if err = recordDeploymentInstallationTx(ctx, tx, vault, current, *proof); err != nil {
 			if errors.Is(err, errDeploymentInstallation) {
@@ -422,13 +459,23 @@ func (s *Store) completeDeploymentPhase(ctx context.Context, j DeploymentJob, va
 	if err = s.deploymentRuntimePhaseTx(ctx, tx, current, phase); err != nil {
 		return err
 	}
+	if current.Kind == "uninstall" {
+		if err = recordUninstallCompletionTx(ctx, tx, vault, current, proof); err != nil {
+			return err
+		}
+	}
+	if current.Kind != "uninstall" {
+		if err = recordInstalledLifecycleTx(ctx, tx, vault, current, proof, phase); err != nil {
+			return err
+		}
+	}
 	code := "phase-complete"
 	if current.Direction == "forward" {
 		current.Step++
 		if current.Step == len(deploymentPhases) {
 			current.Status = "succeeded"
 			code = "succeeded"
-			res, err := tx.ExecContext(ctx, "UPDATE v3_nodes SET applied_version=$2 WHERE id=$1 AND version=$2", current.Node, current.NodeVersion)
+			res, err := tx.ExecContext(ctx, "UPDATE v3_nodes SET applied_version=CASE WHEN $3='uninstall' THEN 0 ELSE $2 END WHERE id=$1 AND version=$2", current.Node, current.NodeVersion, current.Kind)
 			if err != nil {
 				return err
 			}
@@ -516,6 +563,10 @@ func (s *Store) RecoverDeployment(ctx context.Context, user, key, id, direction,
 }
 
 func (s *Store) recoverDeployment(ctx context.Context, user, key, id, direction, planDigest string, logCursor int64, admin bool) (json.RawMessage, error) {
+	return s.recoverDeploymentWithTrust(ctx, user, key, id, direction, planDigest, logCursor, admin, nil)
+}
+
+func (s *Store) recoverDeploymentWithTrust(ctx context.Context, user, key, id, direction, planDigest string, logCursor int64, admin bool, vault *Vault) (json.RawMessage, error) {
 	if !identifier.MatchString(id) || direction != "forward" && direction != "rollback" || len(planDigest) != 64 || logCursor < 1 {
 		return nil, ErrDeploymentState
 	}
@@ -538,8 +589,15 @@ func (s *Store) recoverDeployment(ctx context.Context, user, key, id, direction,
 		if err != nil {
 			return nil, err
 		}
-		if !j.CanRecover() || j.PlanDigest != planDigest || j.LogCursor != logCursor || j.Direction == "rollback" && direction != "rollback" {
+		terminalUninstall := admin && direction == "rollback" && j.Kind == "uninstall" && j.Status == "succeeded"
+		if (!j.CanRecover() && !terminalUninstall) || j.PlanDigest != planDigest || j.LogCursor != logCursor || j.Direction == "rollback" && direction != "rollback" {
 			return nil, ErrDeploymentState
+		}
+		if terminalUninstall {
+			if err = authorizeCompletedUninstallRollbackTx(ctx, tx, vault, j, true); err != nil {
+				return nil, err
+			}
+			j.RecoveryRequired = true
 		}
 		if err = checkDeploymentConfigurationTx(ctx, tx, j); err != nil {
 			return nil, err
@@ -549,7 +607,7 @@ func (s *Store) recoverDeployment(ctx context.Context, user, key, id, direction,
 		if direction == "rollback" {
 			code = "rollback-requested"
 		}
-		if _, err = tx.ExecContext(ctx, "UPDATE v3_deployment_jobs SET status='queued',direction=$2,error_code='',lease_owner=NULL,lease_until=NULL WHERE id=$1", id, direction); err != nil {
+		if _, err = tx.ExecContext(ctx, "UPDATE v3_deployment_jobs SET status='queued',direction=$2,error_code='',lease_owner=NULL,lease_until=NULL,recovery_required=true,finished_at=NULL WHERE id=$1", id, direction); err != nil {
 			return nil, err
 		}
 		if err = deploymentLog(ctx, tx, &j, j.Phase(), code); err != nil {
@@ -586,6 +644,11 @@ func (s *Store) ArmDeploymentRecovery(ctx context.Context, j DeploymentJob) erro
 	}
 	if err = armDeploymentConfigurationTx(ctx, tx, current); err != nil {
 		return err
+	}
+	if current.Kind == "uninstall" {
+		if err = pauseUninstallRuntimeTx(ctx, tx, current); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE v3_deployment_jobs SET recovery_required=true WHERE id=$1", j.ID); err != nil {
 		return err

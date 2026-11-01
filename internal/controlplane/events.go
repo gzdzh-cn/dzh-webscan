@@ -140,7 +140,15 @@ func (s *Store) Ingest(ctx context.Context, n Node, l Lease, b *agentv1.EventBat
 					recipients = notify.Recipients(common.M(settings["email"]))
 				}
 				for _, recipient := range recipients {
-					if _, e = tx.ExecContext(ctx, "INSERT INTO v3_notifications(node,event_id,channel,recipient,payload) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", n.ID, item.Id, channel, recipient, canonical); e != nil {
+					var notificationID int64
+					e = tx.QueryRowContext(ctx, "INSERT INTO v3_notifications(node,event_id,channel,recipient,payload) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id", n.ID, item.Id, channel, recipient, canonical).Scan(&notificationID)
+					if errors.Is(e, sql.ErrNoRows) {
+						continue
+					}
+					if e != nil {
+						return nil, nil, e
+					}
+					if e = projectNotificationTx(ctx, tx, notificationID, "event"); e != nil {
 						return nil, nil, e
 					}
 				}

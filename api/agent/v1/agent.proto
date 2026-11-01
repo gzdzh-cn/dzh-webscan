@@ -8,6 +8,9 @@ service AgentService {
   rpc FetchEvents(FetchEventsRequest) returns (EventBatch);
   rpc AckEvents(AckEventsRequest) returns (AckEventsResponse);
   rpc ReadMetrics(ReadMetricsRequest) returns (MetricsBatch);
+  // Read-only DR inventory and retained-event replay; never advances epoch.
+  rpc RecoveryState(RecoveryStateRequest) returns (RecoveryStateResponse);
+  rpc ReadRecoveryEvents(ReadRecoveryEventsRequest) returns (RecoveryEventsBatch);
   // Additive, optional capability. Only a full snapshot signed by the pinned
   // CA can advance trust; it cannot change identities or configuration.
   rpc UpdateTrust(UpdateTrustRequest) returns (UpdateTrustResponse);
@@ -33,6 +36,7 @@ message CapabilitiesResponse {
   string certificate_sha256 = 9;
   int64 certificate_not_after_unix = 10;
   bool root_trust_refresh = 11;
+  bool recovery_read = 12;
 }
 message FetchEventsRequest {
   uint64 epoch = 1;
@@ -110,4 +114,48 @@ message RefreshRootTrustResponse {
   string snapshot_sha256 = 2;
   string rotation = 3;
   string phase = 4;
+}
+
+message RecoveryStateRequest { string node_id = 1; }
+message RecoveryStateResponse {
+ string node_id = 1;
+ uint64 epoch = 2;
+ int64 configuration_version = 3;
+ string configuration_sha256 = 4;
+ string snapshot_sha256 = 5;
+ string cursor = 6;
+ int64 retained_events = 7;
+ int64 accepted_events = 8;
+ int64 pending_events = 9;
+ int64 earliest_created_unix_millis = 10;
+ int64 latest_created_unix_millis = 11;
+ int64 earliest_metrics_unix_millis = 12;
+ int64 latest_metrics_unix_millis = 13;
+ // False when historical deletion watermarks cannot prove completeness.
+ bool retention_complete = 14;
+ string retention_reason = 15;
+ int64 retention_since_unix_millis = 16;
+ int64 last_deleted_unix_millis = 17;
+ int64 deleted_events = 18;
+}
+message ReadRecoveryEventsRequest {
+ string node_id = 1;
+ string cursor = 2;
+ uint32 limit = 3;
+}
+message RecoveryEvent {
+ string id = 1;
+ bytes json = 2;
+ int64 created_unix_millis = 3;
+ bool accepted = 4;
+ int64 accepted_unix_millis = 5;
+}
+message RecoveryEventsBatch {
+ string node_id = 1;
+ string snapshot_sha256 = 2;
+ uint64 epoch = 3;
+ string next_cursor = 4;
+ repeated RecoveryEvent events = 5;
+ bool complete = 6;
+ int64 read_events = 7;
 }

@@ -238,6 +238,9 @@ func (s *Store) queueConfigurationApplication(ctx context.Context, v *Vault, c C
 		_, _, e := loadSavedConfigurationTx(op, tx, v, c, user, stage, false)
 		return e
 	}, func(tx *sql.Tx) (any, error) {
+		if e := monitoringApplicationsAvailableTx(op, tx); e != nil {
+			return nil, e
+		}
 		if e := configurationApplicationAvailableTx(op, tx); e != nil {
 			return nil, e
 		}

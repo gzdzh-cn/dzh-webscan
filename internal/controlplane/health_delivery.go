@@ -162,7 +162,7 @@ func (s *Store) FlushHealth(ctx context.Context, l Lease) error {
 				category = "health_recoveries"
 			}
 			payload := common.Map{"operation": "server_alert", "node_id": first.node, "phase": first.phase, "message": message, "members": ids, "source": "server_health"}
-			if err = enqueueNotice(ctx, tx, first.node, "server-alert:"+id, payload, category); err != nil {
+			if err = enqueueNotice(ctx, tx, first.node, "server-alert:"+id, payload, category, "server_health"); err != nil {
 				return err
 			}
 			if _, err = tx.ExecContext(ctx, "UPDATE v3_health_outbox SET batch=$1,done_at=clock_timestamp(),result='已处理通知入队' WHERE id=ANY($2::text[])", id, ids); err != nil {
@@ -256,7 +256,7 @@ func flushExistingHealthBatches(ctx context.Context, tx *sql.Tx, config common.M
 				category = "health_recoveries"
 			}
 			payload := common.Map{"operation": "server_alert", "node_id": b.node, "phase": b.phase, "message": b.message, "members": ids, "source": "server_health"}
-			if err = enqueueNotice(ctx, tx, b.node, "server-alert:"+b.id, payload, category); err != nil {
+			if err = enqueueNotice(ctx, tx, b.node, "server-alert:"+b.id, payload, category, "server_health"); err != nil {
 				return 0, err
 			}
 		}

@@ -113,7 +113,7 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 	if err != nil {
 		return out, err
 	}
-	if n.Version != p.Version || !n.Enabled || p.Manifest != w.trust.release.SHA256() || !time.Now().Before(p.Expires) {
+	if n.Version != p.Version || p.Manifest != w.trust.release.SHA256() || !time.Now().Before(p.Expires) {
 		return out, errWebDeployment
 	}
 	var key string
@@ -130,9 +130,34 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 	if json.Unmarshal(raw, &in) != nil {
 		return out, errWebDeployment
 	}
+	if in.Kind != "uninstall" && !n.Enabled {
+		return out, errWebDeployment
+	}
+	var source deploymentInstalledSource
+	var sourceCredential string
+	var sourceSSH SSHCredential
+	if in.Kind == "uninstall" {
+		var state string
+		source, sourceCredential, sourceSSH, state, err = w.store.webUninstallSource(ctx, w.trust.vault, n)
+		if err != nil {
+			return out, err
+		}
+		if state != in.InstallationState || (p.Kind == "fingerprint" || p.Kind == "credential") && in.SSHPort != sourceSSH.Port {
+			return out, errNodeUninstall
+		}
+	}
+	credentialForOperation := func() (string, SSHCredential, error) {
+		if in.Kind == "uninstall" {
+			return sourceCredential, sourceSSH, nil
+		}
+		return w.store.latestWebCredential(ctx, w.trust.vault, n.ID)
+	}
 	host, _, err := net.SplitHostPort(n.Endpoint)
 	if err != nil {
 		return out, errWebDeployment
+	}
+	if in.Kind == "uninstall" {
+		host = sourceSSH.Host
 	}
 	switch p.Kind {
 	case "fingerprint":
@@ -146,7 +171,7 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 		if err != nil {
 			return out, err
 		}
-		_, old, e := w.store.latestWebCredential(ctx, w.trust.vault, n.ID)
+		_, old, e := credentialForOperation()
 		if e == nil && old.Host == host && old.Port == in.SSHPort && old.Fingerprint != fp {
 			return out, errFingerprintChanged
 		}
@@ -164,10 +189,10 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 		if err != nil {
 			return out, err
 		}
-		return webDeploymentResult{Host: host, Port: in.SSHPort, Fingerprint: fp, FingerprintToken: token(), CredentialState: state}, nil
+		return webDeploymentResult{Host: host, Port: in.SSHPort, Fingerprint: fp, FingerprintToken: token(), CredentialState: state, SourceState: in.InstallationState}, nil
 	case "credential":
 		pin, err := w.store.preparation(ctx, w.trust.vault, p.Username, in.FingerprintPreparation)
-		if err != nil || pin.Status != "succeeded" || pin.Kind != "fingerprint" || pin.Node != n.ID || pin.Version != n.Version || pin.Result == nil || pin.Result.Host != host || pin.Result.Port != in.SSHPort || !sameCapability(pin.Result.FingerprintToken, in.FingerprintToken) {
+		if err != nil || pin.Status != "succeeded" || pin.Kind != "fingerprint" || pin.Node != n.ID || pin.Version != n.Version || pin.Result == nil || pin.Result.Host != host || pin.Result.Port != in.SSHPort || pin.Result.SourceState != in.InstallationState || !sameCapability(pin.Result.FingerprintToken, in.FingerprintToken) {
 			return out, errWebDeployment
 		}
 		state, e := w.store.webCredentialState(ctx, n.ID)
@@ -190,7 +215,7 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 			}
 		}
 		if c.Password == "" && c.PrivateKey == "" {
-			_, old, e := w.store.latestWebCredential(ctx, w.trust.vault, n.ID)
+			_, old, e := credentialForOperation()
 			if e != nil {
 				return out, e
 			}
@@ -198,6 +223,13 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 				return out, errWebDeployment
 			}
 			c = old
+		}
+		if in.Kind == "uninstall" {
+			_, err := w.store.addWebUninstallCredential(ctx, w.trust.vault, p, source, in.InstallationState, c)
+			if err != nil {
+				return out, err
+			}
+			return webDeploymentResult{Configured: true, SourceState: in.InstallationState}, nil
 		}
 		response, err := w.store.addCredential(ctx, w.trust.vault, p.Username, "web-credential-"+p.ID, n.ID, n.Version, c, func(tx *sql.Tx) error {
 			if err := provisioningAdmin(ctx, tx, p.Username); err != nil {
@@ -224,6 +256,27 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 		}
 		return webDeploymentResult{Configured: true}, nil
 	case "prepare":
+		if in.Kind == "uninstall" {
+			fp, err := readSSHHostFingerprint(ctx, host, sourceSSH.Port)
+			if err != nil {
+				return out, err
+			}
+			if fp != sourceSSH.Fingerprint {
+				return out, errFingerprintChanged
+			}
+			if err := w.stage(ctx, p, "preparing-uninstall"); err != nil {
+				return out, err
+			}
+			req, err := w.store.prepareUninstallDeployment(ctx, w.config, w.trust, n, source, sourceCredential)
+			if err != nil {
+				return out, err
+			}
+			preview, err := w.store.previewLocalDeployment(ctx, w.config, w.trust, p.Username, req)
+			if err != nil {
+				return out, err
+			}
+			return webDeploymentResult{Preview: &preview, SourceState: in.InstallationState}, nil
+		}
 		if in.Kind != "install" && in.Kind != "upgrade" {
 			return out, errWebDeployment
 		}
@@ -233,7 +286,7 @@ func (w *webDeploymentWorker) process(ctx context.Context, p deploymentPreparati
 		if err = w.stage(ctx, p, "preparing-identity"); err != nil {
 			return out, err
 		}
-		credential, c, err := w.store.latestWebCredential(ctx, w.trust.vault, n.ID)
+		credential, c, err := credentialForOperation()
 		if err != nil {
 			return out, err
 		}

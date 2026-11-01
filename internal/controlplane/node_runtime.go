@@ -29,6 +29,9 @@ func scanManagedNode(row interface{ Scan(...any) error }) (n Node, err error) {
 		state.RuntimeEnabled = &enabled.Bool
 	}
 	n.Configuration = state
+	if err == nil {
+		n.Monitoring = monitoringForNode(n)
+	}
 	return
 }
 
@@ -138,6 +141,12 @@ func runtimeBaselineTx(ctx context.Context, tx *sql.Tx, id string) (*deploymentR
 }
 
 func (s *Store) deploymentRuntimePhaseTx(ctx context.Context, tx *sql.Tx, j DeploymentJob, phase string) error {
+	if j.Kind == "uninstall" {
+		if j.Direction == "rollback" && phase == "restore" {
+			return restoreUninstallRuntimeTx(ctx, tx, j)
+		}
+		return checkUninstallRuntimeTx(ctx, tx, j)
+	}
 	if j.Kind == "recover" || j.Plan.Recovery != nil {
 		if err := checkRecoveryRuntimeTx(ctx, tx, j); err != nil {
 			return err
@@ -224,6 +233,9 @@ func (s *Store) deploymentRuntimePhaseTx(ctx context.Context, tx *sql.Tx, j Depl
 // Reconcile registration before remote work as well as in the checkpoint
 // transaction. Response loss may leave the remote ahead, never the PG pointer.
 func checkDeploymentRuntimeTx(ctx context.Context, tx *sql.Tx, j DeploymentJob) error {
+	if j.Kind == "uninstall" {
+		return checkUninstallRuntimeTx(ctx, tx, j)
+	}
 	if err := requireNodeSnapshotAvailableTx(ctx, tx, j.Node, j.Plan.TargetRuntime); err != nil {
 		return err
 	}

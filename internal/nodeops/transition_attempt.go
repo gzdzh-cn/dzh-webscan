@@ -31,6 +31,9 @@ func (b *transitionBackup) rollbackStarted(r Request) bool {
 			return true
 		}
 	}
+	if _, err := os.Lstat(filepath.Join(b.directory(r), "uninstall/restoration-intent.json")); !os.IsNotExist(err) {
+		return true
+	}
 	return false
 }
 
@@ -84,7 +87,7 @@ func (b *transitionBackup) uncaptured(r Request) (bool, []byte, error) {
 	if err != nil || attempt.Format != 1 || attempt.Binding != binding(r) {
 		return false, nil, errors.New("backup-attempt-not-proven")
 	}
-	for _, name := range []string{"quiesce.json", "snapshot", "activation", "finalized.json", "restoration/intent.json", "restoration/export.json"} {
+	for _, name := range []string{"quiesce.json", "snapshot", "activation", "finalized.json", "restoration/intent.json", "restoration/export.json", "uninstall/intent.json", "uninstall/tombstone.json"} {
 		if _, err := os.Lstat(filepath.Join(b.directory(r), name)); !os.IsNotExist(err) {
 			return false, nil, errors.New("service-effects-cannot-be-excluded")
 		}

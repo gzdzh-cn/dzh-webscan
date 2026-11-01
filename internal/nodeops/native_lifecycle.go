@@ -29,7 +29,7 @@ func newNativeLifecycle() *nativeLifecycle {
 func (*nativeLifecycle) Supports(phase string) bool { return phaseIndex(phase) >= 0 }
 
 func (n *nativeLifecycle) valid(r Request) bool {
-	return r.Validate() == nil && r.Recovery == nil && r.Spec.Mode == "native" && r.Spec.configurationValid() && n.runtime != nil && n.activation != nil && n.activation.backup != nil && n.activation.runtime == n.runtime && n.preflight != nil
+	return r.Validate() == nil && r.Recovery == nil && r.Uninstall == nil && r.Spec.Mode == "native" && r.Spec.configurationValid() && n.runtime != nil && n.activation != nil && n.activation.backup != nil && n.activation.runtime == n.runtime && n.preflight != nil
 }
 
 func (n *nativeLifecycle) Apply(r Request) (Outcome, error) {

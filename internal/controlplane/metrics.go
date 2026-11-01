@@ -21,13 +21,13 @@ import (
 )
 
 type Metrics struct {
-	WriteURL, QueryURL string
-	HTTP               *http.Client
+	WriteURL, QueryURL, RawURL string
+	HTTP                       *http.Client
 }
 
 // derivedSamples preserves raw history and adds bounded scalar series computed
-// with the same reset/missing-sample rules as the existing center. Per-device
-// detail stays in the raw series; paths and event identifiers are never labels.
+// with the same reset/missing-sample rules as the existing center. Device
+// rates use a fixed separate namespace; paths and event identifiers are never labels.
 func derivedSamples(samples []*agentv1.MetricsSample, baseline telemetry.Baseline) ([]*agentv1.MetricsSample, error) {
 	result := make([]*agentv1.MetricsSample, 0, len(samples))
 	for _, sample := range samples {
@@ -38,7 +38,18 @@ func derivedSamples(samples []*agentv1.MetricsSample, baseline telemetry.Baselin
 		if err != nil {
 			return nil, err
 		}
+		// Never derive a second trusted series from an agent-provided central
+		// namespace. Removing only its original line would still let telemetry
+		// derive a newly prefixed value from an untrusted webscan_* metric.
+		filtered := ms[:0]
+		for _, metric := range ms {
+			if !reservedCentralMetric(metric.Name) {
+				filtered = append(filtered, metric)
+			}
+		}
+		ms = filtered
 		snapshot, next := telemetry.Derive(ms, sample.UnixMillis/1000, baseline)
+		deviceMarkers, deviceRates := deviceDerivedState(ms, sample.UnixMillis, baseline, &next)
 		baseline = next
 		keys := make([]string, 0, len(snapshot.Values))
 		for key := range snapshot.Values {
@@ -46,8 +57,15 @@ func derivedSamples(samples []*agentv1.MetricsSample, baseline telemetry.Baselin
 		}
 		sort.Strings(keys)
 		var raw bytes.Buffer
-		raw.Write(sample.PrometheusText)
-		raw.WriteByte('\n')
+		// Reserve the derived device namespace for the central calculation.
+		for _, line := range strings.Split(string(sample.PrometheusText), "\n") {
+			if reservedCentralMetric(strings.TrimSpace(line)) {
+				continue
+			}
+			raw.WriteString(line)
+			raw.WriteByte('\n')
+		}
+
 		for _, key := range keys {
 			value := snapshot.Values[key]
 			if strings.Contains(key, ":") || !metricName("webscan_derived_"+key) || math.IsNaN(value) || math.IsInf(value, 0) || key == "cpu_cores" && value == 0 {
@@ -55,9 +73,80 @@ func derivedSamples(samples []*agentv1.MetricsSample, baseline telemetry.Baselin
 			}
 			fmt.Fprintf(&raw, "webscan_derived_%s{source=\"central\"} %s\n", key, strconv.FormatFloat(value, 'g', -1, 64))
 		}
+		markerKeys := make([]string, 0, len(deviceMarkers))
+		for key := range deviceMarkers {
+			markerKeys = append(markerKeys, key)
+		}
+		sort.Strings(markerKeys)
+		for _, id := range markerKeys {
+			kind, name, _ := decodeConsoleDeviceID(id)
+			fmt.Fprintf(&raw, "webscan_device_%s_sample_time_seconds{source=\"central\",device=%s} %s\n", kind, strconv.Quote(name), strconv.FormatFloat(float64(sample.UnixMillis)/1000, 'g', -1, 64))
+		}
+		if deviceRates {
+			for _, key := range keys {
+				metric, name, ok := strings.Cut(key, ":")
+				if !ok || !validConsoleDeviceName(name) {
+					continue
+				}
+				for _, candidate := range consoleDeviceMetrics {
+					if candidate.Metric != metric {
+						continue
+					}
+					value := snapshot.Values[key]
+					if value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0) {
+						fmt.Fprintf(&raw, "webscan_device_%s{source=\"central\",device=%s} %s\n", metric, strconv.Quote(name), strconv.FormatFloat(value, 'g', -1, 64))
+					}
+					break
+				}
+			}
+		}
 		result = append(result, &agentv1.MetricsSample{UnixMillis: sample.UnixMillis, PrometheusText: raw.Bytes()})
 	}
 	return result, nil
+}
+
+// Record only bounded, validated device identities in the cursor. Retaining the
+// immediately previous presence permits an explicit missing-sample marker.
+func deviceDerivedState(ms []telemetry.Metric, at int64, previous telemetry.Baseline, next *telemetry.Baseline) (map[string]bool, bool) {
+	const seenPrefix = "webscan_device_seen:"
+	const bootKey = "webscan_device_boot_time"
+	markers := map[string]bool{}
+	for key := range previous.Values {
+		if strings.HasPrefix(key, seenPrefix) {
+			id := strings.TrimPrefix(key, seenPrefix)
+			if _, _, ok := decodeConsoleDeviceID(id); ok {
+				markers[id] = true
+			}
+		}
+	}
+	boot := float64(0)
+	for _, m := range ms {
+		if m.Name == "node_boot_time_seconds" && m.Value > 0 {
+			boot = m.Value
+		}
+		if !validConsoleDeviceName(m.Labels["device"]) {
+			continue
+		}
+		for _, candidate := range consoleDeviceMetrics {
+			if candidate.Raw == m.Name {
+				id := consoleDeviceID(candidate.Kind, m.Labels["device"])
+				markers[id] = true
+				next.Values[seenPrefix+id] = 1
+				break
+			}
+		}
+	}
+	previousBoot := previous.Values[bootKey]
+	if boot > 0 {
+		next.Values[bootKey] = boot
+	} else if previousBoot > 0 {
+		next.Values[bootKey] = previousBoot
+	}
+	valid := previous.Time > 0 && at/1000 > previous.Time && at/1000-previous.Time <= 60
+	if previousBoot != boot && (previousBoot > 0 || boot > 0) {
+		valid = false
+	}
+	return markers, valid
 }
 
 var allowedLabels = map[string]bool{"cpu": true, "mode": true, "device": true, "mountpoint": true, "fstype": true, "operstate": true, "sysname": true, "release": true, "version": true, "machine": true, "nodename": true, "domainname": true, "state": true, "status": true, "kind": true, "collector": true, "type": true, "name": true, "source": true}
@@ -132,21 +221,20 @@ func (m *Metrics) Write(ctx context.Context, node string, samples []*agentv1.Met
 	if len(raw) == 0 {
 		return nil
 	}
-	r, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(m.WriteURL, "/")+"/api/v1/import", bytes.NewReader(raw))
+	if m.RawURL == "" {
+		return m.writeMetricPayload(ctx, m.WriteURL, raw)
+	}
+	history, original, e := splitMetricLayers(raw)
 	if e != nil {
 		return e
 	}
-	r.Header.Set("Content-Type", "application/stream+json")
-	resp, e := m.HTTP.Do(r)
-	if e != nil {
-		return errors.New("时序库写入失败")
+	// A partially acknowledged write is replayed with exactly the Agent's
+	// original timestamps; the collector cannot commit its PG cursor until
+	// BOTH layers acknowledge the complete batch.
+	if e = m.writeMetricPayload(ctx, m.RawURL, original); e != nil {
+		return e
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode/100 != 2 {
-		return errors.New("时序库拒绝写入")
-	}
-	return nil
+	return m.writeMetricPayload(ctx, m.WriteURL, history)
 }
 func (m *Metrics) Range(ctx context.Context, node, name string, start, end time.Time) (json.RawMessage, error) {
 	if !identifier.MatchString(node) || !metricName(name) || !end.After(start) || end.Sub(start) > 31*24*time.Hour {
@@ -209,7 +297,10 @@ func (s *Store) commitMetrics(ctx context.Context, n Node, l Lease, b *agentv1.M
 		if e != nil {
 			return e
 		}
-		snap, previous = telemetry.Derive(ms, p.UnixMillis/1000, previous)
+		var next telemetry.Baseline
+		snap, next = telemetry.Derive(ms, p.UnixMillis/1000, previous)
+		deviceDerivedState(ms, p.UnixMillis, previous, &next)
+		previous = next
 		canonicalDeploymentHealth(ms, snap.Values)
 	}
 	last := b.Samples[len(b.Samples)-1].UnixMillis

@@ -7,13 +7,15 @@ set -euo pipefail
 main() {
 cd "$(dirname "$0")/.."
 task_mode="${1:-native}"
-case "$task_mode" in native|docker|web-native|web-docker|transition|sidecars|legacy-group|pure-compose|recovery|docker-recovery|name-change|docker-name-change|backup-timer|single-boot) ;; *) printf 'Usage: %s [native|docker|web-native|web-docker|transition|sidecars|legacy-group|pure-compose|recovery|docker-recovery|name-change|docker-name-change|backup-timer|single-boot]\n' "$0" >&2; exit 2 ;; esac
+case "$task_mode" in native|docker|web-native|web-docker|transition|sidecars|legacy-group|pure-compose|recovery|docker-recovery|name-change|docker-name-change|backup-timer|watchdog|single-boot) ;; *) printf 'Usage: %s [native|docker|web-native|web-docker|transition|sidecars|legacy-group|pure-compose|recovery|docker-recovery|name-change|docker-name-change|backup-timer|watchdog|single-boot]\n' "$0" >&2; exit 2 ;; esac
+task_suite="${WEBSCAN_V3_KERNEL_SUITE:-lifecycle}"
+case "$task_suite" in lifecycle|uninstall|migration-freeze|backup-upgrade|metrics-upgrade|recovery-host) ;; *) echo 'Unknown isolated kernel suite.' >&2; exit 2 ;; esac
 task_release="${WEBSCAN_V3_KERNEL_RELEASE:-v3.0.0-local-test}"
 if [[ ! "$task_release" =~ ^v[0-9][A-Za-z0-9._-]{1,80}$ ]]; then echo 'Invalid explicit acceptance release.' >&2; exit 2; fi
 task_helper="${WEBSCAN_V3_KERNEL_HELPER:-}"
 task_native="${WEBSCAN_V3_KERNEL_NATIVE_BUNDLE:-}"
 if [[ -n "$task_helper" || -n "$task_native" || "$task_release" != v3.0.0-local-test ]]; then
-  [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == single-boot ]] || { echo 'Exact release artifact acceptance requires a web lifecycle or single boot mode.' >&2; exit 2; }
+  [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == single-boot || "$task_mode" == watchdog ]] || { echo 'Exact release artifact acceptance requires a web lifecycle or single boot mode.' >&2; exit 2; }
   for task_artifact in "$task_helper" "$task_native"; do
     [[ "$task_artifact" == /* && -f "$task_artifact" && ! -L "$task_artifact" ]] || { echo 'Explicit regular helper and native artifacts required.' >&2; exit 2; }
   done
@@ -62,8 +64,9 @@ else
     -o "$task_run/webscan" ./cmd/webscan
 fi
 printf '%s\n' "$task_release" > "$task_run/release"
+printf '%s\n' "$task_suite" > "$task_run/suite"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o "$task_run/nodeops.test" ./internal/nodeops
-if [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == backup-timer || "$task_mode" == single-boot ]]; then
+if [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == backup-timer || "$task_mode" == watchdog || "$task_mode" == single-boot ]]; then
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -ldflags "-X webscan/internal/deploy.Release=$task_release" -o "$task_run/controlplane.test" ./internal/controlplane
   cp webscan-v3.example.yaml "$task_run/webscan-v3.example.yaml"
   task_pg="${WEBSCAN_V3_WEB_KERNEL_PG_IMAGE:?explicit immutable PostgreSQL 17 image required}"
@@ -83,7 +86,7 @@ import os
 root=pathlib.Path(sys.argv[1])
 (root/'postgres-image-id').write_text(saved_image_runtime_id(root/'postgres-image.tar',os.environ.get('WEBSCAN_V3_DOCKER_CONTAINERD')=='1')+'\n')
 PGCONFIG
-  if [[ "$task_mode" == backup-timer ]]; then
+  if [[ "$task_mode" == backup-timer || "$task_mode" == watchdog ]]; then
     task_vm_image="${WEBSCAN_V3_BACKUP_TIMER_VM_IMAGE:?explicit cached immutable VictoriaMetrics image required}"
     [[ "$task_vm_image" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Cached immutable VM image ID required.' >&2; exit 2; }
     docker create --name "$task_export" --platform linux/amd64 --network none --entrypoint /bin/true "$task_vm_image" > "$task_run/vm-export.txt"
@@ -115,6 +118,11 @@ if [[ "$task_mode" == single-boot ]]; then
   [[ "$task_metrics" =~ @sha256:[a-f0-9]{64}$ ]] || { echo 'Immutable VM image required.' >&2; exit 2; }
   docker image inspect --platform linux/amd64 "$task_metrics" > "$task_run/metrics-image.json"
   docker image save --platform linux/amd64 --output "$task_run/metrics-image.tar" "$task_metrics"
+  if [[ "$task_suite" == recovery-host ]]; then
+    docker create --name "$task_export" --platform linux/amd64 --network none --entrypoint /bin/true "$task_metrics" > "$task_run/recovery-vm-export.txt"
+    docker cp "$task_export:/victoria-metrics-prod" "$task_run/victoria-metrics-prod"
+    docker rm "$task_export" > "$task_run/recovery-vm-export-cleanup.txt"
+  fi
 fi
 docker create --name "$task_export" --platform linux/amd64 --network none \
   --entrypoint /bin/true "$task_guest" > "$task_run/export-container.txt"
@@ -122,12 +130,12 @@ docker export "$task_export" > "$task_run/rootfs.tar"
 docker cp "$task_export:/boot/vmlinuz-6.1.0-54-amd64" "$task_run/vmlinuz"
 docker cp "$task_export:/boot/initrd.img-6.1.0-54-amd64" "$task_run/initrd.img"
 docker cp "$task_export:/kernel-guest-packages.txt" "$task_run/guest-packages.txt"
-if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name-change && "$task_mode" != backup-timer ]]; then
+if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name-change && "$task_mode" != backup-timer && "$task_mode" != watchdog ]]; then
   docker cp "$task_export:/usr/local/lib/webscan/agent-native.tar.gz" "$task_run/tools.tar.gz"
 fi
 docker rm -v "$task_export" > "$task_run/export-cleanup.txt"
 printf '%s\n' "$task_mode" > "$task_run/mode"
-if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name-change && "$task_mode" != backup-timer ]]; then
+if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name-change && "$task_mode" != backup-timer && "$task_mode" != watchdog ]]; then
   task_agent="${WEBSCAN_V3_AGENT_KERNEL_IMAGE:-docker.io/gzdzh/webscan-agent@sha256:0b47dd5c6c5fa84cdb9b30c6ecd8998ff1c81f05dd106cba4be3b6c0e4a8c078}"
   docker image inspect --platform linux/amd64 "$task_agent" > "$task_run/agent-image.json"
   docker image save --platform linux/amd64 --output "$task_run/agent-image.tar" "$task_agent"
@@ -228,8 +236,9 @@ mkdir -p rootfs/v3-tests rootfs/etc/systemd/system/multi-user.target.wants
 cp webscan nodeops.test rootfs/v3-tests/
 cp mode rootfs/v3-tests/mode
 cp release rootfs/v3-tests/release
+cp suite rootfs/v3-tests/suite
 printf '%s\n' "${WEBSCAN_V3_DOCKER_CONTAINERD:-0}" > rootfs/v3-tests/containerd-store
-if [ "$WEBSCAN_V3_KERNEL_MODE" != native ] && [ "$WEBSCAN_V3_KERNEL_MODE" != recovery ] && [ "$WEBSCAN_V3_KERNEL_MODE" != name-change ] && [ "$WEBSCAN_V3_KERNEL_MODE" != backup-timer ]; then
+if [ "$WEBSCAN_V3_KERNEL_MODE" != native ] && [ "$WEBSCAN_V3_KERNEL_MODE" != recovery ] && [ "$WEBSCAN_V3_KERNEL_MODE" != name-change ] && [ "$WEBSCAN_V3_KERNEL_MODE" != backup-timer ] && [ "$WEBSCAN_V3_KERNEL_MODE" != watchdog ]; then
   cp agent-native.tar.gz agent-image.tar image-proof.json rootfs/v3-tests/
   printf 'webscan-v3-disposable-dind\n' > rootfs/v3-tests/isolated-engine
   chmod 600 rootfs/v3-tests/isolated-engine rootfs/v3-tests/*.tar* rootfs/v3-tests/image-proof.json
@@ -259,9 +268,9 @@ chmod 755 rootfs/v3-tests/webscan rootfs/v3-tests/nodeops.test
 printf 'webscan-v3-networkless-kernel-guest\n' > rootfs/v3-tests/kernel-guest
 chmod 700 rootfs/v3-tests
 chmod 600 rootfs/v3-tests/kernel-guest
-if [ "$WEBSCAN_V3_KERNEL_MODE" = web-native ] || [ "$WEBSCAN_V3_KERNEL_MODE" = web-docker ] || [ "$WEBSCAN_V3_KERNEL_MODE" = backup-timer ] || [ "$WEBSCAN_V3_KERNEL_MODE" = single-boot ]; then
+if [ "$WEBSCAN_V3_KERNEL_MODE" = web-native ] || [ "$WEBSCAN_V3_KERNEL_MODE" = web-docker ] || [ "$WEBSCAN_V3_KERNEL_MODE" = backup-timer ] || [ "$WEBSCAN_V3_KERNEL_MODE" = watchdog ] || [ "$WEBSCAN_V3_KERNEL_MODE" = single-boot ]; then
   cp controlplane.test postgres-image.tar postgres-image.json postgres-image-id rootfs/v3-tests/
-  if [ "$WEBSCAN_V3_KERNEL_MODE" = backup-timer ]; then
+  if [ "$WEBSCAN_V3_KERNEL_MODE" = backup-timer ] || [ "$WEBSCAN_V3_KERNEL_MODE" = watchdog ]; then
     cp victoria-metrics-prod rootfs/v3-tests/
     chmod 700 rootfs/v3-tests/victoria-metrics-prod
   else
@@ -274,6 +283,7 @@ if [ "$WEBSCAN_V3_KERNEL_MODE" = web-native ] || [ "$WEBSCAN_V3_KERNEL_MODE" = w
 fi
 if [ "$WEBSCAN_V3_KERNEL_MODE" = single-boot ]; then
   cp metrics-image.tar single-images.json single-images.txt rootfs/v3-tests/
+  if [ -f victoria-metrics-prod ]; then cp victoria-metrics-prod rootfs/v3-tests/; chmod 700 rootfs/v3-tests/victoria-metrics-prod; fi
   chmod 600 rootfs/v3-tests/metrics-image.tar rootfs/v3-tests/single-images.json
   # Real enabled engine: the second boot must recover it without test startup.
   task_engine_feature=''
@@ -332,15 +342,23 @@ if [ "$(cat /v3-tests/mode)" = single-boot ]; then
     fi
   fi
   if [ "$task_ready" = 1 ]; then
-    export WEBSCAN_V3_SINGLE_KERNEL_PHASE="$task_phase"
     cd /workspace/internal/controlplane
-    /v3-tests/controlplane.test -test.run '^TestSingleInstallActualKernelBootRecovery$' -test.v -test.timeout 15m 2>&1 | tee /dev/ttyS0
+    if [ "$(cat /v3-tests/suite)" = recovery-host ]; then
+      export WEBSCAN_V3_TEST_RECOVERY_HOST_KERNEL=1
+      /v3-tests/controlplane.test -test.run '^TestMigrationRecoveryHostKernel.*$' -test.v -test.timeout 20m 2>&1 | tee /dev/ttyS0
+    elif [ "$(cat /v3-tests/suite)" = metrics-upgrade ]; then
+      export WEBSCAN_V3_TEST_METRICS_UPGRADE_KERNEL=1
+      /v3-tests/controlplane.test -test.run '^TestSingleMetricsUpgradeKernelPreservesOldServicesAndActiveBootOverlay$' -test.v -test.timeout 25m 2>&1 | tee /dev/ttyS0
+    else
+      export WEBSCAN_V3_SINGLE_KERNEL_PHASE="$task_phase"
+      /v3-tests/controlplane.test -test.run '^TestSingleInstallActualKernelBootRecovery$' -test.v -test.timeout 15m 2>&1 | tee /dev/ttyS0
+    fi
     task_status=$?
   else
     cat /v3-tests/image-load.log /v3-tests/engine.txt /v3-tests/dockerd.log
   fi
   printf '\nWEBSCAN_V3_SINGLE_BOOT_%s_EXIT=%s\n' "$task_phase" "$task_status"
-  if [ "$task_status" = 0 ] && [ "$task_phase" = before ]; then
+  if [ "$task_status" = 0 ] && [ "$task_phase" = before ] && [ "$(cat /v3-tests/suite)" != metrics-upgrade ] && [ "$(cat /v3-tests/suite)" != recovery-host ]; then
     touch /v3-tests/first-boot-passed
     sync
     systemctl reboot
@@ -371,7 +389,7 @@ if [ "$(cat /v3-tests/mode)" != native ] && [ "$(cat /v3-tests/mode)" != recover
     sleep 1
   done
   task_images=0
-  if [ "$task_ready" = 1 ] && [ "$(cat /v3-tests/mode)" = backup-timer ]; then
+  if [ "$task_ready" = 1 ] && { [ "$(cat /v3-tests/mode)" = backup-timer ] || [ "$(cat /v3-tests/mode)" = watchdog ]; }; then
     task_images=1
   elif [ "$task_ready" = 1 ] && docker load --input /v3-tests/agent-image.tar > /v3-tests/image-load.log 2>&1; then
     task_images=1
@@ -382,11 +400,11 @@ if [ "$(cat /v3-tests/mode)" != native ] && [ "$(cat /v3-tests/mode)" != recover
   if [ "$task_images" = 1 ] && { [ "$(cat /v3-tests/mode)" = legacy-group ] || [ "$(cat /v3-tests/mode)" = pure-compose ]; }; then
     docker load --input /v3-tests/legacy-agent.tar >> /v3-tests/image-load.log 2>&1 || task_images=0
   fi
-  if [ "$task_images" = 1 ] && { [ "$(cat /v3-tests/mode)" = web-native ] || [ "$(cat /v3-tests/mode)" = web-docker ] || [ "$(cat /v3-tests/mode)" = backup-timer ]; }; then
+  if [ "$task_images" = 1 ] && { [ "$(cat /v3-tests/mode)" = web-native ] || [ "$(cat /v3-tests/mode)" = web-docker ] || [ "$(cat /v3-tests/mode)" = backup-timer ] || [ "$(cat /v3-tests/mode)" = watchdog ]; }; then
     task_images=0
-    if docker load --input /v3-tests/postgres-image.tar >>/v3-tests/image-load.log 2>&1 && { [ "$(cat /v3-tests/mode)" = backup-timer ] || docker load --input /v3-tests/central-image.tar >>/v3-tests/image-load.log 2>&1; }; then
+    if docker load --input /v3-tests/postgres-image.tar >>/v3-tests/image-load.log 2>&1 && { [ "$(cat /v3-tests/mode)" = backup-timer ] || [ "$(cat /v3-tests/mode)" = watchdog ] || docker load --input /v3-tests/central-image.tar >>/v3-tests/image-load.log 2>&1; }; then
       task_pg_id="$(cat /v3-tests/postgres-image-id)"
-      if docker run -d --name webscan-web-kernel-postgres --network host --restart no \
+      if docker run -d --name webscan-web-kernel-postgres --label io.webscan.test=watchdog-kernel --network host --restart no \
         -e POSTGRES_HOST_AUTH_METHOD=trust -e POSTGRES_DB=webscan -e PGPORT=55432 \
         "$task_pg_id" postgres -c max_wal_size=128MB -c min_wal_size=32MB > /v3-tests/postgres-container.txt 2>&1; then
         for task_attempt in $(seq 1 90); do
@@ -396,12 +414,33 @@ if [ "$(cat /v3-tests/mode)" != native ] && [ "$(cat /v3-tests/mode)" != recover
       fi
     fi
   fi
-  if [ "$task_images" = 1 ] && [ "$(cat /v3-tests/mode)" = backup-timer ]; then
+  if [ "$task_images" = 1 ] && [ "$(cat /v3-tests/mode)" = watchdog ]; then
+    export WEBSCAN_V3_HOST_WATCHDOG_KERNEL=1
+    export WEBSCAN_V3_WATCHDOG_PG_CONTAINER=webscan-web-kernel-postgres
+    export WEBSCAN_V3_TEST_DSN='postgres://postgres@127.0.0.1:55432/webscan?sslmode=disable'
+    export WEBSCAN_V3_TEST_BACKUP_HELPER=/v3-tests/webscan
+    export WEBSCAN_V3_TEST_VM_EXECUTABLE=/v3-tests/victoria-metrics-prod
+    cd /workspace/internal/controlplane
+    task_watchdog_test='^TestHostWatchdogKernelIndependentActualServices$'
+    if [ "$(cat /v3-tests/suite)" = migration-freeze ]; then
+      export WEBSCAN_V3_MIGRATION_FREEZE_KERNEL=1
+      task_watchdog_test='^TestMigrationSessionKernelFreezeActualSystemdAndDockerWriters$'
+    fi
+    /v3-tests/controlplane.test -test.run "$task_watchdog_test" -test.v -test.timeout 15m 2>&1 | tee /dev/ttyS0
+    task_status=$?
+    docker logs webscan-web-kernel-postgres > /v3-tests/postgres.log 2>&1
+    docker rm -fv webscan-web-kernel-postgres >/dev/null 2>&1
+  elif [ "$task_images" = 1 ] && [ "$(cat /v3-tests/mode)" = backup-timer ]; then
     export WEBSCAN_V3_TEST_DSN='postgres://postgres@127.0.0.1:55432/webscan?sslmode=disable'
     export WEBSCAN_V3_TEST_BACKUP_SYSTEMD=1 WEBSCAN_V3_TEST_BACKUP_HELPER=/v3-tests/webscan
     export WEBSCAN_V3_TEST_VM_EXECUTABLE=/v3-tests/victoria-metrics-prod
     cd /workspace/internal/controlplane
-    /v3-tests/controlplane.test -test.run '^TestSingleBackupActualSignedHelperAndEnginesLinux$' -test.v -test.timeout 12m 2>&1 | tee /dev/ttyS0
+    task_backup_test='^TestSingleBackupActualSignedHelperAndEnginesLinux$'
+    if [ "$(cat /v3-tests/suite)" = backup-upgrade ]; then
+      export WEBSCAN_V3_TEST_BACKUP_UPGRADE_KERNEL=1
+      task_backup_test='^TestSingleBackupUpgradeKernelSignedHelperSystemdAndFullRestore$'
+    fi
+    /v3-tests/controlplane.test -test.run "$task_backup_test" -test.v -test.timeout 12m 2>&1 | tee /dev/ttyS0
     task_status=$?
     docker logs webscan-web-kernel-postgres > /v3-tests/postgres.log 2>&1
     docker rm -fv webscan-web-kernel-postgres >/dev/null 2>&1
@@ -409,7 +448,9 @@ if [ "$(cat /v3-tests/mode)" != native ] && [ "$(cat /v3-tests/mode)" != recover
     export WEBSCAN_V3_WEB_KERNEL_MODE="$(cat /v3-tests/mode | sed 's/^web-//')"
     export WEBSCAN_V3_TEST_DSN='postgres://postgres@127.0.0.1:55432/webscan?sslmode=disable'
     cd /workspace/internal/controlplane
-    /v3-tests/controlplane.test -test.run '^TestWebDeploymentKernelPublicAPIAndActualServices$' -test.v -test.timeout 30m 2>&1 | tee /dev/ttyS0
+    task_test='^TestWebDeploymentKernelPublicAPIAndActualServices$'
+    if [ "$(cat /v3-tests/suite)" = uninstall ]; then task_test='^TestWebUninstallKernelPublicAPIAndActualServices$'; fi
+    /v3-tests/controlplane.test -test.run "$task_test" -test.v -test.timeout 50m 2>&1 | tee /dev/ttyS0
     task_status=$?
     docker logs webscan-web-kernel-postgres > /v3-tests/postgres.log 2>&1
     docker rm -fv webscan-web-kernel-postgres >/dev/null 2>&1
@@ -456,7 +497,7 @@ OnFailure=poweroff.target
 [Service]
 Type=oneshot
 ExecStart=/bin/bash /v3-tests/run.sh
-TimeoutStartSec=30min
+TimeoutStartSec=55min
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -464,7 +505,7 @@ ln -s ../v3-kernel-validation.service rootfs/etc/systemd/system/multi-user.targe
 # Root disk lives only in this private test directory. No loop device or mount.
 task_disk_size=4G
 if [ "$WEBSCAN_V3_KERNEL_MODE" != native ] && [ "$WEBSCAN_V3_KERNEL_MODE" != recovery ] && [ "$WEBSCAN_V3_KERNEL_MODE" != name-change ]; then task_disk_size=8G; fi
-if [ "$WEBSCAN_V3_KERNEL_MODE" = web-native ] || [ "$WEBSCAN_V3_KERNEL_MODE" = web-docker ] || [ "$WEBSCAN_V3_KERNEL_MODE" = single-boot ]; then task_disk_size=10G; fi
+if [ "$WEBSCAN_V3_KERNEL_MODE" = web-native ] || [ "$WEBSCAN_V3_KERNEL_MODE" = web-docker ] || [ "$WEBSCAN_V3_KERNEL_MODE" = watchdog ] || [ "$WEBSCAN_V3_KERNEL_MODE" = single-boot ]; then task_disk_size=10G; fi
 truncate -s "$task_disk_size" guest.ext4
 mkfs.ext4 -q -F -d rootfs guest.ext4
 sha256sum vmlinuz initrd.img webscan nodeops.test rootfs.tar > inputs.sha256
@@ -489,7 +530,7 @@ if [[ "$task_mode" == single-boot ]]; then task_reboot_flags=(); fi
 docker run --rm --name "$task_vm" --platform linux/arm64 --network none \
   --read-only --cpus 3 --memory 4g --tmpfs /tmp:rw,nosuid,size=64m \
   -v "$task_run:/validation:rw" --entrypoint /usr/bin/timeout "$task_tools" \
-  2000 qemu-system-x86_64 -accel tcg,thread=multi -cpu max -smp 2 -m 1536 \
+  3600 qemu-system-x86_64 -accel tcg,thread=multi -cpu max -smp 2 -m 1536 \
   -nodefaults -no-user-config -display none -serial stdio -monitor none \
   -nic none ${task_reboot_flags[@]+"${task_reboot_flags[@]}"} \
   -kernel /validation/vmlinuz -initrd /validation/initrd.img \
@@ -506,15 +547,33 @@ if [[ "$task_mode" != native && "$task_mode" != recovery && "$task_mode" != name
     'for task_file in dockerd.log engine.txt image-load.log; do debugfs -R "cat /v3-tests/$task_file" /validation/guest.ext4 > "/validation/guest-$task_file" 2>>/validation/guest-log-extraction.log; done'
 fi
 rg -q '^WEBSCAN_V3_GUEST_TEST_EXIT=0$' "$task_run/guest-test.log"
-if [[ "$task_mode" == single-boot ]]; then
+if [[ "$task_mode" == single-boot && "$task_suite" == recovery-host ]]; then
+  rg -q '^--- PASS: TestMigrationRecoveryHostKernelSignedArchiveAndActualIsolation ' "$task_run/guest-test.log"
+elif [[ "$task_mode" == single-boot && "$task_suite" == metrics-upgrade ]]; then
+  rg -q '^--- PASS: TestSingleMetricsUpgradeKernelPreservesOldServicesAndActiveBootOverlay ' "$task_run/guest-test.log"
+elif [[ "$task_mode" == single-boot ]]; then
   rg -q '^WEBSCAN_V3_SINGLE_BOOT_before_EXIT=0$' "$task_run/guest-test.log"
   rg -q '^WEBSCAN_V3_SINGLE_BOOT_after_EXIT=0$' "$task_run/guest-test.log"
   [[ "$(rg -c '^--- PASS: TestSingleInstallActualKernelBootRecovery ' "$task_run/guest-test.log")" = 2 ]]
+elif [[ "$task_mode" == watchdog ]]; then
+  if [[ "$task_suite" == migration-freeze ]]; then
+    rg -q '^--- PASS: TestMigrationSessionKernelFreezeActualSystemdAndDockerWriters ' "$task_run/guest-test.log"
+  else
+    rg -q '^--- PASS: TestHostWatchdogKernelIndependentActualServices ' "$task_run/guest-test.log"
+  fi
 elif [[ "$task_mode" == backup-timer ]]; then
-  rg -q '^--- PASS: TestSingleBackupActualSignedHelperAndEnginesLinux ' "$task_run/guest-test.log"
-  rg -q 'actual systemd default daily timer enabled/active' "$task_run/guest-test.log"
+  if [[ "$task_suite" == backup-upgrade ]]; then
+    rg -q '^--- PASS: TestSingleBackupUpgradeKernelSignedHelperSystemdAndFullRestore ' "$task_run/guest-test.log"
+  else
+    rg -q '^--- PASS: TestSingleBackupActualSignedHelperAndEnginesLinux ' "$task_run/guest-test.log"
+    rg -q 'actual systemd default daily timer enabled/active' "$task_run/guest-test.log"
+  fi
 elif [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == single-boot ]]; then
-  rg -q '^--- PASS: TestWebDeploymentKernelPublicAPIAndActualServices ' "$task_run/guest-test.log"
+  if [[ "$task_suite" == uninstall ]]; then
+    rg -q '^--- PASS: TestWebUninstallKernelPublicAPIAndActualServices ' "$task_run/guest-test.log"
+  else
+    rg -q '^--- PASS: TestWebDeploymentKernelPublicAPIAndActualServices ' "$task_run/guest-test.log"
+  fi
 elif [[ "$task_mode" == pure-compose ]]; then
   rg -q '^--- PASS: TestKernelPureComposeGroupMigrateAndRollback ' "$task_run/guest-test.log"
   rg -q '^    --- PASS: TestKernelPureComposeGroupMigrateAndRollback/to-native ' "$task_run/guest-test.log"

@@ -182,6 +182,11 @@ func (s *Store) saveRetentionPolicy(ctx context.Context, user, key string, p Ret
 	for k, v := range map[string]int{"sqlite_events_days": p.Events, "security_events_days": p.Security, "website_incidents_days": p.Websites, "server_alerts_days": p.Servers, "delivery_records_days": p.Notifications} {
 		r[k] = v
 	}
+	if s.HostQuota != nil {
+		if _, err = s.HostQuota.PrepareSettings(ctx, tx, version, version+1); err != nil {
+			return nil, err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, "UPDATE v3_settings SET version=version+1,payload=$1,updated_at=clock_timestamp() WHERE id=1", common.JSON(root)); err != nil {
 		return nil, err
 	}

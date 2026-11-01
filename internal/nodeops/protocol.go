@@ -23,6 +23,7 @@ var forward = []string{"preflight", "stage", "backup", "activate", "verify", "fi
 var rollback = []string{"restore", "verify-rollback"}
 
 type Spec struct {
+	Action             string   `json:"action,omitempty"`
 	Mode               string   `json:"mode"`
 	MetricsPort        int      `json:"metrics_port"`
 	MonitorDirectories []string `json:"monitor_directories"`
@@ -42,6 +43,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.Action != "" && s.Action != "uninstall" {
+		return errors.New("invalid-spec")
+	}
 	if s.Mode != "native" && s.Mode != "docker" || s.MetricsPort < 1024 || s.MetricsPort > 65535 || len(s.MonitorDirectories) < 1 || len(s.MonitorDirectories) > 64 || s.ArtifactBytes > 4<<30 {
 		return errors.New("invalid-spec")
 	}
@@ -116,15 +120,35 @@ func validDigest(s string) bool {
 }
 
 type Request struct {
-	Protocol   int                `json:"protocol"`
-	Operation  string             `json:"operation"`
-	Job        string             `json:"job"`
-	Node       string             `json:"node"`
-	PlanDigest string             `json:"plan_digest"`
-	Epoch      int64              `json:"epoch"`
-	Phase      string             `json:"phase"`
-	Spec       Spec               `json:"spec"`
-	Recovery   *RecoveryReference `json:"recovery,omitempty"`
+	Protocol   int                 `json:"protocol"`
+	Operation  string              `json:"operation"`
+	Job        string              `json:"job"`
+	Node       string              `json:"node"`
+	PlanDigest string              `json:"plan_digest"`
+	Epoch      int64               `json:"epoch"`
+	Phase      string              `json:"phase"`
+	Spec       Spec                `json:"spec"`
+	Recovery   *RecoveryReference  `json:"recovery,omitempty"`
+	Uninstall  *UninstallReference `json:"uninstall,omitempty"`
+	Reinstall  *ReinstallReference `json:"reinstall,omitempty"`
+}
+
+// Uninstall binds the actual installation, not an editable desired config.
+// A restored installation also names the independently verified replacement.
+type UninstallReference struct {
+	SourceJob             string `json:"source_job"`
+	SourcePlanDigest      string `json:"source_plan_digest"`
+	CaptureSHA256         string `json:"capture_sha256"`
+	ActiveSHA256          string `json:"active_sha256"`
+	RestorationJob        string `json:"restoration_job,omitempty"`
+	RestorationPlanDigest string `json:"restoration_plan_digest,omitempty"`
+	RestorationSHA256     string `json:"restoration_sha256,omitempty"`
+}
+
+type ReinstallReference struct {
+	SourceJob        string `json:"source_job"`
+	SourcePlanDigest string `json:"source_plan_digest"`
+	TombstoneSHA256  string `json:"tombstone_sha256"`
 }
 
 // Recovery uses a new task identity and bounded private evidence references.
@@ -139,6 +163,14 @@ type RecoveryReference struct {
 }
 
 func (r Request) identityDigest() string {
+	if r.Uninstall != nil || r.Reinstall != nil {
+		raw, _ := json.Marshal(struct {
+			Spec      Spec
+			Uninstall *UninstallReference `json:",omitempty"`
+			Reinstall *ReinstallReference `json:",omitempty"`
+		}{r.Spec, r.Uninstall, r.Reinstall})
+		return sha(append([]byte("webscan-v3/node-lifecycle/v1\x00"), raw...))
+	}
 	if r.Recovery == nil {
 		return r.Spec.digest()
 	}
@@ -158,6 +190,24 @@ func (r Request) sourceRequest() Request {
 func (r Request) Validate() error {
 	if r.Protocol != Protocol || (r.Operation != "inspect" && r.Operation != "apply") || !idPattern.MatchString(r.Job) || !idPattern.MatchString(r.Node) || !validDigest(r.PlanDigest) || r.Epoch < 1 || phaseIndex(r.Phase) < 0 {
 		return errors.New("invalid-request")
+	}
+	if (r.Spec.Action == "uninstall") != (r.Uninstall != nil) || r.Uninstall != nil && (r.Recovery != nil || r.Reinstall != nil) || r.Reinstall != nil && r.Recovery != nil {
+		return errors.New("invalid-action")
+	}
+	if q := r.Uninstall; q != nil {
+		if !r.Spec.configurationValid() || !idPattern.MatchString(q.SourceJob) || q.SourceJob == r.Job || !validDigest(q.SourcePlanDigest) || !validDigest(q.CaptureSHA256) || !validDigest(q.ActiveSHA256) {
+			return errors.New("invalid-uninstall-reference")
+		}
+		if q.RestorationJob != "" || q.RestorationPlanDigest != "" || q.RestorationSHA256 != "" {
+			if !idPattern.MatchString(q.RestorationJob) || q.RestorationJob == r.Job || q.RestorationJob == q.SourceJob || !validDigest(q.RestorationPlanDigest) || !validDigest(q.RestorationSHA256) {
+				return errors.New("invalid-uninstall-reference")
+			}
+		}
+	}
+	if q := r.Reinstall; q != nil {
+		if !r.Spec.configurationValid() || !idPattern.MatchString(q.SourceJob) || q.SourceJob == r.Job || !validDigest(q.SourcePlanDigest) || !validDigest(q.TombstoneSHA256) {
+			return errors.New("invalid-reinstall-reference")
+		}
 	}
 	if q := r.Recovery; q != nil {
 		if (r.Phase != "restore" && r.Phase != "verify-rollback") || !r.Spec.configurationValid() || !idPattern.MatchString(q.SourceJob) || !idPattern.MatchString(q.HeadJob) || q.SourceJob == q.HeadJob || q.SourceJob == r.Job || q.HeadJob == r.Job || !validDigest(q.SourcePlanDigest) || !validDigest(q.HeadPlanDigest) || !validDigest(q.CaptureSHA256) || !validDigest(q.ActiveSHA256) {
@@ -201,6 +251,32 @@ type Result struct {
 	Code         string                `json:"code"`
 	Outcome      Outcome               `json:"outcome"`
 	Installation *InstallationEvidence `json:"installation,omitempty"`
+	Removal      *RemovalEvidence      `json:"removal,omitempty"`
+	Restoration  *RestorationEvidence  `json:"restoration,omitempty"`
+}
+
+type RemovalEvidence struct {
+	CaptureSHA256   string `json:"capture_sha256"`
+	IntentSHA256    string `json:"intent_sha256"`
+	PreservedSHA256 string `json:"preserved_sha256"`
+	TombstoneSHA256 string `json:"tombstone_sha256"`
+}
+
+func (e RemovalEvidence) Valid() bool {
+	return validDigest(e.CaptureSHA256) && validDigest(e.IntentSHA256) && validDigest(e.PreservedSHA256) && validDigest(e.TombstoneSHA256)
+}
+
+type RestorationEvidence struct {
+	CaptureSHA256   string `json:"capture_sha256,omitempty"`
+	IntentSHA256    string `json:"intent_sha256"`
+	ActiveSHA256    string `json:"active_sha256"`
+	ObjectSHA256    string `json:"object_sha256"`
+	PreservedSHA256 string `json:"preserved_sha256"`
+	NoEffects       bool   `json:"no_effects,omitempty"`
+}
+
+func (e RestorationEvidence) Valid() bool {
+	return (e.NoEffects && e.CaptureSHA256 == "" || !e.NoEffects && validDigest(e.CaptureSHA256)) && validDigest(e.IntentSHA256) && validDigest(e.ActiveSHA256) && validDigest(e.ObjectSHA256) && validDigest(e.PreservedSHA256)
 }
 
 // InstallationEvidence contains only immutable digests. It lets the control

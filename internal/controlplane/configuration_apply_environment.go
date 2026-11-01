@@ -152,6 +152,9 @@ func (s *Store) inspectApplicationEnvironment(ctx context.Context, v *Vault, c C
 	defer stop()
 	var wg sync.WaitGroup
 	checks := make([]configurationLocalCheck, 3)
+	if target.Metrics.RawURL != "" {
+		checks = append(checks, configurationLocalCheck{}, configurationLocalCheck{})
+	}
 	wg.Add(3)
 	go func() { defer wg.Done(); checks[0] = s.checkConfigurationDatabase(network, rawDSN) }()
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext, TLSHandshakeTimeout: 3 * time.Second, ResponseHeaderTimeout: 3 * time.Second, MaxResponseHeaderBytes: 16 << 10, MaxIdleConns: 2, MaxIdleConnsPerHost: 1, DisableCompression: true}
@@ -165,6 +168,19 @@ func (s *Store) inspectApplicationEnvironment(ctx context.Context, v *Vault, c C
 		defer wg.Done()
 		checks[2] = checkConfigurationMetricsImport(network, client, target.Metrics.WriteURL)
 	}()
+	if target.Metrics.RawURL != "" {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			checks[3] = checkConfigurationMetricsQuery(network, client, target.Metrics.RawURL)
+			checks[3].Component = "raw_metrics_query_api"
+		}()
+		go func() {
+			defer wg.Done()
+			checks[4] = checkConfigurationMetricsImport(network, client, target.Metrics.RawURL)
+			checks[4].Component = "raw_metrics_write_api"
+		}()
+	}
 	wg.Wait()
 	out.Checks = checks
 	if e = op.Err(); e != nil {

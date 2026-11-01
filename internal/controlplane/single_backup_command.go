@@ -116,7 +116,11 @@ func restoreSingleBackupOffline(ctx context.Context, directory, expected, output
 	defer from.Close()
 	actual := metricsSnapshotManifest{Files: []metricsSnapshotFile{}, Directories: []string{}}
 	var total int64
-	for _, name := range []string{"host", "postgres"} {
+	components := []string{"host", "postgres"}
+	if manifest.HostWatchdog != nil {
+		components = append(components, "watchdog")
+	}
+	for _, name := range components {
 		if unix.Mkdirat(int(stage.directory.Fd()), name, 0700) != nil {
 			return errSingleBackup
 		}
@@ -143,12 +147,12 @@ func restoreSingleBackupOffline(ctx context.Context, directory, expected, output
 	// over files that might have been changed between verification and copy.
 	wanted := metricsSnapshotManifest{Files: []metricsSnapshotFile{}, Directories: []string{}}
 	for _, file := range manifest.Files {
-		if filepath.Dir(file.Path) == "postgres" || len(file.Path) > 5 && file.Path[:5] == "host/" {
+		if filepath.Dir(file.Path) == "postgres" || filepath.Dir(file.Path) == "watchdog" || len(file.Path) > 5 && file.Path[:5] == "host/" {
 			wanted.Files = append(wanted.Files, file)
 		}
 	}
 	for _, directory := range manifest.Directories {
-		if directory == "postgres" || directory == "host" || len(directory) > 5 && directory[:5] == "host/" {
+		if directory == "postgres" || directory == "watchdog" || directory == "host" || len(directory) > 5 && directory[:5] == "host/" {
 			wanted.Directories = append(wanted.Directories, directory)
 		}
 	}
@@ -160,10 +164,15 @@ func restoreSingleBackupOffline(ctx context.Context, directory, expected, output
 	if err := restoreMetricsSnapshot(ctx, filepath.Join(directory, "metrics"), manifest.Metrics, filepath.Join(stage.path, "metrics")); err != nil {
 		return errSingleBackup
 	}
+	if manifest.RawMetrics != "" {
+		if err := restoreMetricsSnapshot(ctx, filepath.Join(directory, "metrics-raw"), manifest.RawMetrics, filepath.Join(stage.path, "metrics-raw")); err != nil {
+			return errSingleBackup
+		}
+	}
 	if _, err := writeSingleBackupJSON(stage.directory, "recovery-manifest.json", manifest); err != nil {
 		return err
 	}
-	if _, err := writeSingleBackupJSON(stage.directory, "recovery-state.json", map[string]any{"backup_manifest_sha256": expected, "staged_at": time.Now().UTC(), "runtime_started": false, "postgres_imported": false, "cutover_authorized": false, "requires_node_epoch_reconciliation": true, "requires_latest_retirement_reconciliation": true}); err != nil {
+	if _, err := writeSingleBackupJSON(stage.directory, "recovery-state.json", map[string]any{"backup_manifest_sha256": expected, "staged_at": time.Now().UTC(), "runtime_started": false, "postgres_imported": false, "cutover_authorized": false, "requires_node_epoch_reconciliation": true, "requires_latest_retirement_reconciliation": true, "requires_watchdog_reconciliation": manifest.HostWatchdog != nil}); err != nil {
 		return err
 	}
 	return stage.publish(ctx)

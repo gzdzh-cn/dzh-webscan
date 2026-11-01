@@ -23,6 +23,7 @@ const job = (status: 'running' | 'succeeded' = 'running'): V3DeploymentDetail =>
 const ok = (data: unknown) => new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } })
 async function settle() { for (let i = 0; i < 18; i++) { await Promise.resolve(); await nextTick() }; if (!vi.isFakeTimers()) await new Promise(resolve => setTimeout(resolve, 20)) }
 async function mount(component: Component, path: string, client = new ControlV3(), role: 'admin' | 'viewer' = 'admin') {
+  if (!vi.isMockFunction(client.monitoringRules)) vi.spyOn(client, 'monitoringRules').mockResolvedValue({version:'1',rules:{roots:['/srv/test-site'],extensions:['.php'],important_filenames:['.htaccess'],critical_paths:[],exclude_paths:[],reconciliation_interval_hours:6}})
   if (!vi.isMockFunction(client.notificationStats)) vi.spyOn(client, 'notificationStats').mockResolvedValue({items:[],timezone:'Asia/Shanghai',group_by:'created_at'})
   if (!vi.isMockFunction(client.serverMetrics)) vi.spyOn(client, 'serverMetrics').mockResolvedValue({points: [], resolution_seconds: 30, start: 0, end: 0})
   if (!vi.isMockFunction(client.websiteIncidents)) vi.spyOn(client, 'websiteIncidents').mockResolvedValue({items: [], next_cursor: ''})
@@ -109,7 +110,7 @@ it('shows real zero metrics while leaving missing values and versions unknown', 
   expect(host.textContent).toContain('未知')
 })
 
-it('saves only metadata with a stable retry key and visible persistent failure feedback', async () => {
+it('saves new-node metadata and inherited rules with a stable retry key and visible persistent failure feedback', async () => {
   const client = new ControlV3()
   vi.spyOn(client, 'servers').mockResolvedValue({ items: [], next_cursor: '', limit: 20 })
   const save = vi.spyOn(client, 'saveServer').mockRejectedValueOnce(new Error('配置版本已变化')).mockResolvedValueOnce({ id: 'new-node', version: 1, message: '配置已保存，尚未部署' })
@@ -124,7 +125,7 @@ it('saves only metadata with a stable retry key and visible persistent failure f
   button('仅保存', dialog).click(); await settle()
   expect(save).toHaveBeenCalledTimes(2)
   expect(save.mock.calls[0]?.[2]).toBe(save.mock.calls[1]?.[2])
-  expect(save.mock.calls[0]?.[0]).toEqual({ id: 'new-node', name: '测试服务器', endpoint: '192.0.2.11:19100', server_name: 'node.example.test', enabled: true, mode: 'docker' })
+  expect(save.mock.calls[0]?.[0]).toEqual({ id: 'new-node', name: '测试服务器', endpoint: '192.0.2.11:19100', server_name: 'node.example.test', enabled: true, mode: 'docker', monitoring: {source:'inherited',rules_version:'1',rules:{roots:['/srv/test-site'],extensions:['.php'],important_filenames:['.htaccess'],critical_paths:[],exclude_paths:[],reconciliation_interval_hours:6}} })
   expect(save.mock.calls[0]?.[1]).toBe(0)
   expect(host.textContent).toContain('配置已保存，尚未部署')
 })

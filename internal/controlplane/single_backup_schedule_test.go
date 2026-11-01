@@ -195,7 +195,7 @@ func TestSingleBackupScheduleDefaultsAndAuthenticatedHelper(t *testing.T) {
 		t.Fatal("existing policy files overwritten")
 	}
 	service, timer := singleBackupScheduleUnits(policy, source)
-	if !bytes.Contains(timer, []byte("OnCalendar=*-*-* 03:00:00")) || !bytes.Contains(timer, []byte("Persistent=true")) || bytes.Contains(service, []byte("Requires=")) || bytes.Contains(service, []byte("PartOf=")) {
+	if !bytes.Contains(timer, []byte("OnCalendar=*-*-* *:*:00")) || !bytes.Contains(timer, []byte("Persistent=true")) || bytes.Contains(service, []byte("Requires=")) || bytes.Contains(service, []byte("PartOf=")) {
 		t.Fatal("unsafe timer/stack coupling")
 	}
 }

@@ -25,6 +25,7 @@ var errFingerprintChanged = errors.New("SSH 主机指纹与已固定指纹不同
 // No public request can select an executable, certificate directory or command.
 // These inputs are sealed immediately and never enter job plans/audit receipts.
 type webDeploymentInput struct {
+	InstallationState      string `json:"installation_state,omitempty"`
 	Expected               int64  `json:"expected_version"`
 	Kind                   string `json:"kind,omitempty"`
 	SSHPort                int    `json:"ssh_port,omitempty"`
@@ -59,6 +60,7 @@ type deploymentPreparation struct {
 	Result          *webDeploymentResult `json:"result,omitempty"`
 }
 type webDeploymentResult struct {
+	SourceState      string             `json:"source_state,omitempty"`
 	CredentialState  string             `json:"credential_state,omitempty"`
 	Host             string             `json:"host,omitempty"`
 	Port             int                `json:"port,omitempty"`
@@ -103,6 +105,27 @@ func (s *Store) submitPreparation(ctx context.Context, t *deploymentTrust, user,
 	if t == nil || !identifier.MatchString(node) || in.Expected < 1 || (kind != "fingerprint" && kind != "credential" && kind != "prepare" && kind != "confirm") {
 		return nil, errWebDeployment
 	}
+	if kind == "confirm" {
+		prepared, err := s.preparation(ctx, t.vault, user, in.Preparation)
+		if err != nil || prepared.Result == nil || prepared.Result.Preview == nil {
+			return nil, errWebDeployment
+		}
+		in.Kind = prepared.Result.Preview.Kind
+	}
+	if in.Kind == "uninstall" {
+		n, err := scanNode(s.DB.QueryRowContext(ctx, "SELECT "+nodeColumns+" FROM v3_nodes WHERE id=$1 AND removed_at IS NULL", node))
+		if err != nil || n.Version != in.Expected {
+			return nil, ErrConflict
+		}
+		_, _, c, state, err := s.webUninstallSource(ctx, t.vault, n)
+		if err != nil {
+			return nil, err
+		}
+		if (kind == "fingerprint" || kind == "credential") && in.SSHPort != c.Port {
+			return nil, errNodeUninstall
+		}
+		in.InstallationState = state
+	}
 	raw, err := json.Marshal(in)
 	defer clear(raw)
 	if err != nil {
@@ -130,7 +153,7 @@ func (s *Store) submitPreparation(ctx context.Context, t *deploymentTrust, user,
 		if err != nil {
 			return nil, err
 		}
-		if n.Version != in.Expected || !n.Enabled {
+		if n.Version != in.Expected || in.Kind != "uninstall" && !n.Enabled {
 			return nil, ErrConflict
 		}
 		if _, _, _, err = deploymentPreviewState(ctx, tx, n, DeploymentRequest{}); err != nil {

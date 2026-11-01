@@ -6,7 +6,7 @@ import (
 	"errors"
 )
 
-const SchemaVersion = 38
+const SchemaVersion = 52
 
 // A separate migration per version is intentional: CREATE IF NOT EXISTS is
 // insufficient to upgrade an already initialized control plane.
@@ -60,6 +60,9 @@ func (s *Store) Upgrade(ctx context.Context, backupDirectory string) error {
 		return errors.New("数据库版本高于当前程序，已停止迁移")
 	}
 	if version == SchemaVersion {
+		if err = consumeMigrationRestoreCheckpointTx(ctx, tx); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	if version > 0 {
@@ -303,6 +306,93 @@ func (s *Store) Upgrade(ctx context.Context, backupDirectory string) error {
 		if _, err = tx.ExecContext(ctx, rootRotationSchema); err != nil {
 			return err
 		}
+		version = 38
+	}
+	if version == 38 {
+		if _, err = tx.ExecContext(ctx, monitoringApplicationSchema); err != nil {
+			return err
+		}
+		version = 39
+	}
+	if version == 39 {
+		if _, err = tx.ExecContext(ctx, deploymentHistoryDeleteSchema); err != nil {
+			return err
+		}
+		version = 40
+	}
+	if version == 40 {
+		if _, err = tx.ExecContext(ctx, deploymentUninstallSchema); err != nil {
+			return err
+		}
+		version = 41
+	}
+	if version == 41 {
+		if _, err = tx.ExecContext(ctx, notificationPublicSchema+notificationTestSchema+`INSERT INTO v3_schema(version) VALUES(42);`); err != nil {
+			return err
+		}
+		version = 42
+	}
+	if version == 42 {
+		if _, err = tx.ExecContext(ctx, hostWatchdogHistorySchema+`INSERT INTO v3_schema(version) VALUES(43);`); err != nil {
+			return err
+		}
+		version = 43
+	}
+	if version == 43 {
+		if _, err = tx.ExecContext(ctx, singleBackupRuntimePolicySchema); err != nil {
+			return err
+		}
+		version = 44
+	}
+	if version == 44 {
+		if _, err = tx.ExecContext(ctx, migrationSessionSchema+`INSERT INTO v3_schema(version) VALUES(45);`); err != nil {
+			return err
+		}
+		version = 45
+	}
+	if version == 45 {
+		if _, err = tx.ExecContext(ctx, migrationTargetJournalSchema+migrationNodesSchema+migrationShadowSchema+`INSERT INTO v3_schema(version) VALUES(46);`); err != nil {
+			return err
+		}
+		version = 46
+	}
+	if version == 46 {
+		if _, err = tx.ExecContext(ctx, migrationFinalMappingSchema+migrationMetricHistorySchema+`INSERT INTO v3_schema(version) VALUES(47);`); err != nil {
+			return err
+		}
+		version = 47
+	}
+	if version == 47 {
+		if _, err = tx.ExecContext(ctx, migrationCutoverSchema+`INSERT INTO v3_schema(version) VALUES(48);`); err != nil {
+			return err
+		}
+		version = 48
+	}
+	if version == 48 {
+		if _, err = tx.ExecContext(ctx, migrationRecoverySchema+`INSERT INTO v3_schema(version) VALUES(49);`); err != nil {
+			return err
+		}
+		version = 49
+	}
+	if version == 49 {
+		if _, err = tx.ExecContext(ctx, migrationLegacyHistorySchema+`INSERT INTO v3_schema(version) VALUES(50);`); err != nil {
+			return err
+		}
+		version = 50
+	}
+	if version == 50 {
+		if _, err = tx.ExecContext(ctx, migrationCutoverNodesSchema+`INSERT INTO v3_schema(version) VALUES(51);`); err != nil {
+			return err
+		}
+		version = 51
+	}
+	if version == 51 {
+		if _, err = tx.ExecContext(ctx, migrationReverseMetricJournalSchema+migrationReverseMetricsSchema+`INSERT INTO v3_schema(version) VALUES(52);`); err != nil {
+			return err
+		}
+	}
+	if err = consumeMigrationRestoreCheckpointTx(ctx, tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

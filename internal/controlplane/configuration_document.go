@@ -367,6 +367,9 @@ func validateConfigurationRules(m common.Map) error {
 	if _, err := nodeRuntimeSettings(common.JSON(m)); err != nil || configurationMasks(m) {
 		return errConfigurationDocument
 	}
+	if policy, ok := m["monitoring_policy"]; ok && validateMonitoringPolicy(common.JSON(policy)) != nil {
+		return errConfigurationDocument
+	}
 	return nil
 }
 
@@ -457,6 +460,12 @@ func (d configurationDocument) validate() error {
 	if _, err := retentionPolicy(d.Settings); err != nil {
 		return errConfigurationDocument
 	}
+	if rules, ok := d.Settings["file_monitoring"]; ok {
+		var value MonitoringRules
+		if json.Unmarshal(common.JSON(rules), &value) != nil {
+			return errConfigurationDocument
+		}
+	}
 	if len(common.JSON(d.Settings)) > 2<<20 {
 		return errConfigurationDocument
 	}
@@ -478,6 +487,16 @@ func (d configurationDocument) validate() error {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if dec.Decode(&c) != nil {
+		return errConfigurationDocument
+	}
+	if _, err := singleBackupRuntimePolicyFromSettings(d.Settings); err != nil {
+		return errConfigurationDocument
+	}
+	fallback := c.Collector.IntervalSeconds
+	if fallback == 0 {
+		fallback = 30
+	}
+	if _, err := collectorSettingsInterval(d.Settings, fallback); err != nil {
 		return errConfigurationDocument
 	}
 	// A redacted channel is absent, never a fake password accepted as a value.
@@ -649,13 +668,14 @@ func (d configurationDocument) redacted() (configurationDocument, error) {
 	out.Omitted = append([]string{}, d.Omitted...)
 	out.Bootstrap = projectConfiguration(bootstrap, bootstrapShape, "/bootstrap", &out.Omitted)
 	settingsShape := common.Map{}
-	for _, section := range []string{"retention", "backup", "monitoring", "website_monitor"} {
+	for _, section := range []string{"retention", "backup", "monitoring", "website_monitor", "file_monitoring", "collector"} {
 		// Only recognized policy fields are public; channel configuration is
 		// always omitted as a whole, including recipient addresses.
 		settingsShape[section] = configurationPublicSettingsShape(section)
 	}
 	out.Settings = projectConfiguration(d.Settings, settingsShape, "/settings", &out.Omitted)
 	ruleShape, _ := configurationMap(nodeconfig.DefaultSettings())
+	ruleShape["monitoring_policy"] = common.Map{"source": "", "rules_version": ""}
 	delete(ruleShape, "metrics_source_ip")
 	out.Nodes = map[string]configurationDocumentNode{}
 	out.Profiles = map[string]configurationDocumentRules{}
@@ -705,8 +725,12 @@ func configurationPublicSettingsShape(section string) common.Map {
 	shape := common.Map{}
 	var numbers, booleans, texts string
 	switch section {
+	case "file_monitoring":
+		return common.Map{"roots": []any{}, "extensions": []any{}, "important_filenames": []any{}, "critical_paths": []any{}, "exclude_paths": []any{}, "reconciliation_interval_hours": float64(0)}
 	case "retention":
 		numbers = "sqlite_events_days security_events_days website_incidents_days server_alerts_days delivery_records_days prometheus_days loki_days local_logs_days"
+	case "collector":
+		numbers = "interval_seconds"
 	case "backup":
 		numbers = "keep_days"
 		booleans = "enabled include_sqlite include_runtime_config include_node_passwords"

@@ -387,7 +387,7 @@ func TestHealthHistoryMappingResumesAndReconcilesInEitherOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if err = enqueueNotice(ctx, tx, "live", "new", common.Map{}, "health_failures"); !errors.Is(err, ErrMigrationPending) {
+	if err = enqueueNotice(ctx, tx, "live", "new", common.Map{}, "health_failures", "unknown"); !errors.Is(err, ErrMigrationPending) {
 		t.Fatal("live writer crossed import fence", err)
 	}
 }

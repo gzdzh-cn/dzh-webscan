@@ -123,7 +123,7 @@ func releaseDeploymentConfigurationTx(ctx context.Context, tx *sql.Tx, j Deploym
 		return nil
 	}
 	var linked bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_configuration_application_nodes WHERE child=$1)`, j.ID).Scan(&linked); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM v3_configuration_application_nodes WHERE child=$1) OR EXISTS(SELECT 1 FROM v3_monitoring_application_nodes WHERE child=$1)`, j.ID).Scan(&linked); err != nil {
 		return err
 	}
 	if linked {

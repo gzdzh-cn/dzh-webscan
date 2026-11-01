@@ -53,6 +53,9 @@ func deploymentPreviewAccount(ctx context.Context, tx *sql.Tx, user string) (int
 // Call only with the node row locked. Ordinary telemetry is deliberately not
 // included; a new task or a changed saved configuration must expire a preview.
 func deploymentPreviewState(ctx context.Context, tx *sql.Tx, n Node, in DeploymentRequest) (string, *DeploymentTarget, string, error) {
+	if err := checkMonitoringNodeReservationTx(ctx, tx, n.ID); err != nil {
+		return "", nil, "", err
+	}
 	var busy bool
 	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM v3_deployment_jobs WHERE node=$1 AND status NOT IN ('succeeded','rolled_back') AND (status IN ('queued','running') OR recovery_required)) OR EXISTS(SELECT 1 FROM v3_node_identity_recoveries WHERE node=$1 AND status IN ('prepared','requested','signed') AND expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM v3_node_name_changes WHERE node=$1 AND status IN ('prepared','requested','signed') AND expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM v3_node_name_prunings WHERE node=$1 AND status IN ('prepared','requested','signed') AND expires_at>clock_timestamp())", n.ID).Scan(&busy); err != nil {
 		return "", nil, "", err
@@ -154,13 +157,13 @@ func (s *Store) previewLocalDeployment(ctx context.Context, c Config, t *deploym
 	if err != nil {
 		return out, err
 	}
-	if n.Version != in.Expected || !n.Enabled || in.Kind == "upgrade" && n.AppliedVersion == 0 || in.Kind == "install" && n.AppliedVersion != 0 {
+	if n.Version != in.Expected || in.Kind != "uninstall" && !n.Enabled || in.Kind == "upgrade" && n.AppliedVersion == 0 || in.Kind == "install" && n.AppliedVersion != 0 {
 		return out, ErrConflict
 	}
 	if err = validateLocalDeploymentTx(ctx, tx, c, t, user, in, m, n); err != nil {
 		return out, err
 	}
-	state, current, comparison, err := deploymentPreviewState(ctx, tx, n, in)
+	state, current, comparison, err := deploymentStateWithTrust(ctx, tx, t, n, in)
 	if err != nil {
 		return out, err
 	}
@@ -185,6 +188,9 @@ func (s *Store) previewLocalDeployment(ctx context.Context, c Config, t *deploym
 		return out, err
 	}
 	out = DeploymentPreview{Token: token(), Node: n.ID, Kind: in.Kind, Version: n.Version, AppliedVersion: n.AppliedVersion, Target: DeploymentTarget{in.Release, in.SHA256, n.Mode}, Current: current, Comparison: comparison}
+	if in.Kind == "uninstall" && current != nil {
+		out.Target = *current
+	}
 	if err = tx.QueryRowContext(ctx, "INSERT INTO v3_deployment_previews(token_hash,username,account_revision,node,request,request_digest,state_digest,credential_revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING expires_at", digest([]byte(out.Token)), user, rev, in.Node, canonical, digest(canonical), state, cred).Scan(&out.ExpiresAt); err != nil {
 		return DeploymentPreview{}, err
 	}
@@ -265,7 +271,7 @@ func (s *Store) confirmLocalDeployment(ctx context.Context, c Config, t *deploym
 				if err := validateLocalDeploymentTx(ctx, tx, c, t, user, in, m, n); err != nil {
 					return err
 				}
-				state, _, _, err := deploymentPreviewState(ctx, tx, n, in)
+				state, _, _, err := deploymentStateWithTrust(ctx, tx, t, n, in)
 				if err != nil {
 					return err
 				}

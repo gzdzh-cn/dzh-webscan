@@ -30,8 +30,10 @@ type dashboardSnapshot struct {
 // only that section's prior data/time and adds a fixed, credential-free error.
 // A cold failure remains null; it must never be confused with an empty result.
 func (s *Store) dashboardSnapshot(ctx context.Context, previous dashboardSnapshot, interval int) (dashboardSnapshot, error) {
-	if interval < 10 || interval > 3600 {
-		interval = 30
+	var err error
+	interval, err = s.effectiveCollectorInterval(ctx, interval)
+	if err != nil {
+		return dashboardSnapshot{}, err
 	}
 	freshness := max(60, interval*3)
 	out := dashboardSnapshot{Sections: map[string]dashboardSection{}}
@@ -69,7 +71,7 @@ func (s *Store) dashboardSnapshot(ctx context.Context, previous dashboardSnapsho
  WHERE s.id=1 GROUP BY ch.channel,s.payload) t`))
 	read("deployments", query(`SELECT jsonb_build_object('running',count(*) FILTER(WHERE status IN ('queued','running')),
  'recovery_required',count(*) FILTER(WHERE recovery_required AND status NOT IN ('succeeded','rolled_back')),
- 'latest',(SELECT jsonb_build_object('id',id,'node',node,'status',status,'updated_at',updated_at) FROM v3_deployment_jobs ORDER BY created_at DESC,id DESC LIMIT 1)) FROM v3_deployment_jobs`))
+ 'latest',(SELECT jsonb_build_object('id',id,'node',node,'status',status,'updated_at',updated_at) FROM v3_deployment_jobs d WHERE NOT EXISTS(SELECT 1 FROM v3_deployment_history_archives a WHERE a.deployment=d.id) ORDER BY created_at DESC,id DESC LIMIT 1)) FROM v3_deployment_jobs`))
 	read("alerts", query(`WITH current AS (
  SELECT 'server'::text source,r.key id,r.node node,n.name name,r.kind kind,to_timestamp(r.since) since,NULL::text website
  FROM v3_health_rules r JOIN v3_active_nodes n ON n.id=r.node WHERE n.enabled AND r.phase='firing'
@@ -106,11 +108,12 @@ func (s *Store) dashboardSnapshot(ctx context.Context, previous dashboardSnapsho
  'pending_scans',(SELECT sum((metrics->>'webscan_pending_scans')::numeric) FILTER(WHERE fresh AND jsonb_typeof(metrics->'webscan_pending_scans')='number') FROM applicable),
  'yara_nodes',(SELECT count(*) FROM applicable WHERE COALESCE(config#>'{scan,yara,enabled}','true'::jsonb)='true'::jsonb),
  'clamav_nodes',(SELECT count(*) FROM applicable WHERE config#>'{scan,clamav,enabled}'='true'::jsonb))`, freshness))
+	read("host_watchdog", s.hostObservation)
 	read("services", query(`SELECT jsonb_build_object(
  'database_bytes',(SELECT COALESCE(sum(pg_total_relation_size(oid)),0)::bigint FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p') AND left(relname,3)='v3_'),
  'roles',COALESCE((SELECT jsonb_object_agg(role,value) FROM (
  SELECT DISTINCT ON(role) role,jsonb_build_object('heartbeat',heartbeat,'healthy',heartbeat>clock_timestamp()-interval '20 seconds' AND error='',
- 'has_error',error<>'') value FROM v3_role_status WHERE role IN ('retention','executor','websites','website-notifications','server-health') AND COALESCE(details->>'state','active')<>'standby' ORDER BY role,heartbeat DESC) roles),'{}'::jsonb),
+ 'has_error',error<>'') value FROM v3_role_status WHERE role IN ('retention','executor','websites','website-notifications','server-health','notify-email','notify-feishu','notification-tests') AND COALESCE(details->>'state','active')<>'standby' ORDER BY role,heartbeat DESC) roles),'{}'::jsonb),
  'last_cleanup',(SELECT jsonb_build_object('status',status,'deleted',deleted,'updated_at',updated_at) FROM v3_retention_jobs ORDER BY created_at DESC,id DESC LIMIT 1))`))
 	read("certificates", query(`SELECT jsonb_build_object('maintenance',(
  SELECT jsonb_build_object('heartbeat',heartbeat,

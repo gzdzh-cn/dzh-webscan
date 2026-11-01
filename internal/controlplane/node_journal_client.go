@@ -66,17 +66,17 @@ func (w *SSHNodeRuntime) Inspect(ctx context.Context, j DeploymentJob) (RemoteDe
 	return w.phase(ctx, j, "inspect")
 }
 func (w *SSHNodeRuntime) Apply(ctx context.Context, j DeploymentJob) (RemoteDeploymentCheckpoint, error) {
-	if j.Direction == "forward" && j.Phase() == "stage" && w.LocalBundle != "" {
+	if j.Kind != "uninstall" && j.Direction == "forward" && j.Phase() == "stage" && w.LocalBundle != "" {
 		if err := w.ProvisionBundle(ctx, j, w.LocalBundle); err != nil {
 			return RemoteDeploymentCheckpoint{}, err
 		}
 	}
-	if j.Direction == "forward" && j.Phase() == "stage" && j.Plan.Node.Mode == "docker" && w.LocalImageArchive != "" {
+	if j.Kind != "uninstall" && j.Direction == "forward" && j.Phase() == "stage" && j.Plan.Node.Mode == "docker" && w.LocalImageArchive != "" {
 		if err := w.ProvisionImageArchive(ctx, j, w.LocalImageArchive); err != nil {
 			return RemoteDeploymentCheckpoint{}, err
 		}
 	}
-	if j.Direction == "forward" && j.Phase() == "stage" {
+	if j.Kind != "uninstall" && j.Direction == "forward" && j.Phase() == "stage" {
 		configuration, err := w.configurationFile(ctx, j)
 		if err != nil {
 			return RemoteDeploymentCheckpoint{}, err
@@ -96,6 +96,15 @@ func (w *SSHNodeRuntime) request(ctx context.Context, j DeploymentJob, operation
 	}
 	if !w.Release.matches(j) {
 		return request, DeploymentFailure{"artifact-invalid"}
+	}
+	if j.Kind == "uninstall" {
+		if !w.Lifecycle {
+			return request, DeploymentFailure{"executor-unavailable"}
+		}
+		if err := w.Store.checkDeploymentPlan(ctx, j); err != nil {
+			return request, err
+		}
+		return w.Store.uninstallRequest(ctx, w.Vault, j, operation)
 	}
 	if j.Kind == "recover" || j.Plan.Recovery != nil {
 		if !w.Lifecycle {
@@ -166,6 +175,7 @@ func (w *SSHNodeRuntime) request(ctx context.Context, j DeploymentJob, operation
 		request.Spec.RuntimeSHA256, request.Spec.RuntimeBytes = a.SHA256, a.Bytes
 		request.Spec.ConfigVersion, request.Spec.ConfigSourceSHA256, request.Spec.ServerName = n.Version, j.Plan.ConfigDigest, n.ServerName
 	}
+	request.Reinstall = j.Plan.Reinstall
 	if request.Validate() != nil {
 		return request, DeploymentFailure{"preflight-failed"}
 	}
@@ -206,7 +216,7 @@ func (w *SSHNodeRuntime) phase(ctx context.Context, j DeploymentJob, operation s
 		return RemoteDeploymentCheckpoint{}, DeploymentFailure{"remote-unavailable"}
 	}
 	proof, err := decodeNodeReceipt(request, response, err)
-	if err == nil && w.Lifecycle && request.Phase == "finalize" && proof.State == "complete" && proof.Installation == nil {
+	if err == nil && w.Lifecycle && request.Phase == "finalize" && proof.State == "complete" && (request.Uninstall == nil && proof.Installation == nil || request.Uninstall != nil && proof.Removal == nil) {
 		return RemoteDeploymentCheckpoint{}, DeploymentFailure{"remote-state-unknown"}
 	}
 	return proof, err
@@ -282,8 +292,25 @@ func decodeNodeReceipt(request nodeops.Request, response nodeops.Result, command
 		return empty, DeploymentFailure{"remote-state-unknown"}
 	}
 	proof := RemoteDeploymentCheckpoint{Job: response.Job, PlanDigest: response.PlanDigest, Phase: response.Phase, Epoch: response.Epoch, State: response.State}
+	if response.Removal != nil {
+		if request.Uninstall == nil || request.Phase != "finalize" || response.State != "complete" || !response.Removal.Valid() || response.Restoration != nil || response.Installation != nil {
+			return empty, DeploymentFailure{"remote-state-unknown"}
+		}
+		value := *response.Removal
+		proof.Removal = &value
+	}
+	if response.Restoration != nil {
+		if request.Uninstall == nil || request.Phase != "verify-rollback" || response.State != "complete" || !response.Restoration.Valid() || response.Removal != nil || response.Installation != nil {
+			return empty, DeploymentFailure{"remote-state-unknown"}
+		}
+		value := *response.Restoration
+		proof.Restoration = &value
+	}
+	if request.Uninstall != nil && request.Phase == "verify-rollback" && response.State == "complete" && proof.Restoration == nil {
+		return empty, DeploymentFailure{"remote-state-unknown"}
+	}
 	if response.Installation != nil {
-		if request.Phase != "finalize" || request.Recovery != nil || response.State != "complete" || !response.Installation.Valid() {
+		if request.Phase != "finalize" || request.Recovery != nil || request.Uninstall != nil || response.State != "complete" || !response.Installation.Valid() {
 			return empty, DeploymentFailure{"remote-state-unknown"}
 		}
 		spec, installation := request.Spec, *response.Installation

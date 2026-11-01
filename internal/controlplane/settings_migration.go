@@ -194,6 +194,11 @@ func (s *Store) ImportLegacySettings(ctx context.Context, path, backupDirectory 
 	if err = bindMigrationDomain(ctx, tx, "settings", report.Source, "", nil); err != nil {
 		return report, err
 	}
+	if s.HostQuota != nil {
+		if _, err = s.HostQuota.PrepareSettings(ctx, tx, report.Version, report.Version+1); err != nil {
+			return report, err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, "UPDATE v3_settings SET version=version+1,payload=$1,updated_at=clock_timestamp() WHERE id=1", common.JSON(settings)); err != nil {
 		return report, err
 	}

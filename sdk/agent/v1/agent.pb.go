@@ -71,6 +71,7 @@ type CapabilitiesResponse struct {
 	CertificateSha256       string `protobuf:"bytes,9,opt,name=certificate_sha256,json=certificateSha256,proto3" json:"certificate_sha256,omitempty"`
 	CertificateNotAfterUnix int64  `protobuf:"varint,10,opt,name=certificate_not_after_unix,json=certificateNotAfterUnix,proto3" json:"certificate_not_after_unix,omitempty"`
 	RootTrustRefresh        bool   `protobuf:"varint,11,opt,name=root_trust_refresh,json=rootTrustRefresh,proto3" json:"root_trust_refresh,omitempty"`
+	RecoveryRead            bool   `protobuf:"varint,12,opt,name=recovery_read,json=recoveryRead,proto3" json:"recovery_read,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -178,6 +179,13 @@ func (x *CapabilitiesResponse) GetCertificateNotAfterUnix() int64 {
 func (x *CapabilitiesResponse) GetRootTrustRefresh() bool {
 	if x != nil {
 		return x.RootTrustRefresh
+	}
+	return false
+}
+
+func (x *CapabilitiesResponse) GetRecoveryRead() bool {
+	if x != nil {
+		return x.RecoveryRead
 	}
 	return false
 }
@@ -1162,12 +1170,465 @@ func (x *RefreshRootTrustResponse) GetPhase() string {
 	return ""
 }
 
+type RecoveryStateRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecoveryStateRequest) Reset() {
+	*x = RecoveryStateRequest{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryStateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryStateRequest) ProtoMessage() {}
+
+func (x *RecoveryStateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryStateRequest.ProtoReflect.Descriptor instead.
+func (*RecoveryStateRequest) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *RecoveryStateRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+type RecoveryStateResponse struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	NodeId                    string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Epoch                     uint64                 `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	ConfigurationVersion      int64                  `protobuf:"varint,3,opt,name=configuration_version,json=configurationVersion,proto3" json:"configuration_version,omitempty"`
+	ConfigurationSha256       string                 `protobuf:"bytes,4,opt,name=configuration_sha256,json=configurationSha256,proto3" json:"configuration_sha256,omitempty"`
+	SnapshotSha256            string                 `protobuf:"bytes,5,opt,name=snapshot_sha256,json=snapshotSha256,proto3" json:"snapshot_sha256,omitempty"`
+	Cursor                    string                 `protobuf:"bytes,6,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	RetainedEvents            int64                  `protobuf:"varint,7,opt,name=retained_events,json=retainedEvents,proto3" json:"retained_events,omitempty"`
+	AcceptedEvents            int64                  `protobuf:"varint,8,opt,name=accepted_events,json=acceptedEvents,proto3" json:"accepted_events,omitempty"`
+	PendingEvents             int64                  `protobuf:"varint,9,opt,name=pending_events,json=pendingEvents,proto3" json:"pending_events,omitempty"`
+	EarliestCreatedUnixMillis int64                  `protobuf:"varint,10,opt,name=earliest_created_unix_millis,json=earliestCreatedUnixMillis,proto3" json:"earliest_created_unix_millis,omitempty"`
+	LatestCreatedUnixMillis   int64                  `protobuf:"varint,11,opt,name=latest_created_unix_millis,json=latestCreatedUnixMillis,proto3" json:"latest_created_unix_millis,omitempty"`
+	EarliestMetricsUnixMillis int64                  `protobuf:"varint,12,opt,name=earliest_metrics_unix_millis,json=earliestMetricsUnixMillis,proto3" json:"earliest_metrics_unix_millis,omitempty"`
+	LatestMetricsUnixMillis   int64                  `protobuf:"varint,13,opt,name=latest_metrics_unix_millis,json=latestMetricsUnixMillis,proto3" json:"latest_metrics_unix_millis,omitempty"`
+	// False when historical deletion watermarks cannot prove completeness.
+	RetentionComplete        bool   `protobuf:"varint,14,opt,name=retention_complete,json=retentionComplete,proto3" json:"retention_complete,omitempty"`
+	RetentionReason          string `protobuf:"bytes,15,opt,name=retention_reason,json=retentionReason,proto3" json:"retention_reason,omitempty"`
+	RetentionSinceUnixMillis int64  `protobuf:"varint,16,opt,name=retention_since_unix_millis,json=retentionSinceUnixMillis,proto3" json:"retention_since_unix_millis,omitempty"`
+	LastDeletedUnixMillis    int64  `protobuf:"varint,17,opt,name=last_deleted_unix_millis,json=lastDeletedUnixMillis,proto3" json:"last_deleted_unix_millis,omitempty"`
+	DeletedEvents            int64  `protobuf:"varint,18,opt,name=deleted_events,json=deletedEvents,proto3" json:"deleted_events,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *RecoveryStateResponse) Reset() {
+	*x = RecoveryStateResponse{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryStateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryStateResponse) ProtoMessage() {}
+
+func (x *RecoveryStateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryStateResponse.ProtoReflect.Descriptor instead.
+func (*RecoveryStateResponse) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *RecoveryStateResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *RecoveryStateResponse) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetConfigurationVersion() int64 {
+	if x != nil {
+		return x.ConfigurationVersion
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetConfigurationSha256() string {
+	if x != nil {
+		return x.ConfigurationSha256
+	}
+	return ""
+}
+
+func (x *RecoveryStateResponse) GetSnapshotSha256() string {
+	if x != nil {
+		return x.SnapshotSha256
+	}
+	return ""
+}
+
+func (x *RecoveryStateResponse) GetCursor() string {
+	if x != nil {
+		return x.Cursor
+	}
+	return ""
+}
+
+func (x *RecoveryStateResponse) GetRetainedEvents() int64 {
+	if x != nil {
+		return x.RetainedEvents
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetAcceptedEvents() int64 {
+	if x != nil {
+		return x.AcceptedEvents
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetPendingEvents() int64 {
+	if x != nil {
+		return x.PendingEvents
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetEarliestCreatedUnixMillis() int64 {
+	if x != nil {
+		return x.EarliestCreatedUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetLatestCreatedUnixMillis() int64 {
+	if x != nil {
+		return x.LatestCreatedUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetEarliestMetricsUnixMillis() int64 {
+	if x != nil {
+		return x.EarliestMetricsUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetLatestMetricsUnixMillis() int64 {
+	if x != nil {
+		return x.LatestMetricsUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetRetentionComplete() bool {
+	if x != nil {
+		return x.RetentionComplete
+	}
+	return false
+}
+
+func (x *RecoveryStateResponse) GetRetentionReason() string {
+	if x != nil {
+		return x.RetentionReason
+	}
+	return ""
+}
+
+func (x *RecoveryStateResponse) GetRetentionSinceUnixMillis() int64 {
+	if x != nil {
+		return x.RetentionSinceUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetLastDeletedUnixMillis() int64 {
+	if x != nil {
+		return x.LastDeletedUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryStateResponse) GetDeletedEvents() int64 {
+	if x != nil {
+		return x.DeletedEvents
+	}
+	return 0
+}
+
+type ReadRecoveryEventsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Cursor        string                 `protobuf:"bytes,2,opt,name=cursor,proto3" json:"cursor,omitempty"`
+	Limit         uint32                 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadRecoveryEventsRequest) Reset() {
+	*x = ReadRecoveryEventsRequest{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadRecoveryEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadRecoveryEventsRequest) ProtoMessage() {}
+
+func (x *ReadRecoveryEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadRecoveryEventsRequest.ProtoReflect.Descriptor instead.
+func (*ReadRecoveryEventsRequest) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ReadRecoveryEventsRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *ReadRecoveryEventsRequest) GetCursor() string {
+	if x != nil {
+		return x.Cursor
+	}
+	return ""
+}
+
+func (x *ReadRecoveryEventsRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type RecoveryEvent struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Json               []byte                 `protobuf:"bytes,2,opt,name=json,proto3" json:"json,omitempty"`
+	CreatedUnixMillis  int64                  `protobuf:"varint,3,opt,name=created_unix_millis,json=createdUnixMillis,proto3" json:"created_unix_millis,omitempty"`
+	Accepted           bool                   `protobuf:"varint,4,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	AcceptedUnixMillis int64                  `protobuf:"varint,5,opt,name=accepted_unix_millis,json=acceptedUnixMillis,proto3" json:"accepted_unix_millis,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *RecoveryEvent) Reset() {
+	*x = RecoveryEvent{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryEvent) ProtoMessage() {}
+
+func (x *RecoveryEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryEvent.ProtoReflect.Descriptor instead.
+func (*RecoveryEvent) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *RecoveryEvent) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RecoveryEvent) GetJson() []byte {
+	if x != nil {
+		return x.Json
+	}
+	return nil
+}
+
+func (x *RecoveryEvent) GetCreatedUnixMillis() int64 {
+	if x != nil {
+		return x.CreatedUnixMillis
+	}
+	return 0
+}
+
+func (x *RecoveryEvent) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *RecoveryEvent) GetAcceptedUnixMillis() int64 {
+	if x != nil {
+		return x.AcceptedUnixMillis
+	}
+	return 0
+}
+
+type RecoveryEventsBatch struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	NodeId         string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	SnapshotSha256 string                 `protobuf:"bytes,2,opt,name=snapshot_sha256,json=snapshotSha256,proto3" json:"snapshot_sha256,omitempty"`
+	Epoch          uint64                 `protobuf:"varint,3,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	NextCursor     string                 `protobuf:"bytes,4,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	Events         []*RecoveryEvent       `protobuf:"bytes,5,rep,name=events,proto3" json:"events,omitempty"`
+	Complete       bool                   `protobuf:"varint,6,opt,name=complete,proto3" json:"complete,omitempty"`
+	ReadEvents     int64                  `protobuf:"varint,7,opt,name=read_events,json=readEvents,proto3" json:"read_events,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RecoveryEventsBatch) Reset() {
+	*x = RecoveryEventsBatch{}
+	mi := &file_api_agent_v1_agent_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecoveryEventsBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecoveryEventsBatch) ProtoMessage() {}
+
+func (x *RecoveryEventsBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_api_agent_v1_agent_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecoveryEventsBatch.ProtoReflect.Descriptor instead.
+func (*RecoveryEventsBatch) Descriptor() ([]byte, []int) {
+	return file_api_agent_v1_agent_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *RecoveryEventsBatch) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *RecoveryEventsBatch) GetSnapshotSha256() string {
+	if x != nil {
+		return x.SnapshotSha256
+	}
+	return ""
+}
+
+func (x *RecoveryEventsBatch) GetEpoch() uint64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *RecoveryEventsBatch) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
+func (x *RecoveryEventsBatch) GetEvents() []*RecoveryEvent {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+func (x *RecoveryEventsBatch) GetComplete() bool {
+	if x != nil {
+		return x.Complete
+	}
+	return false
+}
+
+func (x *RecoveryEventsBatch) GetReadEvents() int64 {
+	if x != nil {
+		return x.ReadEvents
+	}
+	return 0
+}
+
 var File_api_agent_v1_agent_proto protoreflect.FileDescriptor
 
 const file_api_agent_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"\x18api/agent/v1/agent.proto\x12\x10webscan.agent.v1\"\x15\n" +
-	"\x13CapabilitiesRequest\"\xce\x03\n" +
+	"\x13CapabilitiesRequest\"\xf3\x03\n" +
 	"\x14CapabilitiesResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
@@ -1181,7 +1642,8 @@ const file_api_agent_v1_agent_proto_rawDesc = "" +
 	"\x12certificate_sha256\x18\t \x01(\tR\x11certificateSha256\x12;\n" +
 	"\x1acertificate_not_after_unix\x18\n" +
 	" \x01(\x03R\x17certificateNotAfterUnix\x12,\n" +
-	"\x12root_trust_refresh\x18\v \x01(\bR\x10rootTrustRefresh\"c\n" +
+	"\x12root_trust_refresh\x18\v \x01(\bR\x10rootTrustRefresh\x12#\n" +
+	"\rrecovery_read\x18\f \x01(\bR\frecoveryRead\"c\n" +
 	"\x12FetchEventsRequest\x12\x14\n" +
 	"\x05epoch\x18\x01 \x01(\x04R\x05epoch\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\rR\x05limit\x12!\n" +
@@ -1248,12 +1710,56 @@ const file_api_agent_v1_agent_proto_rawDesc = "" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12'\n" +
 	"\x0fsnapshot_sha256\x18\x02 \x01(\tR\x0esnapshotSha256\x12\x1a\n" +
 	"\brotation\x18\x03 \x01(\tR\brotation\x12\x14\n" +
-	"\x05phase\x18\x04 \x01(\tR\x05phase2\xa1\x06\n" +
+	"\x05phase\x18\x04 \x01(\tR\x05phase\"/\n" +
+	"\x14RecoveryStateRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\"\xdd\x06\n" +
+	"\x15RecoveryStateResponse\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x04R\x05epoch\x123\n" +
+	"\x15configuration_version\x18\x03 \x01(\x03R\x14configurationVersion\x121\n" +
+	"\x14configuration_sha256\x18\x04 \x01(\tR\x13configurationSha256\x12'\n" +
+	"\x0fsnapshot_sha256\x18\x05 \x01(\tR\x0esnapshotSha256\x12\x16\n" +
+	"\x06cursor\x18\x06 \x01(\tR\x06cursor\x12'\n" +
+	"\x0fretained_events\x18\a \x01(\x03R\x0eretainedEvents\x12'\n" +
+	"\x0faccepted_events\x18\b \x01(\x03R\x0eacceptedEvents\x12%\n" +
+	"\x0epending_events\x18\t \x01(\x03R\rpendingEvents\x12?\n" +
+	"\x1cearliest_created_unix_millis\x18\n" +
+	" \x01(\x03R\x19earliestCreatedUnixMillis\x12;\n" +
+	"\x1alatest_created_unix_millis\x18\v \x01(\x03R\x17latestCreatedUnixMillis\x12?\n" +
+	"\x1cearliest_metrics_unix_millis\x18\f \x01(\x03R\x19earliestMetricsUnixMillis\x12;\n" +
+	"\x1alatest_metrics_unix_millis\x18\r \x01(\x03R\x17latestMetricsUnixMillis\x12-\n" +
+	"\x12retention_complete\x18\x0e \x01(\bR\x11retentionComplete\x12)\n" +
+	"\x10retention_reason\x18\x0f \x01(\tR\x0fretentionReason\x12=\n" +
+	"\x1bretention_since_unix_millis\x18\x10 \x01(\x03R\x18retentionSinceUnixMillis\x127\n" +
+	"\x18last_deleted_unix_millis\x18\x11 \x01(\x03R\x15lastDeletedUnixMillis\x12%\n" +
+	"\x0edeleted_events\x18\x12 \x01(\x03R\rdeletedEvents\"b\n" +
+	"\x19ReadRecoveryEventsRequest\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x16\n" +
+	"\x06cursor\x18\x02 \x01(\tR\x06cursor\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\"\xb1\x01\n" +
+	"\rRecoveryEvent\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04json\x18\x02 \x01(\fR\x04json\x12.\n" +
+	"\x13created_unix_millis\x18\x03 \x01(\x03R\x11createdUnixMillis\x12\x1a\n" +
+	"\baccepted\x18\x04 \x01(\bR\baccepted\x120\n" +
+	"\x14accepted_unix_millis\x18\x05 \x01(\x03R\x12acceptedUnixMillis\"\x84\x02\n" +
+	"\x13RecoveryEventsBatch\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12'\n" +
+	"\x0fsnapshot_sha256\x18\x02 \x01(\tR\x0esnapshotSha256\x12\x14\n" +
+	"\x05epoch\x18\x03 \x01(\x04R\x05epoch\x12\x1f\n" +
+	"\vnext_cursor\x18\x04 \x01(\tR\n" +
+	"nextCursor\x127\n" +
+	"\x06events\x18\x05 \x03(\v2\x1f.webscan.agent.v1.RecoveryEventR\x06events\x12\x1a\n" +
+	"\bcomplete\x18\x06 \x01(\bR\bcomplete\x12\x1f\n" +
+	"\vread_events\x18\a \x01(\x03R\n" +
+	"readEvents2\xed\a\n" +
 	"\fAgentService\x12]\n" +
 	"\fCapabilities\x12%.webscan.agent.v1.CapabilitiesRequest\x1a&.webscan.agent.v1.CapabilitiesResponse\x12Q\n" +
 	"\vFetchEvents\x12$.webscan.agent.v1.FetchEventsRequest\x1a\x1c.webscan.agent.v1.EventBatch\x12T\n" +
 	"\tAckEvents\x12\".webscan.agent.v1.AckEventsRequest\x1a#.webscan.agent.v1.AckEventsResponse\x12S\n" +
-	"\vReadMetrics\x12$.webscan.agent.v1.ReadMetricsRequest\x1a\x1e.webscan.agent.v1.MetricsBatch\x12Z\n" +
+	"\vReadMetrics\x12$.webscan.agent.v1.ReadMetricsRequest\x1a\x1e.webscan.agent.v1.MetricsBatch\x12`\n" +
+	"\rRecoveryState\x12&.webscan.agent.v1.RecoveryStateRequest\x1a'.webscan.agent.v1.RecoveryStateResponse\x12h\n" +
+	"\x12ReadRecoveryEvents\x12+.webscan.agent.v1.ReadRecoveryEventsRequest\x1a%.webscan.agent.v1.RecoveryEventsBatch\x12Z\n" +
 	"\vUpdateTrust\x12$.webscan.agent.v1.UpdateTrustRequest\x1a%.webscan.agent.v1.UpdateTrustResponse\x12i\n" +
 	"\x10RefreshRootTrust\x12).webscan.agent.v1.RefreshRootTrustRequest\x1a*.webscan.agent.v1.RefreshRootTrustResponse\x12t\n" +
 	"\x16PrepareIdentityRenewal\x12/.webscan.agent.v1.PrepareIdentityRenewalRequest\x1a).webscan.agent.v1.PreparedIdentityRenewal\x12w\n" +
@@ -1271,7 +1777,7 @@ func file_api_agent_v1_agent_proto_rawDescGZIP() []byte {
 	return file_api_agent_v1_agent_proto_rawDescData
 }
 
-var file_api_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_api_agent_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_api_agent_v1_agent_proto_goTypes = []any{
 	(*CapabilitiesRequest)(nil),            // 0: webscan.agent.v1.CapabilitiesRequest
 	(*CapabilitiesResponse)(nil),           // 1: webscan.agent.v1.CapabilitiesResponse
@@ -1292,32 +1798,42 @@ var file_api_agent_v1_agent_proto_goTypes = []any{
 	(*ActivatedIdentityRenewal)(nil),       // 16: webscan.agent.v1.ActivatedIdentityRenewal
 	(*RefreshRootTrustRequest)(nil),        // 17: webscan.agent.v1.RefreshRootTrustRequest
 	(*RefreshRootTrustResponse)(nil),       // 18: webscan.agent.v1.RefreshRootTrustResponse
+	(*RecoveryStateRequest)(nil),           // 19: webscan.agent.v1.RecoveryStateRequest
+	(*RecoveryStateResponse)(nil),          // 20: webscan.agent.v1.RecoveryStateResponse
+	(*ReadRecoveryEventsRequest)(nil),      // 21: webscan.agent.v1.ReadRecoveryEventsRequest
+	(*RecoveryEvent)(nil),                  // 22: webscan.agent.v1.RecoveryEvent
+	(*RecoveryEventsBatch)(nil),            // 23: webscan.agent.v1.RecoveryEventsBatch
 }
 var file_api_agent_v1_agent_proto_depIdxs = []int32{
 	3,  // 0: webscan.agent.v1.EventBatch.events:type_name -> webscan.agent.v1.Event
 	5,  // 1: webscan.agent.v1.AckEventsRequest.rejected:type_name -> webscan.agent.v1.Rejection
 	9,  // 2: webscan.agent.v1.MetricsBatch.samples:type_name -> webscan.agent.v1.MetricsSample
-	0,  // 3: webscan.agent.v1.AgentService.Capabilities:input_type -> webscan.agent.v1.CapabilitiesRequest
-	2,  // 4: webscan.agent.v1.AgentService.FetchEvents:input_type -> webscan.agent.v1.FetchEventsRequest
-	6,  // 5: webscan.agent.v1.AgentService.AckEvents:input_type -> webscan.agent.v1.AckEventsRequest
-	8,  // 6: webscan.agent.v1.AgentService.ReadMetrics:input_type -> webscan.agent.v1.ReadMetricsRequest
-	11, // 7: webscan.agent.v1.AgentService.UpdateTrust:input_type -> webscan.agent.v1.UpdateTrustRequest
-	17, // 8: webscan.agent.v1.AgentService.RefreshRootTrust:input_type -> webscan.agent.v1.RefreshRootTrustRequest
-	13, // 9: webscan.agent.v1.AgentService.PrepareIdentityRenewal:input_type -> webscan.agent.v1.PrepareIdentityRenewalRequest
-	15, // 10: webscan.agent.v1.AgentService.ActivateIdentityRenewal:input_type -> webscan.agent.v1.ActivateIdentityRenewalRequest
-	1,  // 11: webscan.agent.v1.AgentService.Capabilities:output_type -> webscan.agent.v1.CapabilitiesResponse
-	4,  // 12: webscan.agent.v1.AgentService.FetchEvents:output_type -> webscan.agent.v1.EventBatch
-	7,  // 13: webscan.agent.v1.AgentService.AckEvents:output_type -> webscan.agent.v1.AckEventsResponse
-	10, // 14: webscan.agent.v1.AgentService.ReadMetrics:output_type -> webscan.agent.v1.MetricsBatch
-	12, // 15: webscan.agent.v1.AgentService.UpdateTrust:output_type -> webscan.agent.v1.UpdateTrustResponse
-	18, // 16: webscan.agent.v1.AgentService.RefreshRootTrust:output_type -> webscan.agent.v1.RefreshRootTrustResponse
-	14, // 17: webscan.agent.v1.AgentService.PrepareIdentityRenewal:output_type -> webscan.agent.v1.PreparedIdentityRenewal
-	16, // 18: webscan.agent.v1.AgentService.ActivateIdentityRenewal:output_type -> webscan.agent.v1.ActivatedIdentityRenewal
-	11, // [11:19] is the sub-list for method output_type
-	3,  // [3:11] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	22, // 3: webscan.agent.v1.RecoveryEventsBatch.events:type_name -> webscan.agent.v1.RecoveryEvent
+	0,  // 4: webscan.agent.v1.AgentService.Capabilities:input_type -> webscan.agent.v1.CapabilitiesRequest
+	2,  // 5: webscan.agent.v1.AgentService.FetchEvents:input_type -> webscan.agent.v1.FetchEventsRequest
+	6,  // 6: webscan.agent.v1.AgentService.AckEvents:input_type -> webscan.agent.v1.AckEventsRequest
+	8,  // 7: webscan.agent.v1.AgentService.ReadMetrics:input_type -> webscan.agent.v1.ReadMetricsRequest
+	19, // 8: webscan.agent.v1.AgentService.RecoveryState:input_type -> webscan.agent.v1.RecoveryStateRequest
+	21, // 9: webscan.agent.v1.AgentService.ReadRecoveryEvents:input_type -> webscan.agent.v1.ReadRecoveryEventsRequest
+	11, // 10: webscan.agent.v1.AgentService.UpdateTrust:input_type -> webscan.agent.v1.UpdateTrustRequest
+	17, // 11: webscan.agent.v1.AgentService.RefreshRootTrust:input_type -> webscan.agent.v1.RefreshRootTrustRequest
+	13, // 12: webscan.agent.v1.AgentService.PrepareIdentityRenewal:input_type -> webscan.agent.v1.PrepareIdentityRenewalRequest
+	15, // 13: webscan.agent.v1.AgentService.ActivateIdentityRenewal:input_type -> webscan.agent.v1.ActivateIdentityRenewalRequest
+	1,  // 14: webscan.agent.v1.AgentService.Capabilities:output_type -> webscan.agent.v1.CapabilitiesResponse
+	4,  // 15: webscan.agent.v1.AgentService.FetchEvents:output_type -> webscan.agent.v1.EventBatch
+	7,  // 16: webscan.agent.v1.AgentService.AckEvents:output_type -> webscan.agent.v1.AckEventsResponse
+	10, // 17: webscan.agent.v1.AgentService.ReadMetrics:output_type -> webscan.agent.v1.MetricsBatch
+	20, // 18: webscan.agent.v1.AgentService.RecoveryState:output_type -> webscan.agent.v1.RecoveryStateResponse
+	23, // 19: webscan.agent.v1.AgentService.ReadRecoveryEvents:output_type -> webscan.agent.v1.RecoveryEventsBatch
+	12, // 20: webscan.agent.v1.AgentService.UpdateTrust:output_type -> webscan.agent.v1.UpdateTrustResponse
+	18, // 21: webscan.agent.v1.AgentService.RefreshRootTrust:output_type -> webscan.agent.v1.RefreshRootTrustResponse
+	14, // 22: webscan.agent.v1.AgentService.PrepareIdentityRenewal:output_type -> webscan.agent.v1.PreparedIdentityRenewal
+	16, // 23: webscan.agent.v1.AgentService.ActivateIdentityRenewal:output_type -> webscan.agent.v1.ActivatedIdentityRenewal
+	14, // [14:24] is the sub-list for method output_type
+	4,  // [4:14] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_api_agent_v1_agent_proto_init() }
@@ -1331,7 +1847,7 @@ func file_api_agent_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_agent_v1_agent_proto_rawDesc), len(file_api_agent_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

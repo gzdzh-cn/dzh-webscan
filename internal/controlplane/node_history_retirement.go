@@ -78,6 +78,9 @@ func nodeHistoryRetirementPlanTx(ctx context.Context, tx *sql.Tx, user string, i
 	if err != nil || !n.Enabled || n.Version != in.Expected || n.AppliedVersion != n.Version {
 		return empty, 0, errNodeHistoryRetirement
 	}
+	if err := checkMonitoringNodeReservationTx(ctx, tx, n.ID); err != nil {
+		return empty, 0, err
+	}
 	b, err := runtimeBaselineTx(ctx, tx, n.ID)
 	if err != nil || b.Snapshot == "" || b.Version != n.Version || b.Delivered != n.Version || b.Epoch < 1 {
 		return empty, 0, errNodeHistoryRetirement

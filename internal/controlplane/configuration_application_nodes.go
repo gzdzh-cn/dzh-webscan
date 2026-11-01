@@ -153,6 +153,9 @@ func lockedApplicationNodeParentTx(ctx context.Context, tx *sql.Tx, v *Vault, p 
 // Use only for an exact child journal operation. Public edits, trusted setup
 // and ordinary queueing always use the non-scoped relation gate instead.
 func lockDeploymentJournalTx(ctx context.Context, tx *sql.Tx, j DeploymentJob) error {
+	if handled, err := lockMonitoringDeploymentJournalTx(ctx, tx, j); handled || err != nil {
+		return err
+	}
 	scope, _ := ctx.Value(applicationNodeScopeKey{}).(*applicationNodeScope)
 	if scope == nil {
 		if err := lockDeploymentWriteRelationsTx(ctx, tx); err != nil {
