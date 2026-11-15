@@ -13,7 +13,7 @@ if [[ ! "$task_release" =~ ^v[0-9][A-Za-z0-9._-]{1,80}$ ]]; then echo 'Invalid e
 task_helper="${WEBSCAN_V3_KERNEL_HELPER:-}"
 task_native="${WEBSCAN_V3_KERNEL_NATIVE_BUNDLE:-}"
 if [[ -n "$task_helper" || -n "$task_native" || "$task_release" != v3.0.0-local-test ]]; then
-  [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == single-boot ]] || { echo 'Exact release artifact acceptance requires a web lifecycle or single boot mode.' >&2; exit 2; }
+  [[ "$task_mode" == web-native || "$task_mode" == web-docker || "$task_mode" == single-boot || "$task_mode" == backup-timer ]] || { echo 'Exact release artifact acceptance requires a web lifecycle, single boot or backup timer mode.' >&2; exit 2; }
   for task_artifact in "$task_helper" "$task_native"; do
     [[ "$task_artifact" == /* && -f "$task_artifact" && ! -L "$task_artifact" ]] || { echo 'Explicit regular helper and native artifacts required.' >&2; exit 2; }
   done
