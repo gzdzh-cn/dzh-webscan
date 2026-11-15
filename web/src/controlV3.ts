@@ -288,9 +288,10 @@ export class ControlV3 {
     }
   }
 
-  private read<T>(path: string, signal?: AbortSignal): Promise<T> {
+  private read<T>(path: string, signal?: AbortSignal, reportMetricsUnavailable = false): Promise<T> {
     return readWithReconnect(signal => this.send<T>(path, 'GET', undefined, undefined, signal),
-      error => error instanceof V3Error && [0, 502, 503, 504].includes(error.status), false, signal)
+      error => error instanceof V3Error && [0, 502, 503, 504].includes(error.status)
+        && !(reportMetricsUnavailable && error.status === 503 && error.code === 'metrics_unavailable'), false, signal)
   }
   async login(username: string, password: string) {
     const data = await this.send<{ csrf: string }>('login', 'POST', { username, password })
@@ -358,7 +359,7 @@ export class ControlV3 {
   }
   server(id: string, signal?: AbortSignal) { return this.read<V3ServerDetail>(`servers/${encodeURIComponent(id)}`, signal) }
   serverMetrics(id: string, start: string, end: string, signal?: AbortSignal) {
-    return this.read<{ points: import('./charts').MetricPoint[]; resolution_seconds: number; start: number; end: number }>(`servers/${encodeURIComponent(id)}/metrics?${queryParams({ start, end })}`, signal)
+    return this.read<{ points: import('./charts').MetricPoint[]; resolution_seconds: number; start: number; end: number }>(`servers/${encodeURIComponent(id)}/metrics?${queryParams({ start, end })}`, signal, true)
   }
   // Callers keep the same key for an explicitly retried operation. Writes are
   // never replayed by the reconnect loop or combined with unsaved form state.

@@ -276,6 +276,58 @@ it('keeps the session and existing results on 503, then reconnects with the same
   expect(host.textContent).not.toContain('已有内容保留')
 })
 
+it('shows a metrics service failure locally and preserves the node and chart until refresh succeeds', async () => {
+  vi.useFakeTimers()
+  let metrics = 'initial'
+  const send = vi.fn().mockImplementation(async (url: string) => {
+    if (url === '/api/v3/session') return ok({ username: 'admin', role: 'admin', csrf: 'fixture-csrf' })
+    if (url === '/api/v3/servers/node-a') return ok(detail())
+    if (url.startsWith('/api/v3/servers/node-a/metrics?')) {
+      if (metrics === 'unavailable') return new Response(JSON.stringify({ code: 'metrics_unavailable', message: '历史指标读取失败，请检查时序库状态' }), { status: 503 })
+      return ok({ points: [{ time: 100, ok: true, values: { cpu_percent: metrics === 'initial' ? 10 : 20 } }], resolution_seconds: 30, start: 100, end: 100 })
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+  vi.stubGlobal('fetch', send)
+  const router = await mount(ConsoleApp, '/servers/node-a')
+  const cpu = () => Array.from(host.querySelectorAll('.chart')).find(el => el.textContent === 'CPU 使用率')!
+  expect(JSON.parse(cpu().getAttribute('data-option')!).series[0].data).toEqual([[100000, 10]])
+  metrics = 'unavailable'; button('刷新').click(); await settle()
+  expect(host.textContent).toContain('历史指标读取失败，请检查时序库状态')
+  expect(host.textContent).toContain('服务器 node-a')
+  expect(host.textContent).not.toContain('连接暂时中断，已有内容保留')
+  expect(JSON.parse(cpu().getAttribute('data-option')!).series[0].data).toEqual([[100000, 10]])
+  const metricCalls = () => send.mock.calls.filter(([url]) => String(url).startsWith('/api/v3/servers/node-a/metrics?')).length
+  const before = metricCalls()
+  await vi.advanceTimersByTimeAsync(6000); await settle()
+  expect(metricCalls()).toBe(before)
+  expect(router.currentRoute.value.path).toBe('/servers/node-a')
+  metrics = 'recovered'; button('刷新').click(); await settle()
+  expect(host.textContent).not.toContain('历史指标读取失败，请检查时序库状态')
+  expect(JSON.parse(cpu().getAttribute('data-option')!).series[0].data).toEqual([[100000, 20]])
+})
+
+it('still reconnects an interrupted metrics transport without expiring the session', async () => {
+  vi.useFakeTimers()
+  let failMetrics = true
+  const send = vi.fn().mockImplementation(async (url: string) => {
+    if (url === '/api/v3/session') return ok({ username: 'admin', role: 'admin', csrf: 'fixture-csrf' })
+    if (url === '/api/v3/servers/node-a') return ok(detail())
+    if (url.startsWith('/api/v3/servers/node-a/metrics?')) {
+      if (failMetrics) throw new TypeError('network unavailable')
+      return ok({ points: [], resolution_seconds: 30, start: 0, end: 0 })
+    }
+    throw new Error(`unexpected request: ${url}`)
+  })
+  vi.stubGlobal('fetch', send)
+  const router = await mount(ConsoleApp, '/servers/node-a')
+  expect(host.textContent).toContain('连接暂时中断，已有内容保留')
+  expect(host.textContent).toContain('服务器 node-a')
+  failMetrics = false; await vi.advanceTimersByTimeAsync(3000); await settle()
+  expect(host.textContent).not.toContain('连接暂时中断，已有内容保留')
+  expect(router.currentRoute.value.path).toBe('/servers/node-a')
+})
+
 it('replaces chart requests on range changes and ignores old-node errors', async () => {
   const client = new ControlV3(); vi.spyOn(client,'server').mockImplementation(async id => detail(id))
   let reject!: (e:Error)=>void

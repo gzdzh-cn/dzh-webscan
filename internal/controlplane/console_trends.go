@@ -41,6 +41,10 @@ func (m *Metrics) consoleRange(ctx context.Context, node string, start, end time
 	// node into a continuous healthy curve. Short gaps remain empty after 60 s.
 	query := selector + " and (time() - timestamp(" + selector + ") <= 60)"
 	q := url.Values{"query": {query}, "start": {strconv.FormatInt(result.Start, 10)}, "end": {strconv.FormatInt(result.End, 10)}, "step": {strconv.FormatInt(result.Resolution, 10)}}
+	// Cached VictoriaMetrics range queries may round the requested bounds to
+	// step multiples. Preserve the browser's exact grid instead of accepting
+	// out-of-window samples or weakening the identity/time checks below.
+	q.Set("nocache", "1")
 	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(m.QueryURL, "/")+"/api/v1/query_range?"+q.Encode(), nil)
 	if err != nil {
 		return result, err

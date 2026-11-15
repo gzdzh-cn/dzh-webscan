@@ -182,3 +182,104 @@ func TestMaintenanceReleaseCannotReuseOnlyOriginalGates(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicationSourceRequiresCheckedOutBranchUpstreamAtBuiltCommit(t *testing.T) {
+	dir := t.TempDir()
+	remoteDir := filepath.Join(dir, "remote.git")
+	repo := filepath.Join(dir, "repo")
+	if err := os.Mkdir(repo, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gitAt := func(where string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = where
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	gitAt(dir, "init", "--bare", "-q", remoteDir)
+	gitAt(repo, "init", "-q", "-b", "codex/isolated-hotfix")
+	if err := os.MkdirAll(filepath.Join(repo, "api"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "api", "source"), []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitAt(repo, "add", "api/source")
+	gitAt(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial")
+	gitAt(repo, "remote", "add", "fixture", remoteDir)
+	t.Chdir(repo)
+	build := func() buildRecord {
+		t.Helper()
+		head := gitAt(repo, "rev-parse", "HEAD")
+		digest, err := currentSourceDigest(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return buildRecord{Release: "v3.0.4", Commit: head, Source: digest}
+	}
+	b := build()
+	if checkPublicationSource(context.Background(), b) == nil {
+		t.Fatal("branch without upstream accepted")
+	}
+	gitAt(repo, "push", "-qu", "fixture", "HEAD:refs/heads/codex/isolated-hotfix")
+	if err := checkPublicationSource(context.Background(), b); err != nil {
+		t.Fatalf("pushed non-main branch rejected: %v", err)
+	}
+	gitAt(repo, "switch", "--detach", "-q")
+	if checkPublicationSource(context.Background(), b) == nil {
+		t.Fatal("detached HEAD accepted")
+	}
+	gitAt(repo, "switch", "-q", "codex/isolated-hotfix")
+	if err := os.WriteFile(filepath.Join(repo, "untracked"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if checkPublicationSource(context.Background(), b) == nil {
+		t.Fatal("dirty working tree accepted")
+	}
+	if err := os.Remove(filepath.Join(repo, "untracked")); err != nil {
+		t.Fatal(err)
+	}
+	bad := b
+	bad.Source = strings.Repeat("0", 64)
+	if checkPublicationSource(context.Background(), bad) == nil {
+		t.Fatal("wrong source digest accepted")
+	}
+	bad = b
+	bad.Commit = strings.Repeat("0", 40)
+	if checkPublicationSource(context.Background(), bad) == nil {
+		t.Fatal("wrong build commit accepted")
+	}
+	if err := os.WriteFile(filepath.Join(repo, "api", "source"), []byte("second"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitAt(repo, "add", "api/source")
+	gitAt(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "local only")
+	if checkPublicationSource(context.Background(), build()) == nil {
+		t.Fatal("commit absent from upstream accepted")
+	}
+	gitAt(repo, "push", "-q")
+	if err := checkPublicationSource(context.Background(), build()); err != nil {
+		t.Fatalf("updated matching upstream rejected: %v", err)
+	}
+	gitAt(repo, "config", "branch.codex/isolated-hotfix.remote", ".")
+	if checkPublicationSource(context.Background(), build()) == nil {
+		t.Fatal("local-only upstream accepted")
+	}
+	gitAt(repo, "config", "branch.codex/isolated-hotfix.remote", "missing")
+	if checkPublicationSource(context.Background(), build()) == nil {
+		t.Fatal("unconfigured remote accepted")
+	}
+	gitAt(repo, "config", "branch.codex/isolated-hotfix.remote", "fixture")
+	gitAt(repo, "config", "branch.codex/isolated-hotfix.merge", "refs/heads/absent")
+	if checkPublicationSource(context.Background(), build()) == nil {
+		t.Fatal("absent remote branch accepted")
+	}
+	gitAt(repo, "config", "--add", "branch.codex/isolated-hotfix.merge", "refs/heads/codex/isolated-hotfix")
+	if checkPublicationSource(context.Background(), build()) == nil {
+		t.Fatal("ambiguous upstream accepted")
+	}
+}

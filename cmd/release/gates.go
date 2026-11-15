@@ -153,16 +153,41 @@ func checkPublicationSource(ctx context.Context, b buildRecord) error {
 	if err != nil || status != "" {
 		return errPublicationGate
 	}
-	remote, err := git("config", "--get", "branch.main.remote")
-	if err != nil || remote == "" {
+	// Publish the checked-out branch only when its configured upstream names a
+	// real remote branch whose advertised commit is exactly the built commit.
+	// A detached HEAD or a local-only upstream cannot establish provenance.
+	branchRef, err := git("symbolic-ref", "--quiet", "HEAD")
+	if err != nil || !strings.HasPrefix(branchRef, "refs/heads/") {
 		return errPublicationGate
 	}
-	ref, err := git("config", "--get", "branch.main.merge")
-	if err != nil || ref == "" {
+	branch := strings.TrimPrefix(branchRef, "refs/heads/")
+	remote, err := git("config", "--get-all", "branch."+branch+".remote")
+	if err != nil || len(strings.Fields(remote)) != 1 || remote == "." || strings.HasPrefix(remote, "-") {
 		return errPublicationGate
 	}
-	advertised, err := git("ls-remote", "--exit-code", remote, ref)
-	if err != nil || len(strings.Fields(advertised)) != 2 || strings.Fields(advertised)[0] != head {
+	remotes, err := git("remote")
+	if err != nil {
+		return errPublicationGate
+	}
+	foundRemote := false
+	for _, name := range strings.Fields(remotes) {
+		if name == remote {
+			foundRemote = true
+		}
+	}
+	if !foundRemote {
+		return errPublicationGate
+	}
+	ref, err := git("config", "--get-all", "branch."+branch+".merge")
+	if err != nil || len(strings.Fields(ref)) != 1 || !strings.HasPrefix(ref, "refs/heads/") {
+		return errPublicationGate
+	}
+	if _, err = git("check-ref-format", ref); err != nil {
+		return errPublicationGate
+	}
+	advertised, err := git("ls-remote", "--exit-code", "--refs", remote, ref)
+	fields := strings.Fields(advertised)
+	if err != nil || len(fields) != 2 || fields[0] != head || fields[1] != ref {
 		return errPublicationGate
 	}
 	return nil
